@@ -9,7 +9,6 @@ struct TerrainParams {
     morph_start_ratio:  f32,
     ring_patches:       f32,
     num_lod_levels:     f32,
-    patch_resolution:   f32,
     pad1:               f32,
     pad2:               f32,
     pad3:               f32,

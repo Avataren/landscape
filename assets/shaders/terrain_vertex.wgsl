@@ -26,7 +26,6 @@ struct TerrainParams {
     morph_start_ratio:  f32,
     ring_patches:       f32,
     num_lod_levels:     f32,   // active LOD count; used to clamp coarse index
-    patch_resolution:   f32,   // quads per patch edge
     pad1:               f32,
     pad2:               f32,
     pad3:               f32,
@@ -135,15 +134,13 @@ fn vertex(v: Vertex) -> TerrainVOut {
     let dist_from_center = max(vertex_delta.x, vertex_delta.y);  // Chebyshev
 
     let morph_start_ws = half_ring_ws * terrain.morph_start_ratio;
-    let morph_t = clamp(
+    let morph_alpha = clamp(
         (dist_from_center - morph_start_ws) / max(half_ring_ws - morph_start_ws, 0.001),
         0.0, 1.0,
     );
-    // C1-continuous blend reduces temporal sparkle on distant moving geometry.
-    let morph_alpha = morph_t * morph_t * (3.0 - 2.0 * morph_t);
 
     // Local-space grid snapping (positions run [0,1] with patch_resolution steps).
-    let fine_step   = 1.0 / max(terrain.patch_resolution, 1.0);
+    let fine_step   = 1.0 / terrain.base_patch_size;
     let coarse_step = fine_step * 2.0;
 
     let local_xz  = v.position.xz;
