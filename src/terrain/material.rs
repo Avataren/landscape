@@ -18,15 +18,14 @@ use bevy::{
 //   offset  8 – morph_start_ratio f32
 //   offset 12 – ring_patches      f32
 //   offset 16 – num_lod_levels    f32   (= clipmap_levels, used to clamp coarse index)
-//   offset 20 – patch_resolution  f32
-//   offset 24 – pad1              f32
-//   offset 28 – pad2              f32
-//   offset 32 – pad3              f32
-//   offset 48 – clip_levels[0]    vec4<f32>   (16-byte aligned ✓)
-//   offset 64 – clip_levels[1]    vec4<f32>
+//   offset 20 – pad1              f32
+//   offset 24 – pad2              f32
+//   offset 28 – pad3              f32
+//   offset 32 – clip_levels[0]    vec4<f32>   (16-byte aligned ✓)
+//   offset 48 – clip_levels[1]    vec4<f32>
 //   …
-//   offset160 – clip_levels[7]    vec4<f32>
-//   Total: 176 bytes
+//   offset144 – clip_levels[7]    vec4<f32>
+//   Total: 160 bytes
 //
 // Each clip_levels entry: (origin_x, origin_z, inv_ring_span, texel_world_size)
 // ---------------------------------------------------------------------------
@@ -44,8 +43,6 @@ pub struct TerrainMaterialUniforms {
     /// Number of active LOD levels (= clipmap_levels).  Used to clamp the coarse
     /// LOD index so we never read beyond the texture array bounds.
     pub num_lod_levels: f32,
-    /// Vertex resolution per patch edge (number of quads).
-    pub patch_resolution: f32,
     pub pad1: f32,
     pub pad2: f32,
     pub pad3: f32,
