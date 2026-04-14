@@ -1,7 +1,7 @@
 mod terrain;
 
 use bevy::{input::mouse::AccumulatedMouseMotion, prelude::*};
-use terrain::{components::TerrainCamera, TerrainDebugPlugin, TerrainPlugin};
+use terrain::{components::TerrainCamera, TerrainDebugPlugin, TerrainPlugin, TerrainSourceDesc};
 
 fn main() {
     App::new()
@@ -15,18 +15,24 @@ fn main() {
         }))
         .add_plugins(TerrainPlugin)
         .add_plugins(TerrainDebugPlugin)
+        // Point the tile streamer at the pre-baked tiles from `cargo run --bin bake_tiles`.
+        // Falls back to procedural generation if the directory does not exist.
+        .insert_resource(TerrainSourceDesc {
+            tile_root: Some(std::path::PathBuf::from("assets/tiles")),
+            ..default()
+        })
         .add_systems(Startup, setup_scene)
         .add_systems(Update, (camera_move, camera_look).chain())
         .run();
 }
 
 fn setup_scene(mut commands: Commands) {
-    // Height texture: ±512 world units from origin, max height ≈ 128 units.
-    // Start 300 units above origin and 300 units south, looking across the terrain.
+    // 16k heightmap: terrain spans ±8192 wu, max height 512 wu.
+    // Start high enough to see the terrain; fly down with Q/E to explore.
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(0.0, 300.0, -300.0)
-            .looking_at(Vec3::new(0.0, 64.0, 300.0), Vec3::Y),
+        Transform::from_xyz(0.0, 900.0, -1200.0)
+            .looking_at(Vec3::new(0.0, 150.0, 0.0), Vec3::Y),
         TerrainCamera,
     ));
 

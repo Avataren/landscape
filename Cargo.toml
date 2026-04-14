@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 bevy = { version = "0.18", features = ["dynamic_linking"] }
 bytemuck = { version = "1", features = ["derive"] }
+exr = "1"
 
 [profile.dev]
 opt-level = 1

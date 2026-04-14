@@ -14,6 +14,7 @@ pub mod streamer;
 pub mod world_desc;
 
 pub use debug::TerrainDebugPlugin;
+pub use world_desc::TerrainSourceDesc;
 
 use bevy::{camera::visibility::NoFrustumCulling, prelude::*};
 use clipmap_texture::{
@@ -28,7 +29,6 @@ use render::{TerrainRenderPlugin, extract::extract_terrain_frame};
 use residency::update_required_tiles;
 use resources::{TerrainResidency, TerrainStreamQueue, TerrainViewState};
 use streamer::{poll_tile_stream_jobs, request_tile_loads, setup_tile_channel};
-use world_desc::TerrainSourceDesc;
 use collision::{update_collision_tiles, TerrainCollisionCache};
 use clipmap::{build_patch_instances_for_view, PatchInstanceCpu};
 

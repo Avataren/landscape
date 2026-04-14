@@ -17,6 +17,10 @@ pub struct TerrainSourceDesc {
     pub world_max: Vec2,
     /// Maximum mip level available in the tile hierarchy.
     pub max_mip_level: u8,
+    /// Root directory of pre-baked tile files produced by `bake_tiles`.
+    /// Subdirectory layout: `height/L{n}/{tx}_{ty}.bin` (R16Unorm, 256×256 texels).
+    /// Falls back to procedural generation when `None` or when a tile file is missing.
+    pub tile_root: Option<std::path::PathBuf>,
 }
 
 impl TerrainSourceDesc {

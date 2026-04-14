@@ -23,26 +23,55 @@ pub fn spawn_background_height_job(
     key: TileKey,
     tile_size: u32,
     world_scale: f32,
+    tile_root: Option<std::path::PathBuf>,
     tx: Sender<HeightTileCpu>,
-    _desc: &TerrainSourceDesc,
 ) {
     std::thread::spawn(move || {
-        // World-space texel spacing at this LOD level.
-        let level_scale_ws = world_scale * (1u32 << (key.level as u32)) as f32;
-        let len = (tile_size * tile_size) as usize;
-        let mut data = Vec::with_capacity(len);
-
-        for row in 0..tile_size {
-            for col in 0..tile_size {
-                // Sample at texel centre, matching generate_clipmap_layer.
-                let world_x = ((key.x * tile_size as i32 + col as i32) as f32 + 0.5) * level_scale_ws;
-                let world_z = ((key.y * tile_size as i32 + row as i32) as f32 + 0.5) * level_scale_ws;
-                data.push(height_at_world(world_x, world_z));
-            }
-        }
+        // Try to load a pre-baked tile file first.
+        let data = tile_root
+            .as_ref()
+            .and_then(|root| {
+                let path = root.join(format!(
+                    "height/L{}/{}_{}.bin",
+                    key.level, key.x, key.y
+                ));
+                read_r16_tile(&path, tile_size)
+            })
+            .unwrap_or_else(|| {
+                // Procedural fallback when tiles are not baked yet.
+                let level_scale_ws = world_scale * (1u32 << (key.level as u32)) as f32;
+                let len = (tile_size * tile_size) as usize;
+                let mut pixels = Vec::with_capacity(len);
+                for row in 0..tile_size {
+                    for col in 0..tile_size {
+                        let world_x = ((key.x * tile_size as i32 + col as i32) as f32 + 0.5)
+                            * level_scale_ws;
+                        let world_z = ((key.y * tile_size as i32 + row as i32) as f32 + 0.5)
+                            * level_scale_ws;
+                        pixels.push(height_at_world(world_x, world_z));
+                    }
+                }
+                pixels
+            });
 
         let _ = tx.send(HeightTileCpu { key, data, tile_size });
     });
+}
+
+/// Reads a pre-baked R16Unorm tile from disk and converts to f32 in [0, 1].
+/// Returns `None` if the file does not exist or has an unexpected size.
+fn read_r16_tile(path: &std::path::Path, tile_size: u32) -> Option<Vec<f32>> {
+    let bytes = std::fs::read(path).ok()?;
+    let expected = (tile_size * tile_size * 2) as usize;
+    if bytes.len() != expected {
+        return None;
+    }
+    Some(
+        bytes
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]) as f32 / 65535.0)
+            .collect(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -76,7 +105,13 @@ pub fn request_tile_loads(
 
         queue.pending_requests.insert(key);
         residency.tiles.insert(key, TileState::Requested);
-        spawn_background_height_job(key, config.tile_size, config.world_scale, sender.0.clone(), &desc);
+        spawn_background_height_job(
+            key,
+            config.tile_size,
+            config.world_scale,
+            desc.tile_root.clone(),
+            sender.0.clone(),
+        );
     }
 }
 
