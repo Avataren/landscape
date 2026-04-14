@@ -2,21 +2,22 @@
 // Slope + altitude layer blending with simple directional lighting.
 // Self-contained: no external common imports.
 
+// Must match TerrainMaterialUniforms in material.rs exactly.
 struct TerrainParams {
-    height_scale:      f32,
-    world_size:        f32,
-    world_offset_x:    f32,
-    world_offset_z:    f32,
-    // New fields (declared to match vertex shader layout; unused in fragment stage)
-    ring_patches:      f32,
-    morph_start_ratio: f32,
-    patch_resolution:  f32,
-    pad0:              f32,
+    height_scale:       f32,
+    base_patch_size:    f32,
+    morph_start_ratio:  f32,
+    ring_patches:       f32,
+    pad0:               f32,
+    pad1:               f32,
+    pad2:               f32,
+    pad3:               f32,
+    clip_levels: array<vec4<f32>, 8>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var<uniform> terrain: TerrainParams;
 
-// Must match TerrainVOut in terrain_vertex.wgsl
+// Must match TerrainVOut in terrain_vertex.wgsl.
 struct TerrainVOut {
     @builtin(position) clip_pos:     vec4<f32>,
     @location(0)       world_pos:    vec4<f32>,
@@ -27,7 +28,7 @@ struct TerrainVOut {
 fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     let n      = normalize(in.world_normal);
     let up     = vec3<f32>(0.0, 1.0, 0.0);
-    let slope  = 1.0 - abs(dot(n, up));                        // 0=flat, 1=vertical
+    let slope  = 1.0 - abs(dot(n, up));                         // 0=flat, 1=vertical
     let h_norm = clamp(in.world_pos.y / terrain.height_scale, 0.0, 1.0);
 
     // --- Material layers ---

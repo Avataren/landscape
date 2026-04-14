@@ -33,7 +33,7 @@ impl Default for TerrainConfig {
             patch_resolution: 64,
             ring_patches: 8,
             tile_size: 256,
-            clipmap_resolution: 2048,
+            clipmap_resolution: 512,
             world_scale: 1.0,
             height_scale: 512.0,
             morph_start_ratio: 0.6,
