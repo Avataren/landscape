@@ -34,14 +34,20 @@ pub fn height_at_world(x: f32, z: f32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// Layer generation
+// Layer generation  (R16Unorm — 65 535 levels over height_scale)
 // ---------------------------------------------------------------------------
 
-/// Generates one R8Unorm layer for a clipmap level.
+/// Bytes per texel for our height texture format.
+const BYTES_PER_TEXEL: usize = 2; // R16Unorm
+
+/// Generates one R16Unorm layer for a clipmap level.
 ///
 /// The layer covers the square region centred on `center * level_scale` with
 /// a side length of `ring_patches * patch_resolution * level_scale` world units.
 /// `clipmap_resolution` texels span that side length.
+///
+/// R16Unorm gives ~0.008 m precision over a 512 m height range, eliminating
+/// the quantization-induced staircase normals that R8Unorm produces.
 pub fn generate_clipmap_layer(
     center: IVec2,
     level_scale_ws: f32,
@@ -54,14 +60,16 @@ pub fn generate_clipmap_layer(
     let origin_z  = center.y as f32 * level_scale_ws - ring_span * 0.5;
     let texel_ws  = ring_span / clipmap_resolution as f32;
 
-    let n = (clipmap_resolution * clipmap_resolution) as usize;
-    let mut data = Vec::with_capacity(n);
+    let texels = (clipmap_resolution * clipmap_resolution) as usize;
+    let mut data = Vec::with_capacity(texels * BYTES_PER_TEXEL);
 
     for row in 0..clipmap_resolution {
         for col in 0..clipmap_resolution {
             let wx = origin_x + (col as f32 + 0.5) * texel_ws;
             let wz = origin_z + (row as f32 + 0.5) * texel_ws;
-            data.push((height_at_world(wx, wz) * 255.0) as u8);
+            let h  = height_at_world(wx, wz);
+            let v  = (h * 65535.0) as u16;
+            data.extend_from_slice(&v.to_le_bytes());
         }
     }
 
@@ -72,14 +80,19 @@ pub fn generate_clipmap_layer(
 // Texture array creation
 // ---------------------------------------------------------------------------
 
+/// Bytes consumed by one full clipmap layer.
+fn bytes_per_layer(res: u32) -> usize {
+    (res * res) as usize * BYTES_PER_TEXEL
+}
+
 /// Builds the initial clipmap texture array with all levels generated at
 /// (0, 0) clip centres.  Every frame after startup `update_clipmap_textures`
 /// refines individual layers when clip centres change.
 pub fn create_initial_clipmap_texture(config: &TerrainConfig) -> Image {
     let res    = config.clipmap_resolution;
     let layers = config.clipmap_levels;
-    let bytes_per_layer = (res * res) as usize;
-    let mut data = vec![0u8; bytes_per_layer * layers as usize];
+    let bpl    = bytes_per_layer(res);
+    let mut data = vec![0u8; bpl * layers as usize];
 
     for level in 0..layers {
         let scale      = level_scale(config.world_scale, level);
@@ -87,8 +100,8 @@ pub fn create_initial_clipmap_texture(config: &TerrainConfig) -> Image {
             IVec2::ZERO, scale,
             config.ring_patches, config.patch_resolution, res,
         );
-        let offset = level as usize * bytes_per_layer;
-        data[offset..offset + bytes_per_layer].copy_from_slice(&layer_data);
+        let offset = level as usize * bpl;
+        data[offset..offset + bpl].copy_from_slice(&layer_data);
     }
 
     Image::new(
@@ -98,7 +111,7 @@ pub fn create_initial_clipmap_texture(config: &TerrainConfig) -> Image {
         },
         TextureDimension::D2,
         data,
-        TextureFormat::R8Unorm,
+        TextureFormat::R16Unorm,
         // Keep the CPU copy so `update_clipmap_textures` can patch layers.
         RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     )
@@ -177,9 +190,9 @@ pub fn update_clipmap_textures(
     let Some(mut state) = state else { return };
     if view.clip_centers.is_empty() { return; }
 
-    let res             = config.clipmap_resolution;
-    let bytes_per_layer = (res * res) as usize;
-    let levels          = config.clipmap_levels as usize;
+    let res    = config.clipmap_resolution;
+    let bpl    = bytes_per_layer(res);
+    let levels = config.clipmap_levels as usize;
 
     // Pad the cached list so index comparisons don't go out of bounds.
     while state.last_clip_centers.len() < levels {
@@ -208,9 +221,9 @@ pub fn update_clipmap_textures(
             config.ring_patches, config.patch_resolution, res,
         );
 
-        let offset = lod * bytes_per_layer;
+        let offset = lod * bpl;
         if let Some(ref mut data) = image.data {
-            if let Some(slice) = data.get_mut(offset..offset + bytes_per_layer) {
+            if let Some(slice) = data.get_mut(offset..offset + bpl) {
                 slice.copy_from_slice(&layer_data);
             }
         }

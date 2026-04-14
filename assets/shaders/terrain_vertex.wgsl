@@ -131,7 +131,12 @@ fn vertex(v: Vertex) -> TerrainVOut {
     let pos = vec3<f32>(world_xz.x, h, world_xz.y);
 
     // --- Normal via central differences (using the same blended sampling). ---
-    let eps = terrain.clip_levels[lod_level].w;   // one texel in world units at this LOD
+    // Blend eps by morph_alpha too: at the LOD boundary (alpha=1) this LOD uses
+    // eps_coarse, matching the adjacent coarser patch's eps_fine = eps_coarse.
+    // Without this the two sides compute different normals → shading seam.
+    let eps_fine   = terrain.clip_levels[lod_level].w;
+    let eps_coarse = terrain.clip_levels[coarse_lod].w;
+    let eps = mix(eps_fine, eps_coarse, morph_alpha);
     let h_r = blended_height(lod_level, coarse_lod, morph_alpha, world_xz + vec2<f32>(eps, 0.0));
     let h_u = blended_height(lod_level, coarse_lod, morph_alpha, world_xz + vec2<f32>(0.0, eps));
     let nrm = normalize(vec3<f32>(h - h_r, eps, h - h_u));

@@ -163,7 +163,7 @@ fn setup_terrain(
 
     info!(
         "[Terrain] Setup complete: {} patches across {} LOD levels. \
-         Clipmap {}×{}×{} (R8Unorm array).",
+         Clipmap {}×{}×{} (R16Unorm array).",
         patches.len(),
         config.clipmap_levels,
         config.clipmap_resolution,
