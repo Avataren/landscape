@@ -121,15 +121,10 @@ fn preload_terrain_startup(
     };
 
     let scale_0     = level_scale(config.world_scale, 0);
-    let raw_0       = snap_camera_to_level_grid(cam_pos.xz(), scale_0);
-    let align_shift = (config.clipmap_levels - 1) as i32;
-    let aligned_0   = IVec2::new(
-        (raw_0.x >> align_shift) << align_shift,
-        (raw_0.y >> align_shift) << align_shift,
-    );
+    let fine_center = snap_camera_to_level_grid(cam_pos.xz(), scale_0);
 
     let clip_centers: Vec<IVec2> = (0..config.clipmap_levels)
-        .map(|l| { let s = l as i32; IVec2::new(aligned_0.x >> s, aligned_0.y >> s) })
+        .map(|l| { let s = l as i32; IVec2::new(fine_center.x >> s, fine_center.y >> s) })
         .collect();
     let level_scales: Vec<f32> = (0..config.clipmap_levels)
         .map(|l| level_scale(config.world_scale, l))
@@ -262,6 +257,7 @@ fn setup_terrain(
             morph_start_ratio: config.morph_start_ratio,
             ring_patches:      config.ring_patches as f32,
             num_lod_levels:    config.clipmap_levels as f32,
+            patch_resolution:  config.patch_resolution as f32,
             pad1: 0.0, pad2: 0.0, pad3: 0.0,
             clip_levels: compute_initial_clip_levels(&config),
         },
@@ -340,31 +336,23 @@ pub fn update_terrain_view_state(
     view.clip_centers.clear();
     view.level_scales.clear();
 
-    // Compute an aligned level-0 center.
+    // Build a strictly nested center chain from finest to coarsest.
     //
-    // If each level snaps independently, level-0's center can be odd while
-    // level-1's center (in level-0 units) is even, creating a 1-grid-unit
-    // gap on one side and a 1-unit overlap on the other.  The gap appears as
-    // a flickering seam that shows up in half the compass directions and
-    // flickers as the camera crosses grid cells.
+    // Important: derive every coarser center from the finest center via
+    // integer right shifts. This preserves exact parent/child alignment while
+    // still letting each level move at its natural cadence:
+    // L0 every 1 texel, L1 every 2 texels, L2 every 4 texels, etc.
     //
-    // Fix: round level-0's grid coordinate DOWN to the nearest multiple of
-    // 2^(clipmap_levels-1), then derive every coarser center by right-shifting.
-    // This guarantees  center_L * scale_L == center_{L+1} * scale_{L+1}  for
-    // all L, so ring boundaries are always flush with no gaps or overlaps.
-    let scale_0   = level_scale(config.world_scale, 0);
-    let raw_0     = snap_camera_to_level_grid(cam_pos.xz(), scale_0);
-    let align_shift = (config.clipmap_levels - 1) as i32;
-    let aligned_0 = IVec2::new(
-        (raw_0.x >> align_shift) << align_shift,
-        (raw_0.y >> align_shift) << align_shift,
-    );
+    // This removes large multi-cell jumps on mid/far levels that create
+    // temporal shimmer and visible instability when moving the camera.
+    let scale_0    = level_scale(config.world_scale, 0);
+    let fine_center = snap_camera_to_level_grid(cam_pos.xz(), scale_0);
 
     for level in 0..config.clipmap_levels {
         let scale = level_scale(config.world_scale, level);
-        // Right-shift the aligned level-0 center to get each coarser center.
+        // Right-shift the finest center to get each coarser center.
         let shift  = level as i32;
-        let center = IVec2::new(aligned_0.x >> shift, aligned_0.y >> shift);
+        let center = IVec2::new(fine_center.x >> shift, fine_center.y >> shift);
         view.level_scales.push(scale);
         view.clip_centers.push(center);
     }
