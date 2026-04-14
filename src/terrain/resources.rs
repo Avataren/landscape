@@ -75,6 +75,9 @@ pub struct TerrainResidency {
     pub lru: VecDeque<TileKey>,
     /// Tiles that have been loaded to CPU and are waiting for GPU upload.
     pub pending_upload: Vec<HeightTileCpu>,
+    /// CPU pixel data kept alive after GPU upload so tiles can be re-applied
+    /// when the clipmap shifts to a new clip-center position.
+    pub resident_cpu: HashMap<TileKey, Vec<f32>>,
 }
 
 impl TerrainResidency {
@@ -96,6 +99,7 @@ impl TerrainResidency {
             if let Some(idx) = candidate {
                 let key = self.lru.remove(idx).unwrap();
                 self.tiles.remove(&key);
+                self.resident_cpu.remove(&key);
             } else {
                 break; // All cached tiles are required; cannot evict safely.
             }

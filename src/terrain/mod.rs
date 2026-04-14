@@ -134,7 +134,9 @@ fn setup_terrain(
     commands.insert_resource(TerrainClipmapState {
         texture_handle:    height_handle,
         material_handle:   mat_handle.clone(),
-        last_clip_centers: vec![IVec2::ZERO; config.clipmap_levels as usize],
+        last_clip_centers:  vec![IVec2::ZERO; config.clipmap_levels as usize],
+        // Sentinel forces a full tile re-apply on the first frame.
+        tile_apply_centers: vec![IVec2::new(i32::MAX, i32::MAX); config.clipmap_levels as usize],
     });
 
     // --- Patch mesh (shared by all entities) ---

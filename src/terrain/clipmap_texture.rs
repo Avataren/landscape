@@ -8,7 +8,7 @@ use crate::terrain::{
     config::TerrainConfig,
     math::level_scale,
     material::TerrainMaterial,
-    resources::{TerrainResidency, TerrainViewState, TileState},
+    resources::{TerrainResidency, TerrainViewState, TileKey, TileState},
 };
 
 // ---------------------------------------------------------------------------
@@ -168,8 +168,11 @@ pub fn compute_initial_clip_levels(config: &TerrainConfig) -> [Vec4; 8] {
 pub struct TerrainClipmapState {
     pub texture_handle:    Handle<Image>,
     pub material_handle:   Handle<TerrainMaterial>,
-    /// Clip centres from the last texture regeneration.
+    /// Clip centres from the last procedural texture regeneration.
     pub last_clip_centers: Vec<IVec2>,
+    /// Clip centres at which resident tiles were last written into the texture.
+    /// Sentinel IVec2::MAX on startup forces a full tile re-apply on the first frame.
+    pub tile_apply_centers: Vec<IVec2>,
 }
 
 // ---------------------------------------------------------------------------
@@ -245,52 +248,84 @@ pub fn update_clipmap_textures(
 // Tile upload system
 // ---------------------------------------------------------------------------
 
-/// Copies CPU-decoded tiles from `TerrainResidency::pending_upload` into the
-/// live clipmap texture array.
+/// Applies pre-baked height tiles to the live clipmap texture array.
 ///
-/// Each tile texel at grid position `(gx, gz)` maps to clipmap texel:
-///   col = gx - clip_center.x + clipmap_resolution / 2
-///   row = gz - clip_center.y + clipmap_resolution / 2
+/// **Why re-apply on every clip-center shift**: `update_clipmap_textures` runs
+/// first and regenerates entire layers from the procedural fallback whenever the
+/// clip center moves.  Without re-applying tile data afterwards the real EXR
+/// heights would be invisible — the procedural data would win every frame.
 ///
-/// Texels outside the current clipmap window are silently skipped; they will
-/// be covered when the tile is re-requested after the next clip-center shift.
-///
-/// Runs after `poll_tile_stream_jobs` so the list is fully populated.
+/// Strategy:
+///   1. Move any new tiles from `pending_upload` into `resident_cpu` (persistent
+///      CPU cache) and mark them `ResidentGpu`.
+///   2. If clip centers changed since the last tile write (or new tiles arrived),
+///      re-write every cached tile that falls inside the current clipmap window.
+///   3. Update `tile_apply_centers` so we skip the work on unchanged frames.
 pub fn apply_tiles_to_clipmap(
     config:    Res<TerrainConfig>,
     view:      Res<TerrainViewState>,
-    state:     Option<Res<TerrainClipmapState>>,
+    mut state:     Option<ResMut<TerrainClipmapState>>,
     mut images:    ResMut<Assets<Image>>,
     mut residency: ResMut<TerrainResidency>,
 ) {
-    if residency.pending_upload.is_empty() { return; }
-    let Some(state) = state else { return };
     if view.clip_centers.is_empty() { return; }
 
+    // --- Step 1: absorb newly loaded tiles into the persistent CPU cache --------
+    let new_tiles = std::mem::take(&mut residency.pending_upload);
+    let has_new   = !new_tiles.is_empty();
+    for tile in new_tiles {
+        residency.tiles.insert(tile.key, TileState::ResidentGpu { slot: 0 });
+        residency.resident_cpu.insert(tile.key, tile.data);
+    }
+
+    if residency.resident_cpu.is_empty() { return; }
+
+    let Some(ref mut state) = state else { return };
+
+    // Grow sentinel vec to match level count.
+    let levels = config.clipmap_levels as usize;
+    while state.tile_apply_centers.len() < levels {
+        state.tile_apply_centers.push(IVec2::new(i32::MAX, i32::MAX));
+    }
+
+    // --- Step 2: early-out when nothing changed ---------------------------------
+    let centers_changed = (0..levels).any(|i| {
+        view.clip_centers.get(i).copied().unwrap_or(IVec2::ZERO)
+            != state.tile_apply_centers[i]
+    });
+    if !has_new && !centers_changed { return; }
+
+    // --- Step 3: write tiles into the GPU texture ------------------------------
     let Some(image) = images.get_mut(&state.texture_handle) else { return };
     let Some(ref mut img_data) = image.data else { return };
 
     let res  = config.clipmap_resolution;
     let bpl  = bytes_per_layer(res);
     let half = (res / 2) as i32;
+    let ts   = config.tile_size;
 
-    let tiles = std::mem::take(&mut residency.pending_upload);
+    // Collect resident tiles into a Vec to avoid holding the HashMap borrow
+    // while mutating img_data (both live in TerrainResidency but img_data is
+    // from Assets<Image> — the compiler is happy; we just need a stable iter).
+    let tile_snapshot: Vec<(TileKey, &Vec<f32>)> = residency.resident_cpu.iter()
+        .map(|(k, v)| (*k, v))
+        .collect();
 
-    for tile in tiles {
-        let key   = tile.key;
+    for (key, tile_pixels) in &tile_snapshot {
         let level = key.level as usize;
+        if level >= levels { continue; }
 
         let clip_center = match view.clip_centers.get(level) {
             Some(&c) => c,
-            None     => { residency.tiles.insert(key, TileState::ResidentGpu { slot: 0 }); continue; }
+            None     => continue,
         };
 
         let layer_base = level * bpl;
 
-        for row in 0..tile.tile_size {
-            for col in 0..tile.tile_size {
-                let gx = key.x * tile.tile_size as i32 + col as i32;
-                let gz = key.y * tile.tile_size as i32 + row as i32;
+        for row in 0..ts {
+            for col in 0..ts {
+                let gx = key.x * ts as i32 + col as i32;
+                let gz = key.y * ts as i32 + row as i32;
 
                 let cx = gx - clip_center.x + half;
                 let cz = gz - clip_center.y + half;
@@ -299,18 +334,16 @@ pub fn apply_tiles_to_clipmap(
 
                 let texel_off = (cz as usize * res as usize + cx as usize) * BYTES_PER_TEXEL;
                 let dst       = layer_base + texel_off;
-
-                let h = tile.data[(row * tile.tile_size + col) as usize];
-                let v = (h * 65535.0) as u16;
+                let h         = tile_pixels[(row * ts + col) as usize];
+                let v         = (h * 65535.0) as u16;
 
                 if dst + BYTES_PER_TEXEL <= img_data.len() {
                     img_data[dst..dst + BYTES_PER_TEXEL].copy_from_slice(&v.to_le_bytes());
                 }
             }
         }
-
-        residency.tiles.insert(key, TileState::ResidentGpu { slot: 0 });
     }
 
+    state.tile_apply_centers = view.clip_centers.clone();
     residency.evict_to_budget(config.max_resident_tiles);
 }
