@@ -17,7 +17,7 @@ pub use debug::TerrainDebugPlugin;
 
 use bevy::{camera::visibility::NoFrustumCulling, prelude::*};
 use clipmap_texture::{
-    TerrainClipmapState, compute_initial_clip_levels,
+    TerrainClipmapState, apply_tiles_to_clipmap, compute_initial_clip_levels,
     create_initial_clipmap_texture, update_clipmap_textures,
 };
 use components::TerrainCamera;
@@ -78,8 +78,15 @@ impl Plugin for TerrainPlugin {
                     update_collision_tiles,
                     extract_terrain_frame,
                     update_patch_transforms,     // Phase 1: live patch repositioning
-                    update_clipmap_textures,     // Phase 5: live clipmap texture update
+                    update_clipmap_textures,     // Phase 5: procedural clipmap refresh
                 )
+                    .after(update_terrain_view_state),
+            )
+            .add_systems(
+                Update,
+                apply_tiles_to_clipmap          // Phase 5: tile-based GPU upload
+                    .after(poll_tile_stream_jobs)
+                    .after(update_clipmap_textures)
                     .after(update_terrain_view_state),
             )
             // Render sub-plugin

@@ -8,7 +8,7 @@ use crate::terrain::{
     config::TerrainConfig,
     math::level_scale,
     material::TerrainMaterial,
-    resources::TerrainViewState,
+    resources::{TerrainResidency, TerrainViewState, TileState},
 };
 
 // ---------------------------------------------------------------------------
@@ -239,4 +239,78 @@ pub fn update_clipmap_textures(
     }
 
     state.last_clip_centers = view.clip_centers.clone();
+}
+
+// ---------------------------------------------------------------------------
+// Tile upload system
+// ---------------------------------------------------------------------------
+
+/// Copies CPU-decoded tiles from `TerrainResidency::pending_upload` into the
+/// live clipmap texture array.
+///
+/// Each tile texel at grid position `(gx, gz)` maps to clipmap texel:
+///   col = gx - clip_center.x + clipmap_resolution / 2
+///   row = gz - clip_center.y + clipmap_resolution / 2
+///
+/// Texels outside the current clipmap window are silently skipped; they will
+/// be covered when the tile is re-requested after the next clip-center shift.
+///
+/// Runs after `poll_tile_stream_jobs` so the list is fully populated.
+pub fn apply_tiles_to_clipmap(
+    config:    Res<TerrainConfig>,
+    view:      Res<TerrainViewState>,
+    state:     Option<Res<TerrainClipmapState>>,
+    mut images:    ResMut<Assets<Image>>,
+    mut residency: ResMut<TerrainResidency>,
+) {
+    if residency.pending_upload.is_empty() { return; }
+    let Some(state) = state else { return };
+    if view.clip_centers.is_empty() { return; }
+
+    let Some(image) = images.get_mut(&state.texture_handle) else { return };
+    let Some(ref mut img_data) = image.data else { return };
+
+    let res  = config.clipmap_resolution;
+    let bpl  = bytes_per_layer(res);
+    let half = (res / 2) as i32;
+
+    let tiles = std::mem::take(&mut residency.pending_upload);
+
+    for tile in tiles {
+        let key   = tile.key;
+        let level = key.level as usize;
+
+        let clip_center = match view.clip_centers.get(level) {
+            Some(&c) => c,
+            None     => { residency.tiles.insert(key, TileState::ResidentGpu { slot: 0 }); continue; }
+        };
+
+        let layer_base = level * bpl;
+
+        for row in 0..tile.tile_size {
+            for col in 0..tile.tile_size {
+                let gx = key.x * tile.tile_size as i32 + col as i32;
+                let gz = key.y * tile.tile_size as i32 + row as i32;
+
+                let cx = gx - clip_center.x + half;
+                let cz = gz - clip_center.y + half;
+
+                if cx < 0 || cx >= res as i32 || cz < 0 || cz >= res as i32 { continue; }
+
+                let texel_off = (cz as usize * res as usize + cx as usize) * BYTES_PER_TEXEL;
+                let dst       = layer_base + texel_off;
+
+                let h = tile.data[(row * tile.tile_size + col) as usize];
+                let v = (h * 65535.0) as u16;
+
+                if dst + BYTES_PER_TEXEL <= img_data.len() {
+                    img_data[dst..dst + BYTES_PER_TEXEL].copy_from_slice(&v.to_le_bytes());
+                }
+            }
+        }
+
+        residency.tiles.insert(key, TileState::ResidentGpu { slot: 0 });
+    }
+
+    residency.evict_to_budget(config.max_resident_tiles);
 }

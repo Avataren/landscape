@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use std::sync::{Arc, Mutex, mpsc::{self, Sender}};
 use crate::terrain::{
+    clipmap_texture::height_at_world,
     resources::{HeightTileCpu, TerrainResidency, TerrainStreamQueue, TileKey, TileState},
     world_desc::TerrainSourceDesc,
 };
@@ -21,22 +22,24 @@ pub struct TerrainTileReceiver(pub Arc<Mutex<std::sync::mpsc::Receiver<HeightTil
 pub fn spawn_background_height_job(
     key: TileKey,
     tile_size: u32,
+    world_scale: f32,
     tx: Sender<HeightTileCpu>,
     _desc: &TerrainSourceDesc,
 ) {
     std::thread::spawn(move || {
-        // TODO: replace this stub with real file IO + decoding.
+        // World-space texel spacing at this LOD level.
+        let level_scale_ws = world_scale * (1u32 << (key.level as u32)) as f32;
         let len = (tile_size * tile_size) as usize;
-        let data: Vec<f32> = (0..len)
-            .map(|i| {
-                let tx = (i % tile_size as usize) as f32 / tile_size as f32;
-                let ty = (i / tile_size as usize) as f32 / tile_size as f32;
-                // Simple procedural hills for testing.
-                let fx = tx * std::f32::consts::TAU * 2.0 + key.x as f32;
-                let fy = ty * std::f32::consts::TAU * 2.0 + key.y as f32;
-                (fx.sin() * fy.cos() * 0.5 + 0.5).clamp(0.0, 1.0)
-            })
-            .collect();
+        let mut data = Vec::with_capacity(len);
+
+        for row in 0..tile_size {
+            for col in 0..tile_size {
+                // Sample at texel centre, matching generate_clipmap_layer.
+                let world_x = ((key.x * tile_size as i32 + col as i32) as f32 + 0.5) * level_scale_ws;
+                let world_z = ((key.y * tile_size as i32 + row as i32) as f32 + 0.5) * level_scale_ws;
+                data.push(height_at_world(world_x, world_z));
+            }
+        }
 
         let _ = tx.send(HeightTileCpu { key, data, tile_size });
     });
@@ -73,7 +76,7 @@ pub fn request_tile_loads(
 
         queue.pending_requests.insert(key);
         residency.tiles.insert(key, TileState::Requested);
-        spawn_background_height_job(key, config.tile_size, sender.0.clone(), &desc);
+        spawn_background_height_job(key, config.tile_size, config.world_scale, sender.0.clone(), &desc);
     }
 }
 
