@@ -26,9 +26,8 @@ struct TerrainParams {
     ring_patches:       f32,
     num_lod_levels:     f32,   // active LOD count; used to clamp coarse index
     patch_resolution:   f32,   // quads per patch edge
-    pad1:               f32,
-    pad2:               f32,
-    pad3:               f32,
+    world_bounds:       vec4<f32>, // (min_x, min_z, max_x, max_z)
+    bounds_fade:        vec4<f32>, // x = fade distance beyond the footprint
     clip_levels: array<vec4<f32>, 8>,
 }
 
@@ -50,15 +49,24 @@ struct TerrainVOut {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Sample height from the given LOD level's clipmap layer.
-///
-/// Toroidal UV: UV = fract(xz * inv_ring_span).
-/// The UV for any world position is constant regardless of where the clip center
-/// is.  When the center shifts, only newly-exposed strips are rewritten in the
-/// texture; existing texels keep their data.  This eliminates the per-shift
-/// 1-texel UV jump that caused geometric shimmering on far LODs.
+fn bounds_fade_at(xz: vec2<f32>) -> f32 {
+    let fade_dist = max(terrain.bounds_fade.x, 1.0);
+    let world_min = terrain.world_bounds.xy;
+    let world_max = terrain.world_bounds.zw;
+    let edge_dist = min(
+        min(xz.x - world_min.x, world_max.x - xz.x),
+        min(xz.y - world_min.y, world_max.y - xz.y),
+    );
+    return smoothstep(0.0, fade_dist, edge_dist);
+}
+
+/// Sample height from the given LOD level's clipmap layer and fade it out once
+/// the world position leaves the baked dataset footprint.
 fn height_at(lod: u32, xz: vec2<f32>) -> f32 {
     let lvl = terrain.clip_levels[lod];
+    let world_min = terrain.world_bounds.xy;
+    let world_max = terrain.world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
+    let sample_xz = clamp(xz, world_min, world_max);
     // lvl.z = 1 / ring_span,  lvl.w = texel_world_size (scale_L)
     //
     // Shift by +0.5 texels before computing UV so that integer world-space
@@ -73,9 +81,10 @@ fn height_at(lod: u32, xz: vec2<f32>) -> f32 {
     // With the half-texel offset every sample point is at (n + 0.5) / N which
     // sits squarely inside texel n; the seam at UV = 0.5 can only be reached by
     // a non-integer n + 0.5 = N/2, impossible for integer n.
-    let uv = fract((xz + 0.5 * lvl.w) * lvl.z);
-    return textureSampleLevel(height_tex, height_samp, uv, i32(lod), 0.0).r
-           * terrain.height_scale;
+    let uv = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
+    let sampled_height = textureSampleLevel(height_tex, height_samp, uv, i32(lod), 0.0).r
+        * terrain.height_scale;
+    return sampled_height * bounds_fade_at(xz);
 }
 
 /// Blend height between fine (lod) and coarse (lod+1) levels by morph_alpha.

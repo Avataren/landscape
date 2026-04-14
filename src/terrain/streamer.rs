@@ -132,7 +132,7 @@ fn grid_bounds_for_level(
     })
 }
 
-fn build_clamped_tile<F>(
+fn build_bounded_tile<F>(
     key: TileKey,
     tile_size: u32,
     bounds: GridBounds,
@@ -151,21 +151,21 @@ where
     }
 
     let tile_size_i32 = tile_size as i32;
-    let mut out = Vec::with_capacity((tile_size * tile_size) as usize);
+    let mut out = vec![0.0f32; (tile_size * tile_size) as usize];
     let mut cache: HashMap<TileKey, Vec<f32>> = HashMap::new();
 
     for row in 0..tile_size {
         for col in 0..tile_size {
             let gx = key.x * tile_size_i32 + col as i32;
             let gz = key.y * tile_size_i32 + row as i32;
-            let clamped = IVec2::new(
-                gx.clamp(bounds.min.x, bounds.max.x),
-                gz.clamp(bounds.min.y, bounds.max.y),
-            );
+            if gx < bounds.min.x || gx > bounds.max.x || gz < bounds.min.y || gz > bounds.max.y {
+                continue;
+            }
+
             let src_key = TileKey {
                 level: key.level,
-                x: clamped.x.div_euclid(tile_size_i32),
-                y: clamped.y.div_euclid(tile_size_i32),
+                x: gx.div_euclid(tile_size_i32),
+                y: gz.div_euclid(tile_size_i32),
             };
 
             if !cache.contains_key(&src_key) {
@@ -173,9 +173,9 @@ where
             }
 
             let src_tile = cache.get(&src_key)?;
-            let local_x = clamped.x.rem_euclid(tile_size_i32) as usize;
-            let local_y = clamped.y.rem_euclid(tile_size_i32) as usize;
-            out.push(src_tile[local_y * tile_size as usize + local_x]);
+            let local_x = gx.rem_euclid(tile_size_i32) as usize;
+            let local_y = gz.rem_euclid(tile_size_i32) as usize;
+            out[(row * tile_size + col) as usize] = src_tile[local_y * tile_size as usize + local_x];
         }
     }
 
@@ -189,7 +189,7 @@ fn load_disk_tile(
     bounds: Option<GridBounds>,
 ) -> Option<Vec<f32>> {
     match bounds {
-        Some(bounds) => build_clamped_tile(key, tile_size, bounds, |src_key| {
+        Some(bounds) => build_bounded_tile(key, tile_size, bounds, |src_key| {
             read_r16_tile(&tile_path(root, src_key), tile_size)
         }),
         None => read_r16_tile(&tile_path(root, key), tile_size),
@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn out_of_bounds_tiles_clamp_to_edge_texels() {
+    fn out_of_bounds_pixels_zero_fill() {
         let mut source_tiles = HashMap::new();
         source_tiles.insert(
             TileKey {
@@ -320,7 +320,7 @@ mod tests {
             max: IVec2::ONE,
         };
 
-        let tile = build_clamped_tile(
+        let tile = build_bounded_tile(
             TileKey {
                 level: 0,
                 x: 1,
@@ -332,6 +332,6 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(tile, vec![2.0, 2.0, 4.0, 4.0]);
+        assert_eq!(tile, vec![0.0, 0.0, 0.0, 0.0]);
     }
 }

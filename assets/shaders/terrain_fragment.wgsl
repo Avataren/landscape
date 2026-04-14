@@ -10,9 +10,8 @@ struct TerrainParams {
     ring_patches:       f32,
     num_lod_levels:     f32,
     patch_resolution:   f32,
-    pad1:               f32,
-    pad2:               f32,
-    pad3:               f32,
+    world_bounds:       vec4<f32>,
+    bounds_fade:        vec4<f32>,
     clip_levels: array<vec4<f32>, 8>,
 }
 

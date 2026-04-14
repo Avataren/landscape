@@ -19,14 +19,13 @@ use bevy::{
 //   offset 12 – ring_patches      f32
 //   offset 16 – num_lod_levels    f32   (= clipmap_levels, used to clamp coarse index)
 //   offset 20 – patch_resolution  f32
-//   offset 24 – pad1              f32
-//   offset 28 – pad2              f32
-//   offset 32 – pad3              f32
-//   offset 48 – clip_levels[0]    vec4<f32>   (16-byte aligned ✓)
-//   offset 64 – clip_levels[1]    vec4<f32>
+//   offset 24 – world_bounds      vec4<f32>   (min_x, min_z, max_x, max_z)
+//   offset 40 – bounds_fade       vec4<f32>   (fade_distance, unused, unused, unused)
+//   offset 56 – clip_levels[0]    vec4<f32>
+//   offset 72 – clip_levels[1]    vec4<f32>
 //   …
-//   offset160 – clip_levels[7]    vec4<f32>
-//   Total: 176 bytes
+//   offset168 – clip_levels[7]    vec4<f32>
+//   Total: 184 bytes
 //
 // Each clip_levels entry: (origin_x, origin_z, inv_ring_span, texel_world_size)
 // ---------------------------------------------------------------------------
@@ -46,9 +45,10 @@ pub struct TerrainMaterialUniforms {
     pub num_lod_levels: f32,
     /// Vertex resolution per patch edge (number of quads).
     pub patch_resolution: f32,
-    pub pad1: f32,
-    pub pad2: f32,
-    pub pad3: f32,
+    /// Terrain footprint in world space: (min_x, min_z, max_x, max_z).
+    pub world_bounds: Vec4,
+    /// Bounds fade params: x = fade distance beyond the footprint.
+    pub bounds_fade: Vec4,
     /// Per-LOD clipmap data: (origin_x, origin_z, inv_ring_span, texel_world_size).
     /// Indexed by LOD level (0 = finest).  Unused entries are zero.
     pub clip_levels: [Vec4; 8],

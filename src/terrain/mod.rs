@@ -260,6 +260,7 @@ fn preload_terrain_startup(
 /// Spawns patch entities and creates the initial clipmap texture array.
 fn setup_terrain(
     config: Res<TerrainConfig>,
+    desc: Res<TerrainSourceDesc>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
     mut images: ResMut<Assets<Image>>,
@@ -273,6 +274,7 @@ fn setup_terrain(
     let height_handle = images.add(height_image);
 
     let base_patch_size = config.patch_resolution as f32 * config.world_scale;
+    let bounds_fade_distance = config.tile_size as f32 * config.world_scale * 4.0;
 
     let mat_handle = terrain_materials.add(TerrainMaterial {
         height_texture: height_handle.clone(),
@@ -283,9 +285,8 @@ fn setup_terrain(
             ring_patches: config.ring_patches as f32,
             num_lod_levels: config.clipmap_levels as f32,
             patch_resolution: config.patch_resolution as f32,
-            pad1: 0.0,
-            pad2: 0.0,
-            pad3: 0.0,
+            world_bounds: Vec4::new(desc.world_min.x, desc.world_min.y, desc.world_max.x, desc.world_max.y),
+            bounds_fade: Vec4::new(bounds_fade_distance, 0.0, 0.0, 0.0),
             clip_levels: compute_initial_clip_levels(&config),
         },
     });
