@@ -80,6 +80,9 @@ pub struct TerrainResidency {
     /// CPU pixel data kept alive after GPU upload so tiles can be re-applied
     /// when the clipmap shifts to a new clip-center position.
     pub resident_cpu: HashMap<TileKey, Vec<f32>>,
+    /// Set when eviction removed cached CPU height data and clipmap layers must
+    /// be rebuilt from fallback before resident tiles are re-applied.
+    pub clipmap_needs_rebuild: bool,
 }
 
 impl TerrainResidency {
@@ -93,15 +96,14 @@ impl TerrainResidency {
     pub fn evict_to_budget(&mut self, budget: usize) {
         while self.tiles.len() > budget {
             // Evict from the front of LRU that are not currently required.
-            let candidate = self
-                .lru
-                .iter()
-                .position(|k| !self.required_now.contains(k));
+            let candidate = self.lru.iter().position(|k| !self.required_now.contains(k));
 
             if let Some(idx) = candidate {
                 let key = self.lru.remove(idx).unwrap();
                 self.tiles.remove(&key);
-                self.resident_cpu.remove(&key);
+                if self.resident_cpu.remove(&key).is_some() {
+                    self.clipmap_needs_rebuild = true;
+                }
             } else {
                 break; // All cached tiles are required; cannot evict safely.
             }

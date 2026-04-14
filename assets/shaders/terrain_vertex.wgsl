@@ -11,7 +11,6 @@
     mesh_functions::get_world_from_local,
     view_transformations::position_world_to_clip,
     forward_io::Vertex,
-    mesh_view_bindings::view,
 }
 
 // ---------------------------------------------------------------------------
@@ -139,20 +138,23 @@ fn vertex(v: Vertex) -> TerrainVOut {
         (dist_from_center - morph_start_ws) / max(half_ring_ws - morph_start_ws, 0.001),
         0.0, 1.0,
     );
-    // Continuous camera-distance morph damps temporal popping in the distance.
-    let cam_xz = view.world_position.xyz.xz;
-    let cam_dist_ws = distance(world_xz_orig, cam_xz);
-    let camera_t = clamp(
-        (cam_dist_ws - morph_start_ws) / max(half_ring_ws - morph_start_ws, 0.001),
-        0.0, 1.0,
+    // Keep morphing strictly boundary-driven so each LOD uses its own data
+    // through the interior of the ring. Camera-distance morphing can force
+    // far rings to sample much coarser levels too early, which shows distant
+    // "ghost" silhouettes when intermediate levels are still flat/unloaded.
+    let boundary_alpha = boundary_t * boundary_t * (3.0 - 2.0 * boundary_t);
+
+    // Boundary lock: force alpha = 1.0 for vertices that are on the outermost
+    // edge (within half a fine texel). This guarantees exact coarse-grid snap
+    // on the stitch edge and prevents occasional sub-texel cracks.
+    let boundary_dist_ws = half_ring_ws - dist_from_center;
+    let boundary_lock = select(
+        0.0,
+        1.0,
+        boundary_dist_ws <= (0.5 * terrain.clip_levels[lod_level].w + 1e-4),
     );
 
-    // Smooth both factors and combine:
-    // - camera alpha gives temporal continuity
-    // - boundary alpha floor guarantees stitching at the ring edge
-    let boundary_alpha = boundary_t * boundary_t * (3.0 - 2.0 * boundary_t);
-    let camera_alpha   = camera_t * camera_t * (3.0 - 2.0 * camera_t);
-    let morph_alpha    = max(camera_alpha, boundary_alpha);
+    let morph_alpha = max(boundary_alpha, boundary_lock);
 
     // Snap in world space to the globally anchored 2x coarser grid.
     let fine_step_ws    = terrain.clip_levels[lod_level].w;

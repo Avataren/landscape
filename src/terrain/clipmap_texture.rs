@@ -423,8 +423,6 @@ pub fn apply_tiles_to_clipmap(
         residency.resident_cpu.insert(tile.key, tile.data);
     }
 
-    if residency.resident_cpu.is_empty() { return; }
-
     let Some(ref mut state) = state else { return };
 
     // Grow sentinel vec to match level count.
@@ -438,7 +436,8 @@ pub fn apply_tiles_to_clipmap(
         view.clip_centers.get(i).copied().unwrap_or(IVec2::ZERO)
             != state.tile_apply_centers[i]
     });
-    if !has_new && !centers_changed { return; }
+    let needs_rebuild = residency.clipmap_needs_rebuild;
+    if !has_new && !centers_changed && !needs_rebuild { return; }
 
     // --- Step 3: write tiles into the GPU texture ------------------------------
     let Some(image) = images.get_mut(&state.texture_handle) else { return };
@@ -448,6 +447,29 @@ pub fn apply_tiles_to_clipmap(
     let bpl  = bytes_per_layer(res);
     let half = (res / 2) as i32;
     let ts   = config.tile_size;
+
+    // If eviction removed cached tiles, stale texels can remain in the clipmap.
+    // Rebuild each layer from fallback once, then re-apply resident tiles.
+    if needs_rebuild {
+        for lod in 0..levels {
+            let center = view.clip_centers.get(lod).copied().unwrap_or(IVec2::ZERO);
+            let scale = view.level_scales.get(lod).copied()
+                .unwrap_or_else(|| level_scale(config.world_scale, lod as u32));
+            let layer_offset = lod * bpl;
+            let full = generate_clipmap_layer(
+                center,
+                scale,
+                config.ring_patches,
+                config.patch_resolution,
+                res,
+                config.procedural_fallback,
+            );
+            if let Some(slice) = img_data.get_mut(layer_offset..layer_offset + bpl) {
+                slice.copy_from_slice(&full);
+            }
+        }
+        residency.clipmap_needs_rebuild = false;
+    }
 
     // Collect resident tiles into a Vec to avoid holding the HashMap borrow
     // while mutating img_data (both live in TerrainResidency but img_data is
