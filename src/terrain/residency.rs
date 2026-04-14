@@ -14,7 +14,7 @@ pub fn update_required_tiles(
 ) {
     residency.required_now.clear();
 
-    for level in 0..config.clipmap_levels {
+    for level in 0..config.active_clipmap_levels() {
         let scale = match view.level_scales.get(level as usize) {
             Some(&s) => s,
             None => level_scale(config.world_scale, level),

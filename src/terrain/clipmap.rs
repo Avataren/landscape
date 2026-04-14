@@ -43,7 +43,7 @@ pub fn build_patch_instances_for_view(
 ) -> Vec<PatchInstanceCpu> {
     let mut out = Vec::new();
 
-    for level in 0..config.clipmap_levels {
+    for level in 0..config.active_clipmap_levels() {
         let lvl_scale = match view.level_scales.get(level as usize) {
             Some(&s) => s,
             None => level_scale(config.world_scale, level),
@@ -96,7 +96,7 @@ mod tests {
     fn make_view(config: &TerrainConfig, cam: Vec3) -> TerrainViewState {
         let mut view = TerrainViewState::default();
         view.camera_pos_ws = cam;
-        for level in 0..config.clipmap_levels {
+        for level in 0..config.active_clipmap_levels() {
             let scale = level_scale(config.world_scale, level);
             view.level_scales.push(scale);
             view.clip_centers
@@ -140,9 +140,12 @@ mod tests {
         let view = make_view(&config, Vec3::ZERO);
         let patches = build_patch_instances_for_view(&config, &view);
 
-        // Level 1 has inner hole: full=64, hole=16, expected=48
+        // Level 1 has an inner hole that removes the central quarter of patches.
         let count_l1 = patches.iter().filter(|p| p.lod_level == 1).count();
-        assert_eq!(count_l1, 48);
+        let full = config.ring_patches * config.ring_patches;
+        let hole_edge = config.ring_patches / 2;
+        let hole = hole_edge * hole_edge;
+        assert_eq!(count_l1 as u32, full - hole);
     }
 
     #[test]
@@ -151,7 +154,7 @@ mod tests {
         let view = make_view(&config, Vec3::ZERO);
         let patches = build_patch_instances_for_view(&config, &view);
 
-        for level in 1..config.clipmap_levels {
+        for level in 1..config.active_clipmap_levels() {
             let prev_size = patches
                 .iter()
                 .find(|p| p.lod_level == level - 1)

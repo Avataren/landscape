@@ -106,7 +106,7 @@ pub fn log_terrain_stats(
         return;
     }
 
-    let patch_count: usize = (0..config.clipmap_levels as usize)
+    let patch_count: usize = (0..config.active_clipmap_levels() as usize)
         .map(|level| {
             let has_hole = level > 0;
             let full = config.ring_patches * config.ring_patches;

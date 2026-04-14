@@ -26,17 +26,36 @@ pub(crate) fn load_tile_data(
     key: TileKey,
     tile_size: u32,
     world_scale: f32,
+    max_mip_level: u8,
     tile_root: Option<&std::path::Path>,
     world_bounds: Option<(Vec2, Vec2)>,
     use_procedural: bool,
 ) -> Vec<f32> {
     let level_scale_ws = world_scale * (1u32 << (key.level as u32)) as f32;
+    // Geometry can use more clipmap levels than the baked tile hierarchy.
+    // Reuse the coarsest available mip for those far rings instead of treating
+    // them as missing data, which makes terrain appear to rise from a flat floor
+    // as regions move inward.
+    let source_level = key.level.min(max_mip_level);
+    let source_scale_ws = world_scale * (1u32 << (source_level as u32)) as f32;
     tile_root
         .and_then(|root| {
             let bounds = world_bounds.and_then(|(world_min, world_max)| {
-                grid_bounds_for_level(world_min, world_max, level_scale_ws)
+                grid_bounds_for_level(world_min, world_max, source_scale_ws)
             });
-            load_disk_tile(root, key, tile_size, bounds)
+            if source_level == key.level {
+                load_disk_tile(root, key, tile_size, bounds)
+            } else {
+                build_resampled_tile(
+                    key,
+                    tile_size,
+                    level_scale_ws,
+                    source_level,
+                    source_scale_ws,
+                    bounds,
+                    |src_key| read_r16_tile(&tile_path(root, src_key), tile_size),
+                )
+            }
         })
         .unwrap_or_else(|| {
             let len = (tile_size * tile_size) as usize;
@@ -63,6 +82,7 @@ pub fn spawn_background_height_job(
     key: TileKey,
     tile_size: u32,
     world_scale: f32,
+    max_mip_level: u8,
     tile_root: Option<std::path::PathBuf>,
     world_bounds: Option<(Vec2, Vec2)>,
     use_procedural: bool,
@@ -73,6 +93,7 @@ pub fn spawn_background_height_job(
             key,
             tile_size,
             world_scale,
+            max_mip_level,
             tile_root.as_deref(),
             world_bounds,
             use_procedural,
@@ -182,6 +203,59 @@ where
     Some(out)
 }
 
+fn build_resampled_tile<F>(
+    key: TileKey,
+    tile_size: u32,
+    requested_scale_ws: f32,
+    source_level: u8,
+    source_scale_ws: f32,
+    source_bounds: Option<GridBounds>,
+    mut fetch_tile: F,
+) -> Option<Vec<f32>>
+where
+    F: FnMut(TileKey) -> Option<Vec<f32>>,
+{
+    let tile_size_i32 = tile_size as i32;
+    let mut out = vec![0.0f32; (tile_size * tile_size) as usize];
+    let mut cache: HashMap<TileKey, Vec<f32>> = HashMap::new();
+
+    for row in 0..tile_size {
+        for col in 0..tile_size {
+            let world_x =
+                ((key.x * tile_size_i32 + col as i32) as f32 + 0.5) * requested_scale_ws;
+            let world_z =
+                ((key.y * tile_size_i32 + row as i32) as f32 + 0.5) * requested_scale_ws;
+
+            let gx = (world_x / source_scale_ws).floor() as i32;
+            let gz = (world_z / source_scale_ws).floor() as i32;
+
+            if let Some(bounds) = source_bounds {
+                if gx < bounds.min.x || gx > bounds.max.x || gz < bounds.min.y || gz > bounds.max.y
+                {
+                    continue;
+                }
+            }
+
+            let src_key = TileKey {
+                level: source_level,
+                x: gx.div_euclid(tile_size_i32),
+                y: gz.div_euclid(tile_size_i32),
+            };
+
+            if !cache.contains_key(&src_key) {
+                cache.insert(src_key, fetch_tile(src_key)?);
+            }
+
+            let src_tile = cache.get(&src_key)?;
+            let local_x = gx.rem_euclid(tile_size_i32) as usize;
+            let local_y = gz.rem_euclid(tile_size_i32) as usize;
+            out[(row * tile_size + col) as usize] = src_tile[local_y * tile_size as usize + local_x];
+        }
+    }
+
+    Some(out)
+}
+
 fn load_disk_tile(
     root: &std::path::Path,
     key: TileKey,
@@ -248,6 +322,7 @@ pub fn request_tile_loads(
             key,
             config.tile_size,
             config.world_scale,
+            desc.max_mip_level,
             desc.tile_root.clone(),
             Some((desc.world_min, desc.world_max)),
             config.procedural_fallback,
@@ -333,5 +408,27 @@ mod tests {
         .unwrap();
 
         assert_eq!(tile, vec![0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn resamples_from_coarsest_available_mip() {
+        let mut source_tiles = HashMap::new();
+        source_tiles.insert(TileKey { level: 0, x: 0, y: 0 }, vec![1.0, 2.0, 3.0, 4.0]);
+        source_tiles.insert(TileKey { level: 0, x: 1, y: 0 }, vec![5.0, 6.0, 7.0, 8.0]);
+        source_tiles.insert(TileKey { level: 0, x: 0, y: 1 }, vec![9.0, 10.0, 11.0, 12.0]);
+        source_tiles.insert(TileKey { level: 0, x: 1, y: 1 }, vec![13.0, 14.0, 15.0, 16.0]);
+
+        let tile = build_resampled_tile(
+            TileKey { level: 1, x: 0, y: 0 },
+            2,
+            2.0,
+            0,
+            1.0,
+            None,
+            |src_key| source_tiles.get(&src_key).cloned(),
+        )
+        .unwrap();
+
+        assert_eq!(tile, vec![4.0, 8.0, 12.0, 16.0]);
     }
 }

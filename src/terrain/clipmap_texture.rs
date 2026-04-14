@@ -6,7 +6,7 @@ use bevy::{
 };
 use std::f32::consts::TAU;
 use crate::terrain::{
-    config::TerrainConfig,
+    config::{TerrainConfig, MAX_SUPPORTED_CLIPMAP_LEVELS},
     math::level_scale,
     material::TerrainMaterial,
     resources::{TerrainResidency, TerrainViewState, TileKey, TileState},
@@ -101,8 +101,8 @@ fn bytes_per_layer(res: u32) -> usize {
 /// (0, 0) clip centres.  Every frame after startup `update_clipmap_textures`
 /// refines individual layers when clip centres change.
 pub fn create_initial_clipmap_texture(config: &TerrainConfig) -> Image {
-    let res    = config.clipmap_resolution;
-    let layers = config.clipmap_levels;
+    let res    = config.clipmap_resolution();
+    let layers = config.active_clipmap_levels();
     let bpl    = bytes_per_layer(res);
     let mut data = vec![0u8; bpl * layers as usize];
 
@@ -146,7 +146,7 @@ pub fn create_initial_clipmap_texture(config: &TerrainConfig) -> Image {
 // Uniform helper
 // ---------------------------------------------------------------------------
 
-/// Computes `clip_levels[8]` for `TerrainMaterialUniforms` from a view state.
+/// Computes `clip_levels` for `TerrainMaterialUniforms` from a view state.
 ///
 /// Layout per entry: `(ring_center_x, ring_center_z, inv_ring_span, texel_world_size)`.
 ///
@@ -157,17 +157,17 @@ pub fn compute_clip_levels(
     config: &TerrainConfig,
     clip_centers: &[IVec2],
     level_scales: &[f32],
-) -> [Vec4; 8] {
-    let mut levels = [Vec4::ZERO; 8];
+) -> [Vec4; MAX_SUPPORTED_CLIPMAP_LEVELS] {
+    let mut levels = [Vec4::ZERO; MAX_SUPPORTED_CLIPMAP_LEVELS];
 
-    for lod in 0..(config.clipmap_levels as usize).min(8) {
+    for lod in 0..config.active_clipmap_levels() as usize {
         let center = clip_centers.get(lod).copied().unwrap_or(IVec2::ZERO);
         let scale  = level_scales.get(lod).copied()
             .unwrap_or_else(|| level_scale(config.world_scale, lod as u32));
 
         let ring_span       = config.ring_patches as f32 * config.patch_resolution as f32 * scale;
         let inv_span        = 1.0 / ring_span;
-        let texel_ws        = ring_span / config.clipmap_resolution as f32;
+        let texel_ws        = ring_span / config.clipmap_resolution() as f32;
         // Ring center: world-space position the clip center corresponds to.
         let ring_center_x   = center.x as f32 * scale;
         let ring_center_z   = center.y as f32 * scale;
@@ -180,9 +180,9 @@ pub fn compute_clip_levels(
 
 /// Computes `clip_levels` when all clip centres are at the origin.
 /// Used during startup before the first `update_terrain_view_state` runs.
-pub fn compute_initial_clip_levels(config: &TerrainConfig) -> [Vec4; 8] {
-    let zeros: Vec<IVec2> = vec![IVec2::ZERO; config.clipmap_levels as usize];
-    let scales: Vec<f32> = (0..config.clipmap_levels)
+pub fn compute_initial_clip_levels(config: &TerrainConfig) -> [Vec4; MAX_SUPPORTED_CLIPMAP_LEVELS] {
+    let zeros: Vec<IVec2> = vec![IVec2::ZERO; config.active_clipmap_levels() as usize];
+    let scales: Vec<f32> = (0..config.active_clipmap_levels())
         .map(|l| level_scale(config.world_scale, l))
         .collect();
     compute_clip_levels(config, &zeros, &scales)
@@ -327,9 +327,9 @@ pub fn update_clipmap_textures(
     let Some(mut state) = state else { return };
     if view.clip_centers.is_empty() { return; }
 
-    let res    = config.clipmap_resolution;
+    let res    = config.clipmap_resolution();
     let bpl    = bytes_per_layer(res);
-    let levels = config.clipmap_levels as usize;
+    let levels = config.active_clipmap_levels() as usize;
 
     // Pad the cached list so index comparisons don't go out of bounds.
     while state.last_clip_centers.len() < levels {
@@ -426,7 +426,7 @@ pub fn apply_tiles_to_clipmap(
     let Some(ref mut state) = state else { return };
 
     // Grow sentinel vec to match level count.
-    let levels = config.clipmap_levels as usize;
+    let levels = config.active_clipmap_levels() as usize;
     while state.tile_apply_centers.len() < levels {
         state.tile_apply_centers.push(IVec2::new(i32::MAX, i32::MAX));
     }
@@ -443,7 +443,7 @@ pub fn apply_tiles_to_clipmap(
     let Some(image) = images.get_mut(&state.texture_handle) else { return };
     let Some(ref mut img_data) = image.data else { return };
 
-    let res  = config.clipmap_resolution;
+    let res  = config.clipmap_resolution();
     let bpl  = bytes_per_layer(res);
     let half = (res / 2) as i32;
     let ts   = config.tile_size;

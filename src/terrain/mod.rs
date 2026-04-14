@@ -116,6 +116,8 @@ fn preload_terrain_startup(
     mut materials: ResMut<Assets<TerrainMaterial>>,
     mut residency: ResMut<TerrainResidency>,
 ) {
+    let levels = config.active_clipmap_levels();
+
     // --- Compute clip centers from the starting camera position ---------------
     let cam_pos = match camera_q.single() {
         Ok(t) => t.translation,
@@ -128,19 +130,19 @@ fn preload_terrain_startup(
     let scale_0 = level_scale(config.world_scale, 0);
     let fine_center = snap_camera_to_level_grid(cam_pos.xz(), scale_0);
 
-    let clip_centers: Vec<IVec2> = (0..config.clipmap_levels)
+    let clip_centers: Vec<IVec2> = (0..levels)
         .map(|l| {
             let s = l as i32;
             IVec2::new(fine_center.x >> s, fine_center.y >> s)
         })
         .collect();
-    let level_scales: Vec<f32> = (0..config.clipmap_levels)
+    let level_scales: Vec<f32> = (0..levels)
         .map(|l| level_scale(config.world_scale, l))
         .collect();
 
     // --- Collect all needed tile keys, coarser levels first ------------------
     let mut all_keys: Vec<TileKey> = Vec::new();
-    for level in 0..config.clipmap_levels {
+    for level in 0..levels {
         let keys = compute_needed_tiles_for_level(
             clip_centers[level as usize],
             level_scales[level as usize],
@@ -157,6 +159,7 @@ fn preload_terrain_startup(
     // --- Load all tiles in parallel, block until done -------------------------
     let tile_size = config.tile_size;
     let world_scale = config.world_scale;
+    let max_mip_level = desc.max_mip_level;
     let use_procedural = config.procedural_fallback;
     let tile_root = desc.tile_root.clone();
     let world_bounds = Some((desc.world_min, desc.world_max));
@@ -171,6 +174,7 @@ fn preload_terrain_startup(
                         key,
                         tile_size,
                         world_scale,
+                        max_mip_level,
                         tile_root.as_deref(),
                         world_bounds,
                         use_procedural,
@@ -192,11 +196,11 @@ fn preload_terrain_startup(
         return;
     };
 
-    let res = config.clipmap_resolution;
+    let res = config.clipmap_resolution();
     let bpl = (res * res * 2) as usize; // R16Unorm: 2 bytes per texel
     let half = (res / 2) as i32;
     let ts = config.tile_size;
-    let levels = config.clipmap_levels as usize;
+    let levels = levels as usize;
     let mut written = 0u32;
 
     for (key, tile_pixels) in &results {
@@ -269,6 +273,8 @@ fn setup_terrain(
     mut patch_entities: ResMut<PatchEntities>,
     mut commands: Commands,
 ) {
+    let levels = config.active_clipmap_levels();
+
     // --- Clipmap texture array (Phase 5) ---
     // One R8Unorm layer per LOD level, each 512×512 texels.
     // Layers are regenerated live by `update_clipmap_textures` as the camera moves.
@@ -288,7 +294,7 @@ fn setup_terrain(
             base_patch_size,
             morph_start_ratio: config.morph_start_ratio,
             ring_patches: config.ring_patches as f32,
-            num_lod_levels: config.clipmap_levels as f32,
+            num_lod_levels: levels as f32,
             patch_resolution: config.patch_resolution as f32,
             world_bounds: Vec4::new(desc.world_min.x, desc.world_min.y, desc.world_max.x, desc.world_max.y),
             bounds_fade: Vec4::new(
@@ -307,9 +313,9 @@ fn setup_terrain(
     commands.insert_resource(TerrainClipmapState {
         texture_handle: height_handle,
         material_handle: mat_handle.clone(),
-        last_clip_centers: vec![IVec2::ZERO; config.clipmap_levels as usize],
+        last_clip_centers: vec![IVec2::ZERO; levels as usize],
         // Sentinel forces a full tile re-apply on the first frame.
-        tile_apply_centers: vec![IVec2::new(i32::MAX, i32::MAX); config.clipmap_levels as usize],
+        tile_apply_centers: vec![IVec2::new(i32::MAX, i32::MAX); levels as usize],
     });
 
     // --- Patch mesh (shared by all entities) ---
@@ -347,12 +353,12 @@ fn setup_terrain(
 
     info!(
         "[Terrain] Setup complete: {} patches across {} LOD levels. \
-         Clipmap {}×{}×{} (R16Unorm array).",
+         Clipmap {}×{}×{} (R16Unorm array, derived from ring_patches × patch_resolution).",
         patches.len(),
-        config.clipmap_levels,
-        config.clipmap_resolution,
-        config.clipmap_resolution,
-        config.clipmap_levels,
+        levels,
+        config.clipmap_resolution(),
+        config.clipmap_resolution(),
+        levels,
     );
 }
 
@@ -388,7 +394,7 @@ pub fn update_terrain_view_state(
     let scale_0 = level_scale(config.world_scale, 0);
     let fine_center = snap_camera_to_level_grid(cam_pos.xz(), scale_0);
 
-    for level in 0..config.clipmap_levels {
+    for level in 0..config.active_clipmap_levels() {
         let scale = level_scale(config.world_scale, level);
         // Right-shift the finest center to get each coarser center.
         let shift = level as i32;

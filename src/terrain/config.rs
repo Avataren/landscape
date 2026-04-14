@@ -1,5 +1,7 @@
 use bevy::prelude::*;
 
+pub const MAX_SUPPORTED_CLIPMAP_LEVELS: usize = 16;
+
 /// Central configuration for the terrain renderer.
 /// Tweak these values to scale world size and quality.
 #[derive(Resource, Clone, Debug)]
@@ -12,8 +14,6 @@ pub struct TerrainConfig {
     pub ring_patches: u32,
     /// Height/material tile texel resolution (square).
     pub tile_size: u32,
-    /// Resolution of each clipmap level texture (square).
-    pub clipmap_resolution: u32,
     /// World-space units per texel at LOD 0.
     pub world_scale: f32,
     /// World-space units for maximum terrain height (maps [0,1] height -> [0, height_scale]).
@@ -40,11 +40,10 @@ pub struct TerrainConfig {
 impl Default for TerrainConfig {
     fn default() -> Self {
         Self {
-            clipmap_levels: 6,
+            clipmap_levels: 16,
             patch_resolution: 64,
-            ring_patches: 8,
+            ring_patches: 12,
             tile_size: 256,
-            clipmap_resolution: 512,
             world_scale: 1.0,
             height_scale: 4096.0,
             morph_start_ratio: 0.6,
@@ -54,5 +53,34 @@ impl Default for TerrainConfig {
             use_macro_color_map: true,
             macro_color_resolution: 16384,
         }
+    }
+}
+
+impl TerrainConfig {
+    /// Number of clipmap levels the current shader/material layout can represent.
+    pub fn active_clipmap_levels(&self) -> u32 {
+        self.clipmap_levels.min(MAX_SUPPORTED_CLIPMAP_LEVELS as u32)
+    }
+
+    /// Effective resolution of each clipmap level texture.
+    ///
+    /// This is derived from the number of ring patches and the patch mesh
+    /// resolution so the clipmap texel grid always matches the terrain grid.
+    pub fn clipmap_resolution(&self) -> u32 {
+        self.ring_patches * self.patch_resolution
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clipmap_resolution_tracks_ring_geometry() {
+        let config = TerrainConfig::default();
+        assert_eq!(
+            config.clipmap_resolution(),
+            config.ring_patches * config.patch_resolution
+        );
     }
 }

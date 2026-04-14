@@ -8,6 +8,7 @@ use bevy::{
     },
     shader::ShaderRef,
 };
+use crate::terrain::config::MAX_SUPPORTED_CLIPMAP_LEVELS;
 
 // ---------------------------------------------------------------------------
 // Uniform struct — must match TerrainParams in both WGSL shaders exactly.
@@ -24,8 +25,8 @@ use bevy::{
 //   offset 56 – clip_levels[0]    vec4<f32>
 //   offset 72 – clip_levels[1]    vec4<f32>
 //   …
-//   offset168 – clip_levels[7]    vec4<f32>
-//   Total: 184 bytes
+//   offset296 – clip_levels[15]   vec4<f32>
+//   Total: 312 bytes
 //
 // Each clip_levels entry: (origin_x, origin_z, inv_ring_span, texel_world_size)
 // ---------------------------------------------------------------------------
@@ -51,7 +52,7 @@ pub struct TerrainMaterialUniforms {
     pub bounds_fade: Vec4,
     /// Per-LOD clipmap data: (origin_x, origin_z, inv_ring_span, texel_world_size).
     /// Indexed by LOD level (0 = finest).  Unused entries are zero.
-    pub clip_levels: [Vec4; 8],
+    pub clip_levels: [Vec4; MAX_SUPPORTED_CLIPMAP_LEVELS],
 }
 
 // ---------------------------------------------------------------------------

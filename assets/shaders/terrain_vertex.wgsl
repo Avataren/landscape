@@ -28,7 +28,7 @@ struct TerrainParams {
     patch_resolution:   f32,   // quads per patch edge
     world_bounds:       vec4<f32>, // (min_x, min_z, max_x, max_z)
     bounds_fade:        vec4<f32>, // x = fade distance beyond the footprint
-    clip_levels: array<vec4<f32>, 8>,
+    clip_levels: array<vec4<f32>, 16>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var height_tex:  texture_2d_array<f32>;
@@ -112,7 +112,7 @@ fn vertex(v: Vertex) -> TerrainVOut {
     // --- Derive LOD level. ---
     // patch_size_ws = base_patch_size × 2^L  →  L = log2(size / base)
     let lod_f     = round(log2(patch_size_ws / terrain.base_patch_size));
-    let lod_level = u32(clamp(lod_f, 0.0, 7.0));
+    let lod_level = u32(clamp(lod_f, 0.0, 15.0));
 
     // Coarse LOD index for height blending: clamped so we never read layer N.
     let max_lod_idx = u32(terrain.num_lod_levels) - 1u;

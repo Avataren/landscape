@@ -1,13 +1,28 @@
 mod terrain;
 
-use bevy::{input::mouse::AccumulatedMouseMotion, prelude::*};
+use bevy::{
+    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
+    core_pipeline::tonemapping::Tonemapping,
+    light::{light_consts::lux, AtmosphereEnvironmentMapLight},
+    pbr::{Atmosphere, AtmosphereSettings, ScatteringMedium},
+    post_process::bloom::Bloom,
+    prelude::*,
+    camera::Exposure,
+    input::mouse::AccumulatedMouseMotion,
+    window::PrimaryWindow,
+};
 use terrain::{components::TerrainCamera, TerrainDebugPlugin, TerrainPlugin, TerrainSourceDesc};
+
+const WINDOW_TITLE: &str = "Landscape Renderer";
 
 fn main() {
     App::new()
+        .insert_resource(ClearColor(Color::BLACK))
+        .insert_resource(GlobalAmbientLight::NONE)
+        .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Landscape Renderer".into(),
+                title: WINDOW_TITLE.into(),
                 resolution: (1920u32, 1080u32).into(),
                 ..default()
             }),
@@ -30,10 +45,14 @@ fn main() {
         })
         .add_systems(Startup, setup_scene)
         .add_systems(Update, (camera_move, camera_look).chain())
+        .add_systems(Update, update_window_title)
         .run();
 }
 
-fn setup_scene(mut commands: Commands) {
+fn setup_scene(
+    mut commands: Commands,
+    mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
+) {
     // 16k heightmap: terrain spans ±8192 wu, max height 4096 wu.
     // Average terrain near origin ~2400 wu; start well above that.
     commands.spawn((
@@ -43,13 +62,20 @@ fn setup_scene(mut commands: Commands) {
             far: 10_000_000.0,
             ..default()
         }),
+        Atmosphere::earthlike(scattering_mediums.add(ScatteringMedium::default())),
+        AtmosphereSettings::default(),
+        AtmosphereEnvironmentMapLight::default(),
+        Exposure { ev100: 13.0 },
+        Tonemapping::AcesFitted,
+        Bloom::NATURAL,
         Transform::from_xyz(0.0, 6000.0, -8000.0).looking_at(Vec3::new(0.0, 2500.0, 0.0), Vec3::Y),
         TerrainCamera,
     ));
 
     commands.spawn((
         DirectionalLight {
-            illuminance: 10_000.0,
+            // Use raw sunlight so the atmosphere does the scattering itself.
+            illuminance: lux::RAW_SUNLIGHT,
             shadows_enabled: true,
             ..default()
         },
@@ -134,4 +160,29 @@ fn camera_look(
     let pitch_rot = Quat::from_axis_angle(right, pitch);
 
     t.rotation = (yaw_rot * pitch_rot * t.rotation).normalize();
+}
+
+fn update_window_title(
+    time: Res<Time>,
+    diagnostics: Res<DiagnosticsStore>,
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut update_timer: Local<Option<Timer>>,
+) {
+    let timer = update_timer.get_or_insert_with(|| Timer::from_seconds(0.25, TimerMode::Repeating));
+    if !timer.tick(time.delta()).just_finished() {
+        return;
+    }
+
+    let Ok(mut window) = windows.single_mut() else {
+        return;
+    };
+
+    let fps = diagnostics
+        .get(&FrameTimeDiagnosticsPlugin::FPS)
+        .and_then(|fps| fps.smoothed());
+
+    window.title = match fps {
+        Some(fps) => format!("{WINDOW_TITLE} - {:.0} FPS", fps),
+        None => format!("{WINDOW_TITLE} - -- FPS"),
+    };
 }

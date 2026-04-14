@@ -1,3 +1,4 @@
+use crate::terrain::config::MAX_SUPPORTED_CLIPMAP_LEVELS;
 use bytemuck::{Pod, Zeroable};
 
 // ---------------------------------------------------------------------------
@@ -12,10 +13,10 @@ pub struct TerrainFrameUniform {
     pub view_proj: [[f32; 4]; 4],
     /// Camera world-space position (w unused).
     pub camera_pos_ws: [f32; 4],
-    /// Snapped clipmap center grid coords for up to 8 levels.
-    pub clip_centers: [[i32; 4]; 8],
-    /// World-space texel spacing for up to 8 levels.
-    pub level_scales: [f32; 8],
+    /// Snapped clipmap center grid coords for up to 16 levels.
+    pub clip_centers: [[i32; 4]; MAX_SUPPORTED_CLIPMAP_LEVELS],
+    /// World-space texel spacing for up to 16 levels.
+    pub level_scales: [f32; MAX_SUPPORTED_CLIPMAP_LEVELS],
     /// World-space height scale (maps [0,1] -> [0, height_scale]).
     pub height_scale: f32,
     /// Fraction of ring span at which morphing begins.

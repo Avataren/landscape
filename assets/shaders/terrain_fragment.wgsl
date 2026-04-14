@@ -12,7 +12,7 @@ struct TerrainParams {
     patch_resolution:   f32,
     world_bounds:       vec4<f32>,
     bounds_fade:        vec4<f32>,
-    clip_levels: array<vec4<f32>, 8>,
+    clip_levels: array<vec4<f32>, 16>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(3) var macro_color_tex: texture_2d<f32>;
@@ -42,7 +42,13 @@ fn procedural_albedo(slope: f32, h_norm: f32) -> vec3<f32> {
 fn macro_color_uv(world_xz: vec2<f32>) -> vec2<f32> {
     let world_min = terrain.world_bounds.xy;
     let world_span = max(terrain.world_bounds.zw - world_min, vec2<f32>(1.0, 1.0));
-    return clamp((world_xz - world_min) / world_span, vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0));
+    return (world_xz - world_min) / world_span;
+}
+
+fn macro_color_in_bounds(world_xz: vec2<f32>) -> bool {
+    let world_min = terrain.world_bounds.xy;
+    let world_max = terrain.world_bounds.zw;
+    return all(world_xz >= world_min) && all(world_xz <= world_max);
 }
 
 @fragment
@@ -52,9 +58,10 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     let slope  = 1.0 - abs(dot(n, up));                         // 0=flat, 1=vertical
     let h_norm = clamp(in.world_pos.y / terrain.height_scale, 0.0, 1.0);
     let use_macro_color = terrain.bounds_fade.y > 0.5;
+    let macro_in_bounds = macro_color_in_bounds(in.macro_xz_ws);
 
     var c = procedural_albedo(slope, h_norm);
-    if use_macro_color {
+    if use_macro_color && macro_in_bounds {
         c = textureSampleLevel(macro_color_tex, macro_color_samp, macro_color_uv(in.macro_xz_ws), 0.0).rgb;
     }
 

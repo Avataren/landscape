@@ -42,5 +42,5 @@ pub fn extract_terrain_frame(
     extracted.patches = patches;
     extracted.height_scale = config.height_scale;
     extracted.morph_start_ratio = config.morph_start_ratio;
-    extracted.clipmap_levels = config.clipmap_levels;
+    extracted.clipmap_levels = config.active_clipmap_levels();
 }
