@@ -59,9 +59,21 @@ struct TerrainVOut {
 /// 1-texel UV jump that caused geometric shimmering on far LODs.
 fn height_at(lod: u32, xz: vec2<f32>) -> f32 {
     let lvl = terrain.clip_levels[lod];
-    // lvl.z  = 1 / ring_span
-    // Texture uses Repeat address mode so the fract wrap is handled by hardware.
-    let uv = fract(xz * lvl.z);
+    // lvl.z = 1 / ring_span,  lvl.w = texel_world_size (scale_L)
+    //
+    // Shift by +0.5 texels before computing UV so that integer world-space
+    // vertex positions land exactly at texel CENTRES rather than at the
+    // boundary between two texels.  Without this shift a vertex at integer
+    // world coordinate n maps to UV = n / N (exactly between texel n-1 and
+    // texel n), and the linear filter straddles the toroidal seam at UV = 0.5
+    // — mixing heights from opposite ends of the ring window.  The resulting
+    // wrong height leaks into normal computation and produces dark bands that
+    // move with the seam as the clip center shifts (shimmering).
+    //
+    // With the half-texel offset every sample point is at (n + 0.5) / N which
+    // sits squarely inside texel n; the seam at UV = 0.5 can only be reached by
+    // a non-integer n + 0.5 = N/2, impossible for integer n.
+    let uv = fract((xz + 0.5 * lvl.w) * lvl.z);
     return textureSampleLevel(height_tex, height_samp, uv, i32(lod), 0.0).r
            * terrain.height_scale;
 }
