@@ -40,12 +40,12 @@ pub struct TerrainConfig {
 impl Default for TerrainConfig {
     fn default() -> Self {
         Self {
-            clipmap_levels: 16,
+            clipmap_levels: 12,
             patch_resolution: 64,
-            ring_patches: 12,
+            ring_patches: 8,
             tile_size: 256,
             world_scale: 1.0,
-            height_scale: 4096.0,
+            height_scale: 2048.0,
             morph_start_ratio: 0.6,
             max_resident_tiles: 256,
             max_view_distance: 65536.0,
