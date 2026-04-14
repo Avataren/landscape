@@ -54,13 +54,18 @@ pub fn generate_clipmap_layer(
     ring_patches: u32,
     patch_resolution: u32,
     clipmap_resolution: u32,
+    use_procedural: bool,
 ) -> Vec<u8> {
+    let texels = (clipmap_resolution * clipmap_resolution) as usize;
+    if !use_procedural {
+        return vec![0u8; texels * BYTES_PER_TEXEL];
+    }
+
     let ring_span = ring_patches as f32 * patch_resolution as f32 * level_scale_ws;
     let origin_x  = center.x as f32 * level_scale_ws - ring_span * 0.5;
     let origin_z  = center.y as f32 * level_scale_ws - ring_span * 0.5;
     let texel_ws  = ring_span / clipmap_resolution as f32;
 
-    let texels = (clipmap_resolution * clipmap_resolution) as usize;
     let mut data = Vec::with_capacity(texels * BYTES_PER_TEXEL);
 
     for row in 0..clipmap_resolution {
@@ -99,6 +104,7 @@ pub fn create_initial_clipmap_texture(config: &TerrainConfig) -> Image {
         let layer_data = generate_clipmap_layer(
             IVec2::ZERO, scale,
             config.ring_patches, config.patch_resolution, res,
+            config.procedural_fallback,
         );
         let offset = level as usize * bpl;
         data[offset..offset + bpl].copy_from_slice(&layer_data);
@@ -222,6 +228,7 @@ pub fn update_clipmap_textures(
         let layer_data = generate_clipmap_layer(
             center, scale,
             config.ring_patches, config.patch_resolution, res,
+            config.procedural_fallback,
         );
 
         let offset = lod * bpl;

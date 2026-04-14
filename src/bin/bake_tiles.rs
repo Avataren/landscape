@@ -43,6 +43,17 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         return Err(format!("Expected square heightmap, got {}×{}", img_w, img_h).into());
     }
 
+    // Normalize the full image to [0, 1] so the full height range is used.
+    let h_min = pixels.iter().cloned().fold(f32::INFINITY, f32::min);
+    let h_max = pixels.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let h_range = h_max - h_min;
+    println!("Height range: min={:.6}  max={:.6}  range={:.6}", h_min, h_max, h_range);
+    let pixels: Vec<f32> = if h_range > 1e-6 {
+        pixels.iter().map(|&h| (h - h_min) / h_range).collect()
+    } else {
+        pixels
+    };
+
     let mut current_pixels = pixels;
     let mut current_size = img_w;
     let mut total_tiles = 0usize;

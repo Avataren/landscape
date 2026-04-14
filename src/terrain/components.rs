@@ -8,6 +8,7 @@ pub struct TerrainCamera;
 /// Per-patch instance data placed by the clipmap builder.
 /// In v1 this lives on ECS entities; in v2 it goes into a GPU storage buffer.
 #[derive(Component, Clone, Copy, Debug)]
+#[allow(dead_code)]
 pub struct TerrainPatchInstance {
     /// Clipmap LOD level (0 = finest).
     pub lod_level: u32,

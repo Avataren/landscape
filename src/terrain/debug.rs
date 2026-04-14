@@ -51,7 +51,7 @@ pub fn draw_terrain_debug(
     config: Res<TerrainConfig>,
     view: Res<TerrainViewState>,
     debug_cfg: Res<TerrainDebugConfig>,
-    residency: Res<TerrainResidency>,
+    _residency: Res<TerrainResidency>,
     mut gizmos: Gizmos,
 ) {
     if debug_cfg.show_patch_bounds {

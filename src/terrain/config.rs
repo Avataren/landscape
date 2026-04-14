@@ -23,7 +23,12 @@ pub struct TerrainConfig {
     /// Maximum number of terrain tiles kept resident on GPU.
     pub max_resident_tiles: usize,
     /// Maximum view distance for terrain (used for LOD scale computation).
+    #[allow(dead_code)]
     pub max_view_distance: f32,
+    /// Fill clipmap layers and missing tiles with procedural sine-wave heights.
+    /// Disabled by default — leave false when real tile data is available so
+    /// unloaded regions show as flat (height 0) rather than mismatched bumps.
+    pub procedural_fallback: bool,
 }
 
 impl Default for TerrainConfig {
@@ -35,10 +40,11 @@ impl Default for TerrainConfig {
             tile_size: 256,
             clipmap_resolution: 512,
             world_scale: 1.0,
-            height_scale: 512.0,
+            height_scale: 4096.0,
             morph_start_ratio: 0.6,
             max_resident_tiles: 256,
             max_view_distance: 65536.0,
+            procedural_fallback: false,
         }
     }
 }

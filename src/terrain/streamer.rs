@@ -24,6 +24,7 @@ pub fn spawn_background_height_job(
     tile_size: u32,
     world_scale: f32,
     tile_root: Option<std::path::PathBuf>,
+    use_procedural: bool,
     tx: Sender<HeightTileCpu>,
 ) {
     std::thread::spawn(move || {
@@ -38,20 +39,25 @@ pub fn spawn_background_height_job(
                 read_r16_tile(&path, tile_size)
             })
             .unwrap_or_else(|| {
-                // Procedural fallback when tiles are not baked yet.
-                let level_scale_ws = world_scale * (1u32 << (key.level as u32)) as f32;
                 let len = (tile_size * tile_size) as usize;
-                let mut pixels = Vec::with_capacity(len);
-                for row in 0..tile_size {
-                    for col in 0..tile_size {
-                        let world_x = ((key.x * tile_size as i32 + col as i32) as f32 + 0.5)
-                            * level_scale_ws;
-                        let world_z = ((key.y * tile_size as i32 + row as i32) as f32 + 0.5)
-                            * level_scale_ws;
-                        pixels.push(height_at_world(world_x, world_z));
+                if use_procedural {
+                    // Procedural fallback: multi-octave sine waves.
+                    let level_scale_ws = world_scale * (1u32 << (key.level as u32)) as f32;
+                    let mut pixels = Vec::with_capacity(len);
+                    for row in 0..tile_size {
+                        for col in 0..tile_size {
+                            let world_x = ((key.x * tile_size as i32 + col as i32) as f32 + 0.5)
+                                * level_scale_ws;
+                            let world_z = ((key.y * tile_size as i32 + row as i32) as f32 + 0.5)
+                                * level_scale_ws;
+                            pixels.push(height_at_world(world_x, world_z));
+                        }
                     }
+                    pixels
+                } else {
+                    // Flat fallback: tile file missing, show zero height.
+                    vec![0.0f32; len]
                 }
-                pixels
             });
 
         let _ = tx.send(HeightTileCpu { key, data, tile_size });
@@ -110,6 +116,7 @@ pub fn request_tile_loads(
             config.tile_size,
             config.world_scale,
             desc.tile_root.clone(),
+            config.procedural_fallback,
             sender.0.clone(),
         );
     }

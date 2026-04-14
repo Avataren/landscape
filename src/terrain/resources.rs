@@ -30,6 +30,7 @@ pub struct TileKey {
 
 /// Lifecycle state of a single terrain tile.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum TileState {
     Unloaded,
     Requested,
@@ -53,6 +54,7 @@ pub struct HeightTileCpu {
 
 /// Raw material mask data, one byte per channel per texel.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct MaterialTileCpu {
     pub key: TileKey,
     /// RGBA material weights, [tile_size * tile_size * 4] elements.
@@ -117,5 +119,6 @@ pub struct TerrainStreamQueue {
     /// Tiles whose load has been requested but not yet completed.
     pub pending_requests: HashSet<TileKey>,
     /// Completed CPU payloads waiting to be consumed.
+    #[allow(dead_code)]
     pub finished_heights: Vec<HeightTileCpu>,
 }

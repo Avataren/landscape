@@ -2,6 +2,7 @@ use bevy::prelude::*;
 
 /// Describes where terrain source data lives and the world extents.
 #[derive(Resource, Clone, Default, Debug)]
+#[allow(dead_code)]
 pub struct TerrainSourceDesc {
     /// Root path for height tile files.
     pub height_root: String,
@@ -25,6 +26,7 @@ pub struct TerrainSourceDesc {
 
 impl TerrainSourceDesc {
     /// Returns the tile path for a given level and tile coordinates.
+    #[allow(dead_code)]
     pub fn height_tile_path(&self, level: u8, x: i32, y: i32) -> String {
         format!("{}/L{}/{}_{}_{}.raw", self.height_root, level, level, x, y)
     }

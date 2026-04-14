@@ -27,12 +27,17 @@ fn main() {
 }
 
 fn setup_scene(mut commands: Commands) {
-    // 16k heightmap: terrain spans ±8192 wu, max height 512 wu.
-    // Start high enough to see the terrain; fly down with Q/E to explore.
+    // 16k heightmap: terrain spans ±8192 wu, max height 4096 wu.
+    // Average terrain near origin ~2400 wu; start well above that.
     commands.spawn((
         Camera3d::default(),
-        Transform::from_xyz(0.0, 900.0, -1200.0)
-            .looking_at(Vec3::new(0.0, 150.0, 0.0), Vec3::Y),
+        Projection::Perspective(PerspectiveProjection {
+            near: 1.0,
+            far: 10_000_000.0,
+            ..default()
+        }),
+        Transform::from_xyz(0.0, 6000.0, -8000.0)
+            .looking_at(Vec3::new(0.0, 2500.0, 0.0), Vec3::Y),
         TerrainCamera,
     ));
 
@@ -59,7 +64,7 @@ fn camera_move(
 ) {
     let Ok(mut t) = query.single_mut() else { return };
 
-    let speed = if keys.pressed(KeyCode::ShiftLeft) { 500.0 } else { 100.0 };
+    let speed = if keys.pressed(KeyCode::ShiftLeft) { 5000.0 } else { 500.0 };
     let dt = time.delta_secs();
 
     // Project camera forward/right onto XZ so WASD always moves horizontally.

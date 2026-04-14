@@ -189,14 +189,14 @@ fn setup_terrain(
 /// Runs first so all subsequent systems see fresh data.
 pub fn update_terrain_view_state(
     config:   Res<TerrainConfig>,
-    camera_q: Query<&GlobalTransform, With<TerrainCamera>>,
+    camera_q: Query<&Transform, With<TerrainCamera>>,
     mut view: ResMut<TerrainViewState>,
 ) {
     let Ok(cam) = camera_q.single() else {
         return;
     };
 
-    let cam_pos: Vec3 = cam.translation();
+    let cam_pos: Vec3 = cam.translation;
     view.camera_pos_ws = cam_pos;
     view.clip_centers.clear();
     view.level_scales.clear();

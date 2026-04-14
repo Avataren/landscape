@@ -13,6 +13,7 @@ use crate::terrain::{
 /// Built from the clipmap state every frame (or when the camera crosses a
 /// snapped grid boundary) and submitted to the GPU as a storage buffer.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct PatchInstanceCpu {
     /// Clipmap LOD level (0 = finest detail).
     pub lod_level: u32,

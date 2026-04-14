@@ -108,6 +108,7 @@ pub fn compute_needed_tiles_for_level(
 
 /// Returns a blend factor in [0, 1] that smoothly transitions from 0 (fine)
 /// to 1 (coarse) as `distance` approaches `band_end`.
+#[allow(dead_code)]
 pub fn morph_factor(distance: f32, band_start: f32, band_end: f32) -> f32 {
     if distance <= band_start {
         return 0.0;

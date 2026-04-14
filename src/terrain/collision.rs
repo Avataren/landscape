@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use bevy::prelude::*;
 use std::collections::HashMap;
 use crate::terrain::resources::{HeightTileCpu, TileKey};
