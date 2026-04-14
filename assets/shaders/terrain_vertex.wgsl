@@ -26,6 +26,7 @@ struct TerrainParams {
     morph_start_ratio:  f32,
     ring_patches:       f32,
     num_lod_levels:     f32,   // active LOD count; used to clamp coarse index
+    patch_resolution:   f32,   // quads per patch edge
     pad1:               f32,
     pad2:               f32,
     pad3:               f32,
@@ -134,23 +135,32 @@ fn vertex(v: Vertex) -> TerrainVOut {
     let dist_from_center = max(vertex_delta.x, vertex_delta.y);  // Chebyshev
 
     let morph_start_ws = half_ring_ws * terrain.morph_start_ratio;
-    let morph_alpha = clamp(
+    let boundary_t = clamp(
         (dist_from_center - morph_start_ws) / max(half_ring_ws - morph_start_ws, 0.001),
         0.0, 1.0,
     );
+    // Continuous camera-distance morph damps temporal popping in the distance.
+    let cam_xz = view.world_position.xyz.xz;
+    let cam_dist_ws = distance(world_xz_orig, cam_xz);
+    let camera_t = clamp(
+        (cam_dist_ws - morph_start_ws) / max(half_ring_ws - morph_start_ws, 0.001),
+        0.0, 1.0,
+    );
 
-    // Local-space grid snapping (positions run [0,1] with patch_resolution steps).
-    let fine_step   = 1.0 / terrain.base_patch_size;
-    let coarse_step = fine_step * 2.0;
+    // Smooth both factors and combine:
+    // - camera alpha gives temporal continuity
+    // - boundary alpha floor guarantees stitching at the ring edge
+    let boundary_alpha = boundary_t * boundary_t * (3.0 - 2.0 * boundary_t);
+    let camera_alpha   = camera_t * camera_t * (3.0 - 2.0 * camera_t);
+    let morph_alpha    = max(camera_alpha, boundary_alpha);
 
-    let local_xz  = v.position.xz;
-    let coarse_xz = round(local_xz / coarse_step) * coarse_step;
-
-    let morphed_xz    = mix(local_xz, coarse_xz, morph_alpha);
-    let morphed_local = vec3<f32>(morphed_xz.x, 0.0, morphed_xz.y);
+    // Snap in world space to the globally anchored 2x coarser grid.
+    let fine_step_ws    = terrain.clip_levels[lod_level].w;
+    let coarse_step_ws  = fine_step_ws * 2.0;
+    let coarse_world_xz = round(world_xz_orig / coarse_step_ws) * coarse_step_ws;
 
     // --- World XZ after morphing. ---
-    let world_xz = (model * vec4<f32>(morphed_local, 1.0)).xz;
+    let world_xz = mix(world_xz_orig, coarse_world_xz, morph_alpha);
 
     // --- Height blended between fine and coarse clipmap levels. ---
     // At alpha=0: fine level only.  At alpha=1: coarse level only.
