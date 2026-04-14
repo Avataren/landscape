@@ -17,20 +17,20 @@ pub use debug::TerrainDebugPlugin;
 pub use world_desc::TerrainSourceDesc;
 
 use bevy::{camera::visibility::NoFrustumCulling, prelude::*};
+use clipmap::{build_patch_instances_for_view, PatchInstanceCpu};
 use clipmap_texture::{
-    TerrainClipmapState, apply_tiles_to_clipmap, compute_clip_levels, compute_initial_clip_levels,
-    create_initial_clipmap_texture, update_clipmap_textures,
+    apply_tiles_to_clipmap, compute_clip_levels, compute_initial_clip_levels,
+    create_initial_clipmap_texture, update_clipmap_textures, TerrainClipmapState,
 };
+use collision::{update_collision_tiles, TerrainCollisionCache};
 use components::TerrainCamera;
 use config::TerrainConfig;
-use math::{compute_needed_tiles_for_level, level_scale, snap_camera_to_level_grid};
 use material::{TerrainMaterial, TerrainMaterialUniforms};
-use render::{TerrainRenderPlugin, extract::extract_terrain_frame};
+use math::{compute_needed_tiles_for_level, level_scale, snap_camera_to_level_grid};
+use render::{extract::extract_terrain_frame, TerrainRenderPlugin};
 use residency::update_required_tiles;
 use resources::{TerrainResidency, TerrainStreamQueue, TerrainViewState, TileKey, TileState};
 use streamer::{load_tile_data, poll_tile_stream_jobs, request_tile_loads, setup_tile_channel};
-use collision::{update_collision_tiles, TerrainCollisionCache};
-use clipmap::{build_patch_instances_for_view, PatchInstanceCpu};
 
 // ---------------------------------------------------------------------------
 // Patch entity tracker
@@ -78,14 +78,14 @@ impl Plugin for TerrainPlugin {
                     poll_tile_stream_jobs,
                     update_collision_tiles,
                     extract_terrain_frame,
-                    update_patch_transforms,     // Phase 1: live patch repositioning
-                    update_clipmap_textures,     // Phase 5: procedural clipmap refresh
+                    update_patch_transforms, // Phase 1: live patch repositioning
+                    update_clipmap_textures, // Phase 5: procedural clipmap refresh
                 )
                     .after(update_terrain_view_state),
             )
             .add_systems(
                 Update,
-                apply_tiles_to_clipmap          // Phase 5: tile-based GPU upload
+                apply_tiles_to_clipmap // Phase 5: tile-based GPU upload
                     .after(poll_tile_stream_jobs)
                     .after(update_clipmap_textures)
                     .after(update_terrain_view_state),
@@ -106,25 +106,31 @@ impl Plugin for TerrainPlugin {
 ///
 /// Runs in PostStartup (after setup_terrain) so TerrainClipmapState exists.
 fn preload_terrain_startup(
-    config:    Res<TerrainConfig>,
-    desc:      Res<TerrainSourceDesc>,
-    camera_q:  Query<&Transform, With<TerrainCamera>>,
-    mut state:     ResMut<TerrainClipmapState>,
-    mut images:    ResMut<Assets<Image>>,
+    config: Res<TerrainConfig>,
+    desc: Res<TerrainSourceDesc>,
+    camera_q: Query<&Transform, With<TerrainCamera>>,
+    mut state: ResMut<TerrainClipmapState>,
+    mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<TerrainMaterial>>,
     mut residency: ResMut<TerrainResidency>,
 ) {
     // --- Compute clip centers from the starting camera position ---------------
     let cam_pos = match camera_q.single() {
-        Ok(t)  => t.translation,
-        Err(_) => { warn!("[Terrain] preload: no camera found"); return; }
+        Ok(t) => t.translation,
+        Err(_) => {
+            warn!("[Terrain] preload: no camera found");
+            return;
+        }
     };
 
-    let scale_0     = level_scale(config.world_scale, 0);
+    let scale_0 = level_scale(config.world_scale, 0);
     let fine_center = snap_camera_to_level_grid(cam_pos.xz(), scale_0);
 
     let clip_centers: Vec<IVec2> = (0..config.clipmap_levels)
-        .map(|l| { let s = l as i32; IVec2::new(fine_center.x >> s, fine_center.y >> s) })
+        .map(|l| {
+            let s = l as i32;
+            IVec2::new(fine_center.x >> s, fine_center.y >> s)
+        })
         .collect();
     let level_scales: Vec<f32> = (0..config.clipmap_levels)
         .map(|l| level_scale(config.world_scale, l))
@@ -147,46 +153,58 @@ fn preload_terrain_startup(
     all_keys.dedup();
 
     // --- Load all tiles in parallel, block until done -------------------------
-    let tile_size      = config.tile_size;
-    let world_scale    = config.world_scale;
+    let tile_size = config.tile_size;
+    let world_scale = config.world_scale;
     let use_procedural = config.procedural_fallback;
-    let tile_root      = desc.tile_root.clone();
+    let tile_root = desc.tile_root.clone();
+    let world_bounds = Some((desc.world_min, desc.world_max));
 
     let results: Vec<(TileKey, Vec<f32>)> = std::thread::scope(|s| {
-        let handles: Vec<_> = all_keys.iter().map(|&key| {
-            let tile_root = tile_root.clone();
-            s.spawn(move || {
-                let data = load_tile_data(
-                    key, tile_size, world_scale,
-                    tile_root.as_deref(), use_procedural,
-                );
-                (key, data)
+        let handles: Vec<_> = all_keys
+            .iter()
+            .map(|&key| {
+                let tile_root = tile_root.clone();
+                s.spawn(move || {
+                    let data = load_tile_data(
+                        key,
+                        tile_size,
+                        world_scale,
+                        tile_root.as_deref(),
+                        world_bounds,
+                        use_procedural,
+                    );
+                    (key, data)
+                })
             })
-        }).collect();
+            .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
     // --- Write tile data into the clipmap texture and residency ---------------
     let Some(image) = images.get_mut(&state.texture_handle) else {
-        warn!("[Terrain] preload: clipmap image not found"); return;
+        warn!("[Terrain] preload: clipmap image not found");
+        return;
     };
     let Some(ref mut img_data) = image.data else {
-        warn!("[Terrain] preload: clipmap image has no pixel data"); return;
+        warn!("[Terrain] preload: clipmap image has no pixel data");
+        return;
     };
 
-    let res    = config.clipmap_resolution;
-    let bpl    = (res * res * 2) as usize; // R16Unorm: 2 bytes per texel
-    let half   = (res / 2) as i32;
-    let ts     = config.tile_size;
+    let res = config.clipmap_resolution;
+    let bpl = (res * res * 2) as usize; // R16Unorm: 2 bytes per texel
+    let half = (res / 2) as i32;
+    let ts = config.tile_size;
     let levels = config.clipmap_levels as usize;
     let mut written = 0u32;
 
     for (key, tile_pixels) in &results {
         let level = key.level as usize;
-        if level >= levels { continue; }
+        if level >= levels {
+            continue;
+        }
 
         let clip_center = clip_centers[level];
-        let layer_base  = level * bpl;
+        let layer_base = level * bpl;
 
         for row in 0..ts {
             for col in 0..ts {
@@ -196,14 +214,16 @@ fn preload_terrain_startup(
                 // Cull texels outside the current clip window.
                 let dx = gx - clip_center.x;
                 let dz = gz - clip_center.y;
-                if dx < -half || dx >= half || dz < -half || dz >= half { continue; }
+                if dx < -half || dx >= half || dz < -half || dz >= half {
+                    continue;
+                }
 
                 // Toroidal texture position: matches fract(world * inv_span) in shader.
-                let tx  = gx.rem_euclid(res as i32) as usize;
-                let tz  = gz.rem_euclid(res as i32) as usize;
+                let tx = gx.rem_euclid(res as i32) as usize;
+                let tz = gz.rem_euclid(res as i32) as usize;
                 let dst = layer_base + (tz * res as usize + tx) * 2;
-                let h   = tile_pixels[(row * ts + col) as usize];
-                let v   = (h * 65535.0) as u16;
+                let h = tile_pixels[(row * ts + col) as usize];
+                let v = (h * 65535.0) as u16;
 
                 if dst + 2 <= img_data.len() {
                     img_data[dst..dst + 2].copy_from_slice(&v.to_le_bytes());
@@ -212,7 +232,9 @@ fn preload_terrain_startup(
         }
 
         residency.resident_cpu.insert(*key, tile_pixels.clone());
-        residency.tiles.insert(*key, TileState::ResidentGpu { slot: 0 });
+        residency
+            .tiles
+            .insert(*key, TileState::ResidentGpu { slot: 0 });
         residency.touch(*key);
         written += 1;
     }
@@ -226,25 +248,28 @@ fn preload_terrain_startup(
     // update_clipmap_textures compares view.clip_centers vs last_clip_centers.
     // apply_tiles_to_clipmap compares view.clip_centers vs tile_apply_centers.
     // Both will be equal on the first Update frame (camera hasn't moved).
-    state.last_clip_centers  = clip_centers.clone();
+    state.last_clip_centers = clip_centers.clone();
     state.tile_apply_centers = clip_centers;
 
-    info!("[Terrain] Startup preload: {} tiles loaded synchronously.", written);
+    info!(
+        "[Terrain] Startup preload: {} tiles loaded synchronously.",
+        written
+    );
 }
 
 /// Spawns patch entities and creates the initial clipmap texture array.
 fn setup_terrain(
     config: Res<TerrainConfig>,
-    mut meshes:            ResMut<Assets<Mesh>>,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
-    mut images:            ResMut<Assets<Image>>,
-    mut patch_entities:    ResMut<PatchEntities>,
-    mut commands:          Commands,
+    mut images: ResMut<Assets<Image>>,
+    mut patch_entities: ResMut<PatchEntities>,
+    mut commands: Commands,
 ) {
     // --- Clipmap texture array (Phase 5) ---
     // One R8Unorm layer per LOD level, each 512×512 texels.
     // Layers are regenerated live by `update_clipmap_textures` as the camera moves.
-    let height_image  = create_initial_clipmap_texture(&config);
+    let height_image = create_initial_clipmap_texture(&config);
     let height_handle = images.add(height_image);
 
     let base_patch_size = config.patch_resolution as f32 * config.world_scale;
@@ -252,13 +277,15 @@ fn setup_terrain(
     let mat_handle = terrain_materials.add(TerrainMaterial {
         height_texture: height_handle.clone(),
         params: TerrainMaterialUniforms {
-            height_scale:      config.height_scale,
+            height_scale: config.height_scale,
             base_patch_size,
             morph_start_ratio: config.morph_start_ratio,
-            ring_patches:      config.ring_patches as f32,
-            num_lod_levels:    config.clipmap_levels as f32,
-            patch_resolution:  config.patch_resolution as f32,
-            pad1: 0.0, pad2: 0.0, pad3: 0.0,
+            ring_patches: config.ring_patches as f32,
+            num_lod_levels: config.clipmap_levels as f32,
+            patch_resolution: config.patch_resolution as f32,
+            pad1: 0.0,
+            pad2: 0.0,
+            pad3: 0.0,
             clip_levels: compute_initial_clip_levels(&config),
         },
     });
@@ -267,40 +294,42 @@ fn setup_terrain(
     // Initialise last_clip_centers to ZERO (matching the initial texture), so the
     // first real camera position triggers a full regeneration on the first frame.
     commands.insert_resource(TerrainClipmapState {
-        texture_handle:    height_handle,
-        material_handle:   mat_handle.clone(),
-        last_clip_centers:  vec![IVec2::ZERO; config.clipmap_levels as usize],
+        texture_handle: height_handle,
+        material_handle: mat_handle.clone(),
+        last_clip_centers: vec![IVec2::ZERO; config.clipmap_levels as usize],
         // Sentinel forces a full tile re-apply on the first frame.
         tile_apply_centers: vec![IVec2::new(i32::MAX, i32::MAX); config.clipmap_levels as usize],
     });
 
     // --- Patch mesh (shared by all entities) ---
-    let patch_mesh  = patch_mesh::build_patch_mesh(config.patch_resolution);
+    let patch_mesh = patch_mesh::build_patch_mesh(config.patch_resolution);
     let mesh_handle = meshes.add(patch_mesh);
 
     // --- Spawn one entity per patch from the default (zero) view state ---
-    let view    = TerrainViewState::default();
+    let view = TerrainViewState::default();
     let patches: Vec<PatchInstanceCpu> = build_patch_instances_for_view(&config, &view);
 
     patch_entities.entities.clear();
 
     for patch in &patches {
-        let entity = commands.spawn((
-            Mesh3d(mesh_handle.clone()),
-            MeshMaterial3d(mat_handle.clone()),
-            Transform {
-                translation: Vec3::new(patch.origin_ws.x, 0.0, patch.origin_ws.y),
-                scale:       Vec3::new(patch.patch_size_ws, 1.0, patch.patch_size_ws),
-                ..default()
-            },
-            components::TerrainPatchInstance {
-                lod_level:      patch.lod_level,
-                patch_kind:     patch.patch_kind,
-                patch_origin_ws: patch.origin_ws,
-                patch_scale_ws:  patch.patch_size_ws,
-            },
-            NoFrustumCulling,
-        )).id();
+        let entity = commands
+            .spawn((
+                Mesh3d(mesh_handle.clone()),
+                MeshMaterial3d(mat_handle.clone()),
+                Transform {
+                    translation: Vec3::new(patch.origin_ws.x, 0.0, patch.origin_ws.y),
+                    scale: Vec3::new(patch.patch_size_ws, 1.0, patch.patch_size_ws),
+                    ..default()
+                },
+                components::TerrainPatchInstance {
+                    lod_level: patch.lod_level,
+                    patch_kind: patch.patch_kind,
+                    patch_origin_ws: patch.origin_ws,
+                    patch_scale_ws: patch.patch_size_ws,
+                },
+                NoFrustumCulling,
+            ))
+            .id();
 
         patch_entities.entities.push(entity);
     }
@@ -323,7 +352,7 @@ fn setup_terrain(
 /// Rebuilds the terrain view (camera position, clip centers, level scales).
 /// Runs first so all subsequent systems see fresh data.
 pub fn update_terrain_view_state(
-    config:   Res<TerrainConfig>,
+    config: Res<TerrainConfig>,
     camera_q: Query<&Transform, With<TerrainCamera>>,
     mut view: ResMut<TerrainViewState>,
 ) {
@@ -345,13 +374,13 @@ pub fn update_terrain_view_state(
     //
     // This removes large multi-cell jumps on mid/far levels that create
     // temporal shimmer and visible instability when moving the camera.
-    let scale_0    = level_scale(config.world_scale, 0);
+    let scale_0 = level_scale(config.world_scale, 0);
     let fine_center = snap_camera_to_level_grid(cam_pos.xz(), scale_0);
 
     for level in 0..config.clipmap_levels {
         let scale = level_scale(config.world_scale, level);
         // Right-shift the finest center to get each coarser center.
-        let shift  = level as i32;
+        let shift = level as i32;
         let center = IVec2::new(fine_center.x >> shift, fine_center.y >> shift);
         view.level_scales.push(scale);
         view.clip_centers.push(center);
@@ -361,8 +390,8 @@ pub fn update_terrain_view_state(
 /// Repositions patch entities to match the current clipmap ring layout.
 /// Only does work when the snapped clip centers have actually changed.
 fn update_patch_transforms(
-    config:  Res<TerrainConfig>,
-    view:    Res<TerrainViewState>,
+    config: Res<TerrainConfig>,
+    view: Res<TerrainViewState>,
     mut patch_entities: ResMut<PatchEntities>,
     mut query: Query<(&mut Transform, &mut components::TerrainPatchInstance)>,
 ) {
@@ -380,7 +409,8 @@ fn update_patch_transforms(
         // Config changed — would need full respawn. Skip for now.
         warn!(
             "[Terrain] Patch count mismatch ({} vs {})",
-            patches.len(), patch_entities.entities.len()
+            patches.len(),
+            patch_entities.entities.len()
         );
         return;
     }
@@ -388,9 +418,9 @@ fn update_patch_transforms(
     for (entity, patch) in patch_entities.entities.iter().zip(patches.iter()) {
         if let Ok((mut transform, mut instance)) = query.get_mut(*entity) {
             transform.translation = Vec3::new(patch.origin_ws.x, 0.0, patch.origin_ws.y);
-            transform.scale       = Vec3::new(patch.patch_size_ws, 1.0, patch.patch_size_ws);
+            transform.scale = Vec3::new(patch.patch_size_ws, 1.0, patch.patch_size_ws);
             instance.patch_origin_ws = patch.origin_ws;
-            instance.patch_scale_ws  = patch.patch_size_ws;
+            instance.patch_scale_ws = patch.patch_size_ws;
         }
     }
 

@@ -157,9 +157,12 @@ fn vertex(v: Vertex) -> TerrainVOut {
     let morph_alpha = max(boundary_alpha, boundary_lock);
 
     // Snap in world space to the globally anchored 2x coarser grid.
-    let fine_step_ws    = terrain.clip_levels[lod_level].w;
-    let coarse_step_ws  = fine_step_ws * 2.0;
-    let coarse_world_xz = round(world_xz_orig / coarse_step_ws) * coarse_step_ws;
+    let fine_step_ws   = terrain.clip_levels[lod_level].w;
+    let coarse_step_ws = fine_step_ws * 2.0;
+    // Snap to the same globally anchored coarse lattice that the next LOD ring
+    // uses. `round()` can pick the higher coarse cell for odd fine-grid edges,
+    // which opens a 1-fine-texel crack until the coarser ring catches up.
+    let coarse_world_xz = floor(world_xz_orig / coarse_step_ws) * coarse_step_ws;
 
     // --- World XZ after morphing. ---
     let world_xz = mix(world_xz_orig, coarse_world_xz, morph_alpha);

@@ -16,9 +16,12 @@ fn main() {
         .add_plugins(TerrainPlugin)
         .add_plugins(TerrainDebugPlugin)
         // Point the tile streamer at the pre-baked tiles from `cargo run --bin bake_tiles`.
-        // Falls back to procedural generation if the directory does not exist.
+        // The baked 16k source heightmap spans [-8192, 8192) world units in X/Z.
         .insert_resource(TerrainSourceDesc {
             tile_root: Some(std::path::PathBuf::from("assets/tiles")),
+            world_min: Vec2::splat(-8192.0),
+            world_max: Vec2::splat(8192.0),
+            max_mip_level: 5,
             ..default()
         })
         .add_systems(Startup, setup_scene)
@@ -36,8 +39,7 @@ fn setup_scene(mut commands: Commands) {
             far: 10_000_000.0,
             ..default()
         }),
-        Transform::from_xyz(0.0, 6000.0, -8000.0)
-            .looking_at(Vec3::new(0.0, 2500.0, 0.0), Vec3::Y),
+        Transform::from_xyz(0.0, 6000.0, -8000.0).looking_at(Vec3::new(0.0, 2500.0, 0.0), Vec3::Y),
         TerrainCamera,
     ));
 
@@ -62,9 +64,15 @@ fn camera_move(
     time: Res<Time>,
     mut query: Query<&mut Transform, With<TerrainCamera>>,
 ) {
-    let Ok(mut t) = query.single_mut() else { return };
+    let Ok(mut t) = query.single_mut() else {
+        return;
+    };
 
-    let speed = if keys.pressed(KeyCode::ShiftLeft) { 5000.0 } else { 500.0 };
+    let speed = if keys.pressed(KeyCode::ShiftLeft) {
+        5000.0
+    } else {
+        500.0
+    };
     let dt = time.delta_secs();
 
     // Project camera forward/right onto XZ so WASD always moves horizontally.
@@ -72,12 +80,24 @@ fn camera_move(
     let forward = Vec3::new(fwd3.x, 0.0, fwd3.z).normalize_or_zero();
     let right = Vec3::new(-fwd3.z, 0.0, fwd3.x); // 90° CCW = right-hand cross(fwd, Y)
 
-    if keys.pressed(KeyCode::KeyW) { t.translation += forward * speed * dt; }
-    if keys.pressed(KeyCode::KeyS) { t.translation -= forward * speed * dt; }
-    if keys.pressed(KeyCode::KeyA) { t.translation -= right   * speed * dt; }
-    if keys.pressed(KeyCode::KeyD) { t.translation += right   * speed * dt; }
-    if keys.pressed(KeyCode::KeyE) { t.translation.y += speed * dt; }
-    if keys.pressed(KeyCode::KeyQ) { t.translation.y -= speed * dt; }
+    if keys.pressed(KeyCode::KeyW) {
+        t.translation += forward * speed * dt;
+    }
+    if keys.pressed(KeyCode::KeyS) {
+        t.translation -= forward * speed * dt;
+    }
+    if keys.pressed(KeyCode::KeyA) {
+        t.translation -= right * speed * dt;
+    }
+    if keys.pressed(KeyCode::KeyD) {
+        t.translation += right * speed * dt;
+    }
+    if keys.pressed(KeyCode::KeyE) {
+        t.translation.y += speed * dt;
+    }
+    if keys.pressed(KeyCode::KeyQ) {
+        t.translation.y -= speed * dt;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -96,9 +116,11 @@ fn camera_look(
     if delta == Vec2::ZERO {
         return;
     }
-    let Ok(mut t) = query.single_mut() else { return };
+    let Ok(mut t) = query.single_mut() else {
+        return;
+    };
 
-    let yaw   = -delta.x * 0.002;
+    let yaw = -delta.x * 0.002;
     let pitch = -delta.y * 0.002;
 
     // Rotate yaw around world Y (prevents roll accumulation).
