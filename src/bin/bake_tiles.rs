@@ -9,9 +9,9 @@
 /// Tiles are written only once; re-running regenerates them unconditionally.
 /// Peak memory: ~1.25 GB (level-0 pixels + one mip level at a time).
 
-// Import only the names we actually use from exr, so the exr `Result` alias
-// does not shadow `std::result::Result`.
-use exr::prelude::{read_first_rgba_layer_from_file, Vec2};
+// Use `read_first_flat_layer_from_file` which accepts any channel layout,
+// rather than `read_first_rgba_layer_from_file` which requires R,G,B,A names.
+use exr::prelude::{read_first_flat_layer_from_file, FlatSamples};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -21,18 +21,7 @@ const HEIGHT_EXR: &str =
     "assets/height_maps/16k Rocky Terrain Heightmap/Height Map 16k Rocky Terrain.exr";
 const TILE_ROOT: &str = "assets/tiles";
 
-// ---------------------------------------------------------------------------
-// Pixel storage passed through the exr read closure.
-// We embed the image width so the pixel setter can compute flat indices.
-// ---------------------------------------------------------------------------
-
-struct HeightBuf {
-    pixels: Vec<f32>,
-    width: usize,
-    height: usize,
-}
-
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let t_start = Instant::now();
     let height_path = Path::new(HEIGHT_EXR);
     let out_root = PathBuf::from(TILE_ROOT);
@@ -44,26 +33,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("Loading {} ...", HEIGHT_EXR);
-    println!("(A 16k EXR takes ~30–60 s to decompress on first read)");
+    println!("(A 16k EXR takes ~30–60 s to decompress)");
 
-    let image = read_first_rgba_layer_from_file(
-        height_path,
-        // constructor: allocates per-image pixel storage and records the width
-        |size: Vec2<usize>, _| HeightBuf {
-            pixels: vec![0.0_f32; size.x() * size.y()],
-            width: size.x(),
-            height: size.y(),
-        },
-        // pixel setter: called once per pixel; we take only the R channel
-        // (for a greyscale EXR, exr maps Y → R, G, B so R contains the height)
-        |buf: &mut HeightBuf, pos: Vec2<usize>, (r, _g, _b, _a): (f32, f32, f32, f32)| {
-            buf.pixels[pos.y() * buf.width + pos.x()] = r;
-        },
-    )?;
-
-    let buf = image.layer_data.channel_data.pixels;
-    let img_w = buf.width;
-    let img_h = buf.height;
+    let (pixels, img_w, img_h) = load_height_exr(height_path)?;
 
     println!("Loaded {}×{} in {:.1}s", img_w, img_h, t_start.elapsed().as_secs_f32());
 
@@ -71,7 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("Expected square heightmap, got {}×{}", img_w, img_h).into());
     }
 
-    let mut current_pixels = buf.pixels;
+    let mut current_pixels = pixels;
     let mut current_size = img_w;
     let mut total_tiles = 0usize;
 
@@ -94,7 +66,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         for ty in -tile_half..tile_half {
             for tx in -tile_half..tile_half {
-                // Origin of this tile in the mip image (pixel coordinates).
                 let px_start = (tx * TILE_SIZE as i32 + mip_half) as usize;
                 let py_start = (ty * TILE_SIZE as i32 + mip_half) as usize;
 
@@ -120,8 +91,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 total_tiles += 1;
             }
 
-            // Progress indicator for the slowest level.
-            if lod == 0 && ty % 8 == (-(tile_half % 8)) {
+            // Progress for the slowest level.
+            if lod == 0 {
                 let pct = level_done * 100 / level_tile_count;
                 print!("\r  Level 0: {}%  ({}/{})", pct, level_done, level_tile_count);
                 use std::io::Write;
@@ -132,14 +103,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         println!(
             "Level {}: {}×{} = {} tiles  [{:.1}s]",
-            lod,
-            tiles_per_side,
-            tiles_per_side,
-            level_tile_count,
+            lod, tiles_per_side, tiles_per_side, level_tile_count,
             t_start.elapsed().as_secs_f32(),
         );
 
-        // Build next mip level (2×2 box filter), releasing the current one.
         if lod + 1 < LEVELS {
             let next = box_filter_2x(&current_pixels, current_size, current_size);
             current_pixels = next;
@@ -149,14 +116,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!(
         "\nDone. {} tiles → '{}'  ({:.1}s total)",
-        total_tiles,
-        out_root.display(),
-        t_start.elapsed().as_secs_f32(),
+        total_tiles, out_root.display(), t_start.elapsed().as_secs_f32(),
     );
     Ok(())
 }
 
-/// 2×2 box-filter downsample. Each output pixel is the average of four input pixels.
+/// Load the first channel of an EXR file as a flat Vec<f32> in [0,1].
+/// Works regardless of channel name or sample type (f16/f32/u32).
+fn load_height_exr(path: &Path) -> std::result::Result<(Vec<f32>, usize, usize), Box<dyn std::error::Error>> {
+    let image = read_first_flat_layer_from_file(path)?;
+
+    let layer = &image.layer_data;
+    let w = layer.size.x();
+    let h = layer.size.y();
+
+    // Print channel info for diagnostics.
+    println!("Channels in EXR ({}):", layer.channel_data.list.len());
+    for ch in &layer.channel_data.list {
+        println!("  {:?}", ch.name);
+    }
+
+    let channel = layer.channel_data.list.first()
+        .ok_or("EXR file has no channels")?;
+
+    println!("Using channel {:?} as height", channel.name);
+
+    let pixels: Vec<f32> = match &channel.sample_data {
+        FlatSamples::F32(v) => v.clone(),
+        FlatSamples::F16(v) => v.iter().map(|h| h.to_f32()).collect(),
+        FlatSamples::U32(v) => v.iter().map(|&u| u as f32 / u32::MAX as f32).collect(),
+    };
+
+    Ok((pixels, w, h))
+}
+
+/// 2×2 box-filter downsample.
 fn box_filter_2x(src: &[f32], w: usize, h: usize) -> Vec<f32> {
     let dw = w / 2;
     let dh = h / 2;
