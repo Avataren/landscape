@@ -24,6 +24,7 @@ struct TerrainVOut {
     @builtin(position) clip_pos:     vec4<f32>,
     @location(0)       world_pos:    vec4<f32>,
     @location(1)       world_normal: vec3<f32>,
+    @location(2)       macro_xz_ws:  vec2<f32>,
 }
 
 fn procedural_albedo(slope: f32, h_norm: f32) -> vec3<f32> {
@@ -54,7 +55,7 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
 
     var c = procedural_albedo(slope, h_norm);
     if use_macro_color {
-        c = textureSampleLevel(macro_color_tex, macro_color_samp, macro_color_uv(in.world_pos.xz), 0.0).rgb;
+        c = textureSampleLevel(macro_color_tex, macro_color_samp, macro_color_uv(in.macro_xz_ws), 0.0).rgb;
     }
 
     // --- Simple directional sun ---

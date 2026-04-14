@@ -43,6 +43,7 @@ struct TerrainVOut {
     @builtin(position) clip_pos:     vec4<f32>,
     @location(0)       world_pos:    vec4<f32>,
     @location(1)       world_normal: vec3<f32>,
+    @location(2)       macro_xz_ws:  vec2<f32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -198,5 +199,6 @@ fn vertex(v: Vertex) -> TerrainVOut {
     out.clip_pos     = position_world_to_clip(pos);
     out.world_pos    = vec4<f32>(pos, 1.0);
     out.world_normal = nrm;
+    out.macro_xz_ws  = world_xz_orig;
     return out;
 }
