@@ -115,7 +115,8 @@ fn setup_terrain(
             base_patch_size,
             morph_start_ratio: config.morph_start_ratio,
             ring_patches:      config.ring_patches as f32,
-            pad0: 0.0, pad1: 0.0, pad2: 0.0, pad3: 0.0,
+            num_lod_levels:    config.clipmap_levels as f32,
+            pad1: 0.0, pad2: 0.0, pad3: 0.0,
             clip_levels: compute_initial_clip_levels(&config),
         },
     });

@@ -17,7 +17,7 @@ use bevy::{
 //   offset  4 – base_patch_size   f32
 //   offset  8 – morph_start_ratio f32
 //   offset 12 – ring_patches      f32
-//   offset 16 – pad0              f32
+//   offset 16 – num_lod_levels    f32   (= clipmap_levels, used to clamp coarse index)
 //   offset 20 – pad1              f32
 //   offset 24 – pad2              f32
 //   offset 28 – pad3              f32
@@ -40,7 +40,9 @@ pub struct TerrainMaterialUniforms {
     pub morph_start_ratio: f32,
     /// Number of patches per ring edge side.
     pub ring_patches: f32,
-    pub pad0: f32,
+    /// Number of active LOD levels (= clipmap_levels).  Used to clamp the coarse
+    /// LOD index so we never read beyond the texture array bounds.
+    pub num_lod_levels: f32,
     pub pad1: f32,
     pub pad2: f32,
     pub pad3: f32,
