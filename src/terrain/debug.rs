@@ -20,8 +20,8 @@ pub struct TerrainDebugConfig {
 impl Default for TerrainDebugConfig {
     fn default() -> Self {
         Self {
-            show_patch_bounds: true,
-            show_lod_colors: true,
+            show_patch_bounds: false,
+            show_lod_colors: false,
             show_stats: true,
         }
     }

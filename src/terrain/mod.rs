@@ -3,6 +3,7 @@ pub mod collision;
 pub mod components;
 pub mod config;
 pub mod debug;
+pub mod material;
 pub mod math;
 pub mod patch_mesh;
 pub mod render;
@@ -13,16 +14,32 @@ pub mod world_desc;
 
 pub use debug::TerrainDebugPlugin;
 
-use bevy::prelude::*;
+use bevy::{camera::visibility::NoFrustumCulling, prelude::*};
 use components::TerrainCamera;
 use config::TerrainConfig;
 use math::{level_scale, snap_camera_to_level_grid};
+use material::{TerrainMaterial, TerrainMaterialUniforms, generate_height_image};
 use render::{TerrainRenderPlugin, extract::extract_terrain_frame};
 use residency::update_required_tiles;
 use resources::{TerrainResidency, TerrainStreamQueue, TerrainViewState};
 use streamer::{poll_tile_stream_jobs, request_tile_loads, setup_tile_channel};
 use world_desc::TerrainSourceDesc;
 use collision::{update_collision_tiles, TerrainCollisionCache};
+use clipmap::{build_patch_instances_for_view, PatchInstanceCpu};
+
+// ---------------------------------------------------------------------------
+// Patch entity tracker
+// ---------------------------------------------------------------------------
+
+/// Stores entity handles for all spawned terrain patch entities in the same
+/// order that `build_patch_instances_for_view` returns descriptors.
+/// Allows update_patch_transforms to update positions cheaply.
+#[derive(Resource, Default)]
+pub struct PatchEntities {
+    pub entities: Vec<Entity>,
+    /// Cached clip centers from last update (used to skip no-op frames).
+    pub last_clip_centers: Vec<IVec2>,
+}
 
 // ---------------------------------------------------------------------------
 // Main terrain plugin
@@ -33,6 +50,8 @@ pub struct TerrainPlugin;
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
         app
+            // Custom terrain material
+            .add_plugins(MaterialPlugin::<TerrainMaterial>::default())
             // Resources
             .init_resource::<TerrainConfig>()
             .init_resource::<TerrainSourceDesc>()
@@ -40,15 +59,23 @@ impl Plugin for TerrainPlugin {
             .init_resource::<TerrainResidency>()
             .init_resource::<TerrainStreamQueue>()
             .init_resource::<TerrainCollisionCache>()
+            .init_resource::<PatchEntities>()
             // Startup
             .add_systems(Startup, (setup_tile_channel, setup_terrain).chain())
-            // Update: ordered as specified in the handoff
+            // Update: ordered as per handoff spec
             .add_systems(Update, update_terrain_view_state)
-            .add_systems(Update, update_required_tiles.after(update_terrain_view_state))
-            .add_systems(Update, request_tile_loads.after(update_required_tiles))
-            .add_systems(Update, poll_tile_stream_jobs.after(request_tile_loads))
-            .add_systems(Update, update_collision_tiles.after(poll_tile_stream_jobs))
-            .add_systems(Update, extract_terrain_frame.after(update_terrain_view_state))
+            .add_systems(
+                Update,
+                (
+                    update_required_tiles,
+                    request_tile_loads,
+                    poll_tile_stream_jobs,
+                    update_collision_tiles,
+                    extract_terrain_frame,
+                    update_patch_transforms,  // Phase 1: live patch repositioning
+                )
+                    .after(update_terrain_view_state),
+            )
             // Render sub-plugin
             .add_plugins(TerrainRenderPlugin);
     }
@@ -58,49 +85,78 @@ impl Plugin for TerrainPlugin {
 // Startup system
 // ---------------------------------------------------------------------------
 
-/// Spawns the initial terrain state and registers the patch mesh.
+/// Spawns patch entities and generates the initial height texture.
 fn setup_terrain(
     config: Res<TerrainConfig>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
+    mut images: ResMut<Assets<Image>>,
+    mut patch_entities: ResMut<PatchEntities>,
     mut commands: Commands,
 ) {
+    // --- Height texture (Phase 2) ---
+    // 512×512 procedural texture covering 1024 world units centred at origin.
+    // height_scale is set so peaks reach roughly 1/8 of the world_size —
+    // visible from the default camera position without the camera being inside terrain.
+    let tex_size = 512u32;
+    let world_size = 1024.0_f32;
+    let world_half = world_size * 0.5;
+    let phase2_height_scale = world_size / 8.0; // 128 world units max height
+
+    let height_image = generate_height_image(tex_size);
+    let height_handle = images.add(height_image);
+
+    let mat_handle = terrain_materials.add(TerrainMaterial {
+        height_texture: height_handle,
+        params: TerrainMaterialUniforms {
+            height_scale: phase2_height_scale,
+            world_size,
+            world_offset_x: -world_half,
+            world_offset_z: -world_half,
+            ring_patches: config.ring_patches as f32,
+            morph_start_ratio: config.morph_start_ratio,
+            patch_resolution: config.patch_resolution as f32,
+            pad0: 0.0,
+        },
+    });
+
+    // --- Patch mesh (shared by all entities) ---
     let patch_mesh = patch_mesh::build_patch_mesh(config.patch_resolution);
     let mesh_handle = meshes.add(patch_mesh);
 
-    // Phase 1: flat CPU-instanced patches using Bevy's standard PBR path.
-    // Each patch is a separate entity. In Phase 8 this will be replaced with
-    // indirect GPU draws.
-    let mat = materials.add(StandardMaterial {
-        base_color: Color::srgb(0.4, 0.6, 0.3),
-        perceptual_roughness: 0.9,
-        ..default()
-    });
-
-    // Build an initial dummy view state for patch spawning.
+    // --- Spawn one entity per patch from the default (zero) view state ---
     let view = TerrainViewState::default();
-    let patches = clipmap::build_patch_instances_for_view(&config, &view);
+    let patches: Vec<PatchInstanceCpu> = build_patch_instances_for_view(&config, &view);
+
+    patch_entities.entities.clear();
 
     for patch in &patches {
-        let scale = Vec3::new(patch.patch_size_ws, 1.0, patch.patch_size_ws);
-        let translation = Vec3::new(patch.origin_ws.x, 0.0, patch.origin_ws.y);
-        commands.spawn((
+        let entity = commands.spawn((
             Mesh3d(mesh_handle.clone()),
-            MeshMaterial3d(mat.clone()),
-            Transform::from_translation(translation).with_scale(scale),
+            MeshMaterial3d(mat_handle.clone()),
+            Transform {
+                translation: Vec3::new(patch.origin_ws.x, 0.0, patch.origin_ws.y),
+                scale: Vec3::new(patch.patch_size_ws, 1.0, patch.patch_size_ws),
+                ..default()
+            },
             components::TerrainPatchInstance {
                 lod_level: patch.lod_level,
                 patch_kind: patch.patch_kind,
                 patch_origin_ws: patch.origin_ws,
                 patch_scale_ws: patch.patch_size_ws,
             },
-        ));
+            NoFrustumCulling,
+        )).id();
+
+        patch_entities.entities.push(entity);
     }
 
     info!(
-        "[Terrain] Setup complete: {} patches, {} LOD levels",
+        "[Terrain] Setup complete: {} patches across {} LOD levels. Height texture {}×{}.",
         patches.len(),
         config.clipmap_levels,
+        tex_size,
+        tex_size,
     );
 }
 
@@ -108,7 +164,8 @@ fn setup_terrain(
 // Update systems
 // ---------------------------------------------------------------------------
 
-/// Updates the terrain view state from the terrain camera.
+/// Rebuilds the terrain view (camera position, clip centers, level scales).
+/// Runs first so all subsequent systems see fresh data.
 pub fn update_terrain_view_state(
     config: Res<TerrainConfig>,
     camera_q: Query<&GlobalTransform, With<TerrainCamera>>,
@@ -120,16 +177,71 @@ pub fn update_terrain_view_state(
 
     let cam_pos: Vec3 = cam.translation();
     view.camera_pos_ws = cam_pos;
-
     view.clip_centers.clear();
     view.level_scales.clear();
 
-    let base_spacing = config.world_scale;
+    // Compute an aligned level-0 center.
+    //
+    // If each level snaps independently, level-0's center can be odd while
+    // level-1's center (in level-0 units) is even, creating a 1-grid-unit
+    // gap on one side and a 1-unit overlap on the other.  The gap appears as
+    // a flickering seam that shows up in half the compass directions and
+    // flickers as the camera crosses grid cells.
+    //
+    // Fix: round level-0's grid coordinate DOWN to the nearest multiple of
+    // 2^(clipmap_levels-1), then derive every coarser center by right-shifting.
+    // This guarantees  center_L * scale_L == center_{L+1} * scale_{L+1}  for
+    // all L, so ring boundaries are always flush with no gaps or overlaps.
+    let scale_0 = level_scale(config.world_scale, 0);
+    let raw_0 = snap_camera_to_level_grid(cam_pos.xz(), scale_0);
+    let align_shift = (config.clipmap_levels - 1) as i32;
+    let aligned_0 = IVec2::new(
+        (raw_0.x >> align_shift) << align_shift,
+        (raw_0.y >> align_shift) << align_shift,
+    );
 
     for level in 0..config.clipmap_levels {
-        let scale = level_scale(base_spacing, level);
-        let center = snap_camera_to_level_grid(cam_pos.xz(), scale);
+        let scale = level_scale(config.world_scale, level);
+        // Right-shift the aligned level-0 center to get each coarser center.
+        let shift = level as i32;
+        let center = IVec2::new(aligned_0.x >> shift, aligned_0.y >> shift);
         view.level_scales.push(scale);
         view.clip_centers.push(center);
     }
+}
+
+/// Repositions patch entities to match the current clipmap ring layout.
+/// Only does work when the snapped clip centers have actually changed.
+fn update_patch_transforms(
+    config: Res<TerrainConfig>,
+    view: Res<TerrainViewState>,
+    mut patch_entities: ResMut<PatchEntities>,
+    mut query: Query<(&mut Transform, &mut components::TerrainPatchInstance)>,
+) {
+    // Skip if nothing has moved to a new grid cell.
+    if view.clip_centers == patch_entities.last_clip_centers {
+        return;
+    }
+    if view.clip_centers.is_empty() || patch_entities.entities.is_empty() {
+        return;
+    }
+
+    let patches = build_patch_instances_for_view(&config, &view);
+
+    if patches.len() != patch_entities.entities.len() {
+        // Config changed - would need full respawn. Skip for now.
+        warn!("[Terrain] Patch count mismatch ({} vs {})", patches.len(), patch_entities.entities.len());
+        return;
+    }
+
+    for (entity, patch) in patch_entities.entities.iter().zip(patches.iter()) {
+        if let Ok((mut transform, mut instance)) = query.get_mut(*entity) {
+            transform.translation = Vec3::new(patch.origin_ws.x, 0.0, patch.origin_ws.y);
+            transform.scale = Vec3::new(patch.patch_size_ws, 1.0, patch.patch_size_ws);
+            instance.patch_origin_ws = patch.origin_ws;
+            instance.patch_scale_ws = patch.patch_size_ws;
+        }
+    }
+
+    patch_entities.last_clip_centers = view.clip_centers.clone();
 }
