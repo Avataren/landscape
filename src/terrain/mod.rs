@@ -21,7 +21,8 @@ use bevy::{camera::visibility::NoFrustumCulling, prelude::*};
 use clipmap::{build_patch_instances_for_view, PatchInstanceCpu};
 use clipmap_texture::{
     apply_tiles_to_clipmap, compute_clip_levels, compute_initial_clip_levels,
-    create_initial_clipmap_texture, update_clipmap_textures, TerrainClipmapState,
+    create_initial_clipmap_texture, create_initial_normal_clipmap_texture,
+    update_clipmap_textures, TerrainClipmapState,
 };
 use collision::{update_collision_tiles, TerrainCollisionCache};
 use components::TerrainCamera;
@@ -159,27 +160,31 @@ fn preload_terrain_startup(
     // --- Load all tiles in parallel, block until done -------------------------
     let tile_size = config.tile_size;
     let world_scale = config.world_scale;
+    let height_scale = config.height_scale;
     let max_mip_level = desc.max_mip_level;
     let use_procedural = config.procedural_fallback;
     let tile_root = desc.tile_root.clone();
+    let normal_root = desc.normal_root.as_ref().map(std::path::PathBuf::from);
     let world_bounds = Some((desc.world_min, desc.world_max));
 
-    let results: Vec<(TileKey, Vec<f32>)> = std::thread::scope(|s| {
+    let results: Vec<crate::terrain::resources::HeightTileCpu> = std::thread::scope(|s| {
         let handles: Vec<_> = all_keys
             .iter()
             .map(|&key| {
                 let tile_root = tile_root.clone();
+                let normal_root = normal_root.clone();
                 s.spawn(move || {
-                    let data = load_tile_data(
+                    load_tile_data(
                         key,
                         tile_size,
                         world_scale,
+                        height_scale,
                         max_mip_level,
                         tile_root.as_deref(),
+                        normal_root.as_deref(),
                         world_bounds,
                         use_procedural,
-                    );
-                    (key, data)
+                    )
                 })
             })
             .collect();
@@ -187,61 +192,111 @@ fn preload_terrain_startup(
     });
 
     // --- Write tile data into the clipmap texture and residency ---------------
-    let Some(image) = images.get_mut(&state.texture_handle) else {
-        warn!("[Terrain] preload: clipmap image not found");
-        return;
-    };
-    let Some(ref mut img_data) = image.data else {
-        warn!("[Terrain] preload: clipmap image has no pixel data");
-        return;
-    };
-
     let res = config.clipmap_resolution();
-    let bpl = (res * res * 2) as usize; // R16Unorm: 2 bytes per texel
+    let height_bpl = (res * res * 2) as usize; // R16Unorm
+    let normal_bpl = (res * res * 2) as usize; // RG8Snorm
     let half = (res / 2) as i32;
     let ts = config.tile_size;
     let levels = levels as usize;
     let mut written = 0u32;
 
-    for (key, tile_pixels) in &results {
-        let level = key.level as usize;
-        if level >= levels {
-            continue;
-        }
+    {
+        let Some(image) = images.get_mut(&state.height_texture_handle) else {
+            warn!("[Terrain] preload: height clipmap image not found");
+            return;
+        };
+        let Some(ref mut img_data) = image.data else {
+            warn!("[Terrain] preload: height clipmap image has no pixel data");
+            return;
+        };
 
-        let clip_center = clip_centers[level];
-        let layer_base = level * bpl;
+        for tile in &results {
+            let key = tile.key;
+            let level = key.level as usize;
+            if level >= levels {
+                continue;
+            }
 
-        for row in 0..ts {
-            for col in 0..ts {
-                let gx = key.x * ts as i32 + col as i32;
-                let gz = key.y * ts as i32 + row as i32;
+            let clip_center = clip_centers[level];
+            let height_layer_base = level * height_bpl;
 
-                // Cull texels outside the current clip window.
-                let dx = gx - clip_center.x;
-                let dz = gz - clip_center.y;
-                if dx < -half || dx >= half || dz < -half || dz >= half {
-                    continue;
-                }
+            for row in 0..ts {
+                for col in 0..ts {
+                    let gx = key.x * ts as i32 + col as i32;
+                    let gz = key.y * ts as i32 + row as i32;
+                    let dx = gx - clip_center.x;
+                    let dz = gz - clip_center.y;
+                    if dx < -half || dx >= half || dz < -half || dz >= half {
+                        continue;
+                    }
 
-                // Toroidal texture position: matches fract(world * inv_span) in shader.
-                let tx = gx.rem_euclid(res as i32) as usize;
-                let tz = gz.rem_euclid(res as i32) as usize;
-                let dst = layer_base + (tz * res as usize + tx) * 2;
-                let h = tile_pixels[(row * ts + col) as usize];
-                let v = (h * 65535.0) as u16;
+                    let tx = gx.rem_euclid(res as i32) as usize;
+                    let tz = gz.rem_euclid(res as i32) as usize;
+                    let height_dst = height_layer_base + (tz * res as usize + tx) * 2;
+                    let h = tile.data[(row * ts + col) as usize];
+                    let v = (h * 65535.0) as u16;
 
-                if dst + 2 <= img_data.len() {
-                    img_data[dst..dst + 2].copy_from_slice(&v.to_le_bytes());
+                    if height_dst + 2 <= img_data.len() {
+                        img_data[height_dst..height_dst + 2].copy_from_slice(&v.to_le_bytes());
+                    }
                 }
             }
         }
+    }
 
-        residency.resident_cpu.insert(*key, tile_pixels.clone());
-        residency
-            .tiles
-            .insert(*key, TileState::ResidentGpu { slot: 0 });
-        residency.touch(*key);
+    {
+        let Some(image) = images.get_mut(&state.normal_texture_handle) else {
+            warn!("[Terrain] preload: normal clipmap image not found");
+            return;
+        };
+        let Some(ref mut img_data) = image.data else {
+            warn!("[Terrain] preload: normal clipmap image has no pixel data");
+            return;
+        };
+
+        for tile in &results {
+            let key = tile.key;
+            let level = key.level as usize;
+            if level >= levels {
+                continue;
+            }
+
+            let clip_center = clip_centers[level];
+            let normal_layer_base = level * normal_bpl;
+
+            for row in 0..ts {
+                for col in 0..ts {
+                    let gx = key.x * ts as i32 + col as i32;
+                    let gz = key.y * ts as i32 + row as i32;
+                    let dx = gx - clip_center.x;
+                    let dz = gz - clip_center.y;
+                    if dx < -half || dx >= half || dz < -half || dz >= half {
+                        continue;
+                    }
+
+                    let tx = gx.rem_euclid(res as i32) as usize;
+                    let tz = gz.rem_euclid(res as i32) as usize;
+                    let normal_dst = normal_layer_base + (tz * res as usize + tx) * 2;
+                    let enc = tile.normal_data[(row * ts + col) as usize];
+
+                    if normal_dst + 2 <= img_data.len() {
+                        img_data[normal_dst..normal_dst + 2].copy_from_slice(&enc);
+                    }
+                }
+            }
+        }
+    }
+
+    for tile in &results {
+        let key = tile.key;
+        residency.resident_cpu.insert(key, crate::terrain::resources::HeightTileCpu {
+            key,
+            data: tile.data.clone(),
+            normal_data: tile.normal_data.clone(),
+            tile_size: tile.tile_size,
+        });
+        residency.tiles.insert(key, TileState::ResidentGpu { slot: 0 });
+        residency.touch(key);
         written += 1;
     }
 
@@ -280,6 +335,8 @@ fn setup_terrain(
     // Layers are regenerated live by `update_clipmap_textures` as the camera moves.
     let height_image = create_initial_clipmap_texture(&config);
     let height_handle = images.add(height_image);
+    let normal_image = create_initial_normal_clipmap_texture(&config);
+    let normal_handle = images.add(normal_image);
     let macro_color = load_macro_color_texture(&config, &desc);
     let macro_color_handle = images.add(macro_color.image);
 
@@ -289,6 +346,7 @@ fn setup_terrain(
     let mat_handle = terrain_materials.add(TerrainMaterial {
         height_texture: height_handle.clone(),
         macro_color_texture: macro_color_handle,
+        normal_texture: normal_handle.clone(),
         params: TerrainMaterialUniforms {
             height_scale: config.height_scale,
             base_patch_size,
@@ -311,7 +369,8 @@ fn setup_terrain(
     // Initialise last_clip_centers to ZERO (matching the initial texture), so the
     // first real camera position triggers a full regeneration on the first frame.
     commands.insert_resource(TerrainClipmapState {
-        texture_handle: height_handle,
+        height_texture_handle: height_handle,
+        normal_texture_handle: normal_handle,
         material_handle: mat_handle.clone(),
         last_clip_centers: vec![IVec2::ZERO; levels as usize],
         // Sentinel forces a full tile re-apply on the first frame.

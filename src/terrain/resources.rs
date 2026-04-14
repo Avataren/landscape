@@ -49,6 +49,8 @@ pub struct HeightTileCpu {
     pub key: TileKey,
     /// Row-major f32 heights, [tile_size * tile_size] elements.
     pub data: Vec<f32>,
+    /// Row-major RG8Snorm XZ normals, [tile_size * tile_size] elements.
+    pub normal_data: Vec<[u8; 2]>,
     pub tile_size: u32,
 }
 
@@ -79,7 +81,7 @@ pub struct TerrainResidency {
     pub pending_upload: Vec<HeightTileCpu>,
     /// CPU pixel data kept alive after GPU upload so tiles can be re-applied
     /// when the clipmap shifts to a new clip-center position.
-    pub resident_cpu: HashMap<TileKey, Vec<f32>>,
+    pub resident_cpu: HashMap<TileKey, HeightTileCpu>,
     /// Set when eviction removed cached CPU height data and clipmap layers must
     /// be rebuilt from fallback before resident tiles are re-applied.
     pub clipmap_needs_rebuild: bool,

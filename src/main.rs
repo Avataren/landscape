@@ -34,6 +34,7 @@ fn main() {
         // The baked 16k source heightmap spans [-8192, 8192) world units in X/Z.
         .insert_resource(TerrainSourceDesc {
             tile_root: Some(std::path::PathBuf::from("assets/tiles")),
+            normal_root: Some("assets/tiles/normal".into()),
             macro_color_root: Some(
                 "assets/height_maps/16k Rocky Terrain Heightmap/Diffuse 16k Rocky Terrain.exr"
                     .into(),

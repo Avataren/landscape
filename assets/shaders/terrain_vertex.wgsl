@@ -34,6 +34,8 @@ struct TerrainParams {
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var height_tex:  texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var height_samp: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var<uniform> terrain: TerrainParams;
+@group(#{MATERIAL_BIND_GROUP}) @binding(5) var normal_tex: texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(6) var normal_samp: sampler;
 
 // ---------------------------------------------------------------------------
 // Vertex → fragment interface
@@ -86,6 +88,17 @@ fn height_at(lod: u32, xz: vec2<f32>) -> f32 {
     let sampled_height = textureSampleLevel(height_tex, height_samp, uv, i32(lod), 0.0).r
         * terrain.height_scale;
     return sampled_height * bounds_fade_at(xz);
+}
+
+fn normal_at(lod: u32, xz: vec2<f32>) -> vec3<f32> {
+    let lvl = terrain.clip_levels[lod];
+    let world_min = terrain.world_bounds.xy;
+    let world_max = terrain.world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
+    let sample_xz = clamp(xz, world_min, world_max);
+    let uv = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
+    let enc_xz = textureSampleLevel(normal_tex, normal_samp, uv, i32(lod), 0.0).rg;
+    let y = sqrt(max(1.0 - min(dot(enc_xz, enc_xz), 1.0), 0.0));
+    return normalize(vec3<f32>(enc_xz.x, y, enc_xz.y));
 }
 
 /// Blend height between fine (lod) and coarse (lod+1) levels by morph_alpha.
@@ -184,16 +197,9 @@ fn vertex(v: Vertex) -> TerrainVOut {
     let h   = blended_height(lod_level, coarse_lod, morph_alpha, world_xz);
     let pos = vec3<f32>(world_xz.x, h, world_xz.y);
 
-    // --- Normal via central differences (using the same blended sampling). ---
-    // Blend eps by morph_alpha too: at the LOD boundary (alpha=1) this LOD uses
-    // eps_coarse, matching the adjacent coarser patch's eps_fine = eps_coarse.
-    // Without this the two sides compute different normals → shading seam.
-    let eps_fine   = terrain.clip_levels[lod_level].w;
-    let eps_coarse = terrain.clip_levels[coarse_lod].w;
-    let eps = mix(eps_fine, eps_coarse, morph_alpha);
-    let h_r = blended_height(lod_level, coarse_lod, morph_alpha, world_xz + vec2<f32>(eps, 0.0));
-    let h_u = blended_height(lod_level, coarse_lod, morph_alpha, world_xz + vec2<f32>(0.0, eps));
-    let nrm = normalize(vec3<f32>(h - h_r, eps, h - h_u));
+    let n_fine = normal_at(lod_level, world_xz);
+    let n_coarse = normal_at(coarse_lod, world_xz);
+    let nrm = normalize(mix(n_fine, n_coarse, morph_alpha));
 
     var out: TerrainVOut;
     out.clip_pos     = position_world_to_clip(pos);

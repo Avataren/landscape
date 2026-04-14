@@ -1,7 +1,8 @@
 /// Offline tile baker.
 ///
 /// Reads the 16k EXR height map, builds a 6-level mip pyramid (2×2 box filter),
-/// and writes 256×256 R16Unorm tiles to `assets/tiles/height/L{n}/{tx}_{ty}.bin`.
+/// and writes 256×256 R16Unorm height tiles to `assets/tiles/height/L{n}/{tx}_{ty}.bin`
+/// plus RG8Snorm normal tiles to `assets/tiles/normal/L{n}/{tx}_{ty}.bin`.
 ///
 /// Run from the workspace root:
 ///   cargo run --bin bake_tiles --release
@@ -17,6 +18,8 @@ use std::time::Instant;
 
 const TILE_SIZE: usize = 256;
 const LEVELS: u32 = 6;
+const WORLD_SCALE: f32 = 1.0;
+const HEIGHT_SCALE: f32 = 2048.0;
 const HEIGHT_EXR: &str =
     "assets/height_maps/16k Rocky Terrain Heightmap/Height Map 16k Rocky Terrain.exr";
 const TILE_ROOT: &str = "assets/tiles";
@@ -69,8 +72,10 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             break;
         }
 
-        let level_dir = out_root.join(format!("height/L{}", lod));
-        std::fs::create_dir_all(&level_dir)?;
+        let height_level_dir = out_root.join(format!("height/L{}", lod));
+        let normal_level_dir = out_root.join(format!("normal/L{}", lod));
+        std::fs::create_dir_all(&height_level_dir)?;
+        std::fs::create_dir_all(&normal_level_dir)?;
 
         let level_tile_count = (tiles_per_side * tiles_per_side) as usize;
         let mut level_done = 0usize;
@@ -81,6 +86,8 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 let py_start = (ty * TILE_SIZE as i32 + mip_half) as usize;
 
                 let mut tile_bytes = Vec::with_capacity(TILE_SIZE * TILE_SIZE * 2);
+                let mut normal_bytes = Vec::with_capacity(TILE_SIZE * TILE_SIZE * 2);
+                let lod_scale = WORLD_SCALE * (1u32 << lod) as f32;
 
                 for row in 0..TILE_SIZE {
                     for col in 0..TILE_SIZE {
@@ -93,11 +100,27 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                         };
                         let v = (h.clamp(0.0, 1.0) * 65535.0) as u16;
                         tile_bytes.extend_from_slice(&v.to_le_bytes());
+
+                        let enc = if px < mip_size && py < mip_size {
+                            encode_normal_xz(compute_normal(
+                                &current_pixels,
+                                mip_size,
+                                px,
+                                py,
+                                lod_scale,
+                                HEIGHT_SCALE,
+                            ))
+                        } else {
+                            [0u8, 0u8]
+                        };
+                        normal_bytes.extend_from_slice(&enc);
                     }
                 }
 
-                let tile_path = level_dir.join(format!("{}_{}.bin", tx, ty));
-                std::fs::write(&tile_path, &tile_bytes)?;
+                let height_tile_path = height_level_dir.join(format!("{}_{}.bin", tx, ty));
+                let normal_tile_path = normal_level_dir.join(format!("{}_{}.bin", tx, ty));
+                std::fs::write(&height_tile_path, &tile_bytes)?;
+                std::fs::write(&normal_tile_path, &normal_bytes)?;
                 level_done += 1;
                 total_tiles += 1;
             }
@@ -178,4 +201,32 @@ fn box_filter_2x(src: &[f32], w: usize, h: usize) -> Vec<f32> {
         }
     }
     dst
+}
+
+fn sample_height_clamped(src: &[f32], size: usize, x: usize, y: usize) -> f32 {
+    src[y.min(size - 1) * size + x.min(size - 1)]
+}
+
+fn compute_normal(
+    src: &[f32],
+    size: usize,
+    x: usize,
+    y: usize,
+    level_scale_ws: f32,
+    height_scale: f32,
+) -> [f32; 3] {
+    let h = sample_height_clamped(src, size, x, y) * height_scale;
+    let h_r = sample_height_clamped(src, size, x.saturating_add(1), y) * height_scale;
+    let h_u = sample_height_clamped(src, size, x, y.saturating_add(1)) * height_scale;
+    let dx = h - h_r;
+    let dz = h - h_u;
+    let len = (dx * dx + level_scale_ws * level_scale_ws + dz * dz).sqrt().max(1e-6);
+    [dx / len, level_scale_ws / len, dz / len]
+}
+
+fn encode_normal_xz(normal: [f32; 3]) -> [u8; 2] {
+    [
+        (normal[0].clamp(-1.0, 1.0) * 127.0).round() as i8 as u8,
+        (normal[2].clamp(-1.0, 1.0) * 127.0).round() as i8 as u8,
+    ]
 }

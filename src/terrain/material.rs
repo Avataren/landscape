@@ -76,6 +76,11 @@ pub struct TerrainMaterial {
     #[texture(3, visibility(fragment))]
     #[sampler(4, visibility(fragment))]
     pub macro_color_texture: Handle<Image>,
+
+    /// RG8Snorm texture array containing baked XZ normals per LOD level.
+    #[texture(5, visibility(vertex), dimension = "2d_array")]
+    #[sampler(6, visibility(vertex))]
+    pub normal_texture: Handle<Image>,
 }
 
 impl Material for TerrainMaterial {
