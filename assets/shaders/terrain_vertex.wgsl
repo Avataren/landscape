@@ -90,32 +90,43 @@ fn vertex(v: Vertex) -> TerrainVOut {
     let max_lod_idx = u32(terrain.num_lod_levels) - 1u;
     let coarse_lod  = min(lod_level + 1u, max_lod_idx);
 
-    // --- World XZ before morphing (for the camera-distance test). ---
+    // --- World XZ before morphing. ---
     let world_xz_orig = (model * vec4<f32>(v.position, 1.0)).xz;
 
     // --- Geomorphing ---
     // Blend vertices toward the 2× coarser grid near the outer ring edge so
     // T-junction seams are eliminated.
     //
-    // The mesh vertices lie in [0,1] local space with spacing 1/patch_resolution.
-    // base_patch_size = patch_resolution * world_scale; with world_scale=1,
-    // fine_step = 1 / terrain.base_patch_size.
+    // IMPORTANT: we use the vertex's distance from the RING CENTER (not from
+    // the camera) to compute morph_alpha.  The ring center comes from
+    // clip_levels, which is always aligned to the camera grid.  This guarantees
+    // that every vertex on the outer ring boundary gets alpha = 1.0 regardless
+    // of the camera's offset within its grid cell.
+    //
+    // Using camera distance instead would leave outer-boundary vertices with
+    // alpha < 1 when the camera is offset from the clip center (up to
+    // 2^(clipmap_levels-1) world units), creating residual height cracks.
+    let lvl_fine    = terrain.clip_levels[lod_level];
+    // half_ring_ws = ring_span / 2 = 0.5 / inv_ring_span
+    let half_ring_ws = 0.5 / lvl_fine.z;
+    // ring_center = origin + (half_ring, half_ring)
+    let ring_center  = lvl_fine.xy + vec2<f32>(half_ring_ws);
+
+    let vertex_delta     = abs(world_xz_orig - ring_center);
+    let dist_from_center = max(vertex_delta.x, vertex_delta.y);  // Chebyshev
+
+    let morph_start_ws = half_ring_ws * terrain.morph_start_ratio;
+    let morph_alpha = clamp(
+        (dist_from_center - morph_start_ws) / max(half_ring_ws - morph_start_ws, 0.001),
+        0.0, 1.0,
+    );
+
+    // Local-space grid snapping (positions run [0,1] with patch_resolution steps).
     let fine_step   = 1.0 / terrain.base_patch_size;
     let coarse_step = fine_step * 2.0;
 
     let local_xz  = v.position.xz;
     let coarse_xz = round(local_xz / coarse_step) * coarse_step;
-
-    // Chebyshev camera distance → square morph band matching ring geometry.
-    let half_ring   = patch_size_ws * terrain.ring_patches * 0.5;
-    let morph_start = half_ring * terrain.morph_start_ratio;
-    let morph_end   = half_ring;
-    let cam_delta   = abs(view.world_position.xz - world_xz_orig);
-    let cam_dist    = max(cam_delta.x, cam_delta.y);
-    let morph_alpha = clamp(
-        (cam_dist - morph_start) / max(morph_end - morph_start, 0.001),
-        0.0, 1.0,
-    );
 
     let morphed_xz    = mix(local_xz, coarse_xz, morph_alpha);
     let morphed_local = vec3<f32>(morphed_xz.x, 0.0, morphed_xz.y);
