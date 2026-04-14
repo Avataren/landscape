@@ -5,6 +5,7 @@ pub mod components;
 pub mod config;
 pub mod debug;
 pub mod material;
+pub mod macro_color;
 pub mod math;
 pub mod patch_mesh;
 pub mod render;
@@ -26,6 +27,7 @@ use collision::{update_collision_tiles, TerrainCollisionCache};
 use components::TerrainCamera;
 use config::TerrainConfig;
 use material::{TerrainMaterial, TerrainMaterialUniforms};
+use macro_color::load_macro_color_texture;
 use math::{compute_needed_tiles_for_level, level_scale, snap_camera_to_level_grid};
 use render::{extract::extract_terrain_frame, TerrainRenderPlugin};
 use residency::update_required_tiles;
@@ -272,12 +274,15 @@ fn setup_terrain(
     // Layers are regenerated live by `update_clipmap_textures` as the camera moves.
     let height_image = create_initial_clipmap_texture(&config);
     let height_handle = images.add(height_image);
+    let macro_color = load_macro_color_texture(&config, &desc);
+    let macro_color_handle = images.add(macro_color.image);
 
     let base_patch_size = config.patch_resolution as f32 * config.world_scale;
     let bounds_fade_distance = config.tile_size as f32 * config.world_scale * 4.0;
 
     let mat_handle = terrain_materials.add(TerrainMaterial {
         height_texture: height_handle.clone(),
+        macro_color_texture: macro_color_handle,
         params: TerrainMaterialUniforms {
             height_scale: config.height_scale,
             base_patch_size,
@@ -286,7 +291,12 @@ fn setup_terrain(
             num_lod_levels: config.clipmap_levels as f32,
             patch_resolution: config.patch_resolution as f32,
             world_bounds: Vec4::new(desc.world_min.x, desc.world_min.y, desc.world_max.x, desc.world_max.y),
-            bounds_fade: Vec4::new(bounds_fade_distance, 0.0, 0.0, 0.0),
+            bounds_fade: Vec4::new(
+                bounds_fade_distance,
+                if macro_color.enabled { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
+            ),
             clip_levels: compute_initial_clip_levels(&config),
         },
     });

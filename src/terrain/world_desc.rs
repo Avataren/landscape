@@ -10,7 +10,7 @@ pub struct TerrainSourceDesc {
     pub normal_root: Option<String>,
     /// Optional root path for material/mask tiles.
     pub material_root: Option<String>,
-    /// Optional root path for macro color tiles.
+    /// Optional path for a world-aligned macro/diffuse color map.
     pub macro_color_root: Option<String>,
     /// World-space XZ minimum (2D footprint).
     pub world_min: Vec2,

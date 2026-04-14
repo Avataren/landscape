@@ -20,7 +20,7 @@ use bevy::{
 //   offset 16 – num_lod_levels    f32   (= clipmap_levels, used to clamp coarse index)
 //   offset 20 – patch_resolution  f32
 //   offset 24 – world_bounds      vec4<f32>   (min_x, min_z, max_x, max_z)
-//   offset 40 – bounds_fade       vec4<f32>   (fade_distance, unused, unused, unused)
+//   offset 40 – bounds_fade       vec4<f32>   (fade_distance, use_macro_color_map, unused, unused)
 //   offset 56 – clip_levels[0]    vec4<f32>
 //   offset 72 – clip_levels[1]    vec4<f32>
 //   …
@@ -70,6 +70,11 @@ pub struct TerrainMaterial {
     /// World-scale uniforms shared between vertex and fragment stages.
     #[uniform(2)]
     pub params: TerrainMaterialUniforms,
+
+    /// World-aligned macro/diffuse color map used for terrain albedo.
+    #[texture(3, visibility(fragment))]
+    #[sampler(4, visibility(fragment))]
+    pub macro_color_texture: Handle<Image>,
 }
 
 impl Material for TerrainMaterial {

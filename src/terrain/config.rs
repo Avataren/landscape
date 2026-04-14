@@ -29,6 +29,12 @@ pub struct TerrainConfig {
     /// Disabled by default — leave false when real tile data is available so
     /// unloaded regions show as flat (height 0) rather than mismatched bumps.
     pub procedural_fallback: bool,
+    /// When true, sample the world-aligned diffuse EXR as terrain albedo.
+    /// Disable to fall back to the procedural slope/altitude shading.
+    pub use_macro_color_map: bool,
+    /// Maximum resolution of the loaded macro color texture after startup
+    /// downsampling. Keeps the 16k diffuse map at a practical runtime size.
+    pub macro_color_resolution: u32,
 }
 
 impl Default for TerrainConfig {
@@ -45,6 +51,8 @@ impl Default for TerrainConfig {
             max_resident_tiles: 256,
             max_view_distance: 65536.0,
             procedural_fallback: false,
+            use_macro_color_map: true,
+            macro_color_resolution: 16384,
         }
     }
 }
