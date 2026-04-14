@@ -1,0 +1,27 @@
+use bevy::prelude::*;
+
+/// Describes where terrain source data lives and the world extents.
+#[derive(Resource, Clone, Default, Debug)]
+pub struct TerrainSourceDesc {
+    /// Root path for height tile files.
+    pub height_root: String,
+    /// Optional root path for precomputed normal tiles.
+    pub normal_root: Option<String>,
+    /// Optional root path for material/mask tiles.
+    pub material_root: Option<String>,
+    /// Optional root path for macro color tiles.
+    pub macro_color_root: Option<String>,
+    /// World-space XZ minimum (2D footprint).
+    pub world_min: Vec2,
+    /// World-space XZ maximum (2D footprint).
+    pub world_max: Vec2,
+    /// Maximum mip level available in the tile hierarchy.
+    pub max_mip_level: u8,
+}
+
+impl TerrainSourceDesc {
+    /// Returns the tile path for a given level and tile coordinates.
+    pub fn height_tile_path(&self, level: u8, x: i32, y: i32) -> String {
+        format!("{}/L{}/{}_{}_{}.raw", self.height_root, level, level, x, y)
+    }
+}
