@@ -14,11 +14,44 @@ use crate::terrain::{
 #[derive(Resource, Clone)]
 pub struct TerrainTileReceiver(pub Arc<Mutex<std::sync::mpsc::Receiver<HeightTileCpu>>>);
 
-/// Spawns a background OS thread to load and decode one height tile.
+/// Loads height data for a single tile synchronously (blocking).
 ///
-/// In a full implementation this reads from disk/network and decodes
-/// the compressed format. Here we generate synthetic height data so the
-/// render pipeline can be exercised without on-disk assets.
+/// Tries the pre-baked file first; falls back to procedural or zeros.
+/// Shared by the background-thread streamer and the startup preloader.
+pub(crate) fn load_tile_data(
+    key: TileKey,
+    tile_size: u32,
+    world_scale: f32,
+    tile_root: Option<&std::path::Path>,
+    use_procedural: bool,
+) -> Vec<f32> {
+    tile_root
+        .and_then(|root| {
+            let path = root.join(format!("height/L{}/{}_{}.bin", key.level, key.x, key.y));
+            read_r16_tile(&path, tile_size)
+        })
+        .unwrap_or_else(|| {
+            let len = (tile_size * tile_size) as usize;
+            if use_procedural {
+                let level_scale_ws = world_scale * (1u32 << (key.level as u32)) as f32;
+                let mut pixels = Vec::with_capacity(len);
+                for row in 0..tile_size {
+                    for col in 0..tile_size {
+                        let world_x = ((key.x * tile_size as i32 + col as i32) as f32 + 0.5)
+                            * level_scale_ws;
+                        let world_z = ((key.y * tile_size as i32 + row as i32) as f32 + 0.5)
+                            * level_scale_ws;
+                        pixels.push(height_at_world(world_x, world_z));
+                    }
+                }
+                pixels
+            } else {
+                vec![0.0f32; len]
+            }
+        })
+}
+
+/// Spawns a background OS thread to load and decode one height tile.
 pub fn spawn_background_height_job(
     key: TileKey,
     tile_size: u32,
@@ -28,38 +61,10 @@ pub fn spawn_background_height_job(
     tx: Sender<HeightTileCpu>,
 ) {
     std::thread::spawn(move || {
-        // Try to load a pre-baked tile file first.
-        let data = tile_root
-            .as_ref()
-            .and_then(|root| {
-                let path = root.join(format!(
-                    "height/L{}/{}_{}.bin",
-                    key.level, key.x, key.y
-                ));
-                read_r16_tile(&path, tile_size)
-            })
-            .unwrap_or_else(|| {
-                let len = (tile_size * tile_size) as usize;
-                if use_procedural {
-                    // Procedural fallback: multi-octave sine waves.
-                    let level_scale_ws = world_scale * (1u32 << (key.level as u32)) as f32;
-                    let mut pixels = Vec::with_capacity(len);
-                    for row in 0..tile_size {
-                        for col in 0..tile_size {
-                            let world_x = ((key.x * tile_size as i32 + col as i32) as f32 + 0.5)
-                                * level_scale_ws;
-                            let world_z = ((key.y * tile_size as i32 + row as i32) as f32 + 0.5)
-                                * level_scale_ws;
-                            pixels.push(height_at_world(world_x, world_z));
-                        }
-                    }
-                    pixels
-                } else {
-                    // Flat fallback: tile file missing, show zero height.
-                    vec![0.0f32; len]
-                }
-            });
-
+        let data = load_tile_data(
+            key, tile_size, world_scale,
+            tile_root.as_deref(), use_procedural,
+        );
         let _ = tx.send(HeightTileCpu { key, data, tile_size });
     });
 }
@@ -94,8 +99,9 @@ pub fn request_tile_loads(
 ) {
     let Some(sender) = sender else { return };
 
-    // Collect keys first to avoid borrowing residency while mutating it.
-    let needed: Vec<TileKey> = residency.required_now.iter().copied().collect();
+    // Collect keys, coarsest LOD first so far terrain fills in before close detail.
+    let mut needed: Vec<TileKey> = residency.required_now.iter().copied().collect();
+    needed.sort_by(|a, b| b.level.cmp(&a.level));
 
     for key in needed {
         if queue.pending_requests.contains(&key) {

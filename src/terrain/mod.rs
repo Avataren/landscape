@@ -18,17 +18,17 @@ pub use world_desc::TerrainSourceDesc;
 
 use bevy::{camera::visibility::NoFrustumCulling, prelude::*};
 use clipmap_texture::{
-    TerrainClipmapState, apply_tiles_to_clipmap, compute_initial_clip_levels,
+    TerrainClipmapState, apply_tiles_to_clipmap, compute_clip_levels, compute_initial_clip_levels,
     create_initial_clipmap_texture, update_clipmap_textures,
 };
 use components::TerrainCamera;
 use config::TerrainConfig;
-use math::{level_scale, snap_camera_to_level_grid};
+use math::{compute_needed_tiles_for_level, level_scale, snap_camera_to_level_grid};
 use material::{TerrainMaterial, TerrainMaterialUniforms};
 use render::{TerrainRenderPlugin, extract::extract_terrain_frame};
 use residency::update_required_tiles;
-use resources::{TerrainResidency, TerrainStreamQueue, TerrainViewState};
-use streamer::{poll_tile_stream_jobs, request_tile_loads, setup_tile_channel};
+use resources::{TerrainResidency, TerrainStreamQueue, TerrainViewState, TileKey, TileState};
+use streamer::{load_tile_data, poll_tile_stream_jobs, request_tile_loads, setup_tile_channel};
 use collision::{update_collision_tiles, TerrainCollisionCache};
 use clipmap::{build_patch_instances_for_view, PatchInstanceCpu};
 
@@ -67,6 +67,7 @@ impl Plugin for TerrainPlugin {
             .init_resource::<PatchEntities>()
             // Startup
             .add_systems(Startup, (setup_tile_channel, setup_terrain).chain())
+            .add_systems(PostStartup, preload_terrain_startup)
             // Update: ordered as per handoff spec
             .add_systems(Update, update_terrain_view_state)
             .add_systems(
@@ -95,8 +96,146 @@ impl Plugin for TerrainPlugin {
 }
 
 // ---------------------------------------------------------------------------
-// Startup system
+// Startup systems
 // ---------------------------------------------------------------------------
+
+/// Synchronously pre-loads all terrain tiles visible from the starting camera
+/// position and writes them into the clipmap texture before the first Update
+/// frame.  Without this, tiles only begin loading on the first Update tick and
+/// the terrain stays flat until background threads finish (many frames later).
+///
+/// Runs in PostStartup (after setup_terrain) so TerrainClipmapState exists.
+fn preload_terrain_startup(
+    config:    Res<TerrainConfig>,
+    desc:      Res<TerrainSourceDesc>,
+    camera_q:  Query<&Transform, With<TerrainCamera>>,
+    mut state:     ResMut<TerrainClipmapState>,
+    mut images:    ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<TerrainMaterial>>,
+    mut residency: ResMut<TerrainResidency>,
+) {
+    // --- Compute clip centers from the starting camera position ---------------
+    let cam_pos = match camera_q.single() {
+        Ok(t)  => t.translation,
+        Err(_) => { warn!("[Terrain] preload: no camera found"); return; }
+    };
+
+    let scale_0     = level_scale(config.world_scale, 0);
+    let raw_0       = snap_camera_to_level_grid(cam_pos.xz(), scale_0);
+    let align_shift = (config.clipmap_levels - 1) as i32;
+    let aligned_0   = IVec2::new(
+        (raw_0.x >> align_shift) << align_shift,
+        (raw_0.y >> align_shift) << align_shift,
+    );
+
+    let clip_centers: Vec<IVec2> = (0..config.clipmap_levels)
+        .map(|l| { let s = l as i32; IVec2::new(aligned_0.x >> s, aligned_0.y >> s) })
+        .collect();
+    let level_scales: Vec<f32> = (0..config.clipmap_levels)
+        .map(|l| level_scale(config.world_scale, l))
+        .collect();
+
+    // --- Collect all needed tile keys, coarser levels first ------------------
+    let mut all_keys: Vec<TileKey> = Vec::new();
+    for level in 0..config.clipmap_levels {
+        let keys = compute_needed_tiles_for_level(
+            clip_centers[level as usize],
+            level_scales[level as usize],
+            config.patch_resolution,
+            config.ring_patches,
+            config.tile_size,
+            level as u8,
+        );
+        all_keys.extend(keys);
+    }
+    all_keys.sort_by(|a, b| b.level.cmp(&a.level));
+    all_keys.dedup();
+
+    // --- Load all tiles in parallel, block until done -------------------------
+    let tile_size      = config.tile_size;
+    let world_scale    = config.world_scale;
+    let use_procedural = config.procedural_fallback;
+    let tile_root      = desc.tile_root.clone();
+
+    let results: Vec<(TileKey, Vec<f32>)> = std::thread::scope(|s| {
+        let handles: Vec<_> = all_keys.iter().map(|&key| {
+            let tile_root = tile_root.clone();
+            s.spawn(move || {
+                let data = load_tile_data(
+                    key, tile_size, world_scale,
+                    tile_root.as_deref(), use_procedural,
+                );
+                (key, data)
+            })
+        }).collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    // --- Write tile data into the clipmap texture and residency ---------------
+    let Some(image) = images.get_mut(&state.texture_handle) else {
+        warn!("[Terrain] preload: clipmap image not found"); return;
+    };
+    let Some(ref mut img_data) = image.data else {
+        warn!("[Terrain] preload: clipmap image has no pixel data"); return;
+    };
+
+    let res    = config.clipmap_resolution;
+    let bpl    = (res * res * 2) as usize; // R16Unorm: 2 bytes per texel
+    let half   = (res / 2) as i32;
+    let ts     = config.tile_size;
+    let levels = config.clipmap_levels as usize;
+    let mut written = 0u32;
+
+    for (key, tile_pixels) in &results {
+        let level = key.level as usize;
+        if level >= levels { continue; }
+
+        let clip_center = clip_centers[level];
+        let layer_base  = level * bpl;
+
+        for row in 0..ts {
+            for col in 0..ts {
+                let gx = key.x * ts as i32 + col as i32;
+                let gz = key.y * ts as i32 + row as i32;
+
+                // Cull texels outside the current clip window.
+                let dx = gx - clip_center.x;
+                let dz = gz - clip_center.y;
+                if dx < -half || dx >= half || dz < -half || dz >= half { continue; }
+
+                // Toroidal texture position: matches fract(world * inv_span) in shader.
+                let tx  = gx.rem_euclid(res as i32) as usize;
+                let tz  = gz.rem_euclid(res as i32) as usize;
+                let dst = layer_base + (tz * res as usize + tx) * 2;
+                let h   = tile_pixels[(row * ts + col) as usize];
+                let v   = (h * 65535.0) as u16;
+
+                if dst + 2 <= img_data.len() {
+                    img_data[dst..dst + 2].copy_from_slice(&v.to_le_bytes());
+                }
+            }
+        }
+
+        residency.resident_cpu.insert(*key, tile_pixels.clone());
+        residency.tiles.insert(*key, TileState::ResidentGpu { slot: 0 });
+        residency.touch(*key);
+        written += 1;
+    }
+
+    // --- Update material clip_levels so UVs map to the actual camera pos -----
+    if let Some(mat) = materials.get_mut(&state.material_handle) {
+        mat.params.clip_levels = compute_clip_levels(&config, &clip_centers, &level_scales);
+    }
+
+    // --- Set sentinels so Update-frame systems see no change and skip --------
+    // update_clipmap_textures compares view.clip_centers vs last_clip_centers.
+    // apply_tiles_to_clipmap compares view.clip_centers vs tile_apply_centers.
+    // Both will be equal on the first Update frame (camera hasn't moved).
+    state.last_clip_centers  = clip_centers.clone();
+    state.tile_apply_centers = clip_centers;
+
+    info!("[Terrain] Startup preload: {} tiles loaded synchronously.", written);
+}
 
 /// Spawns patch entities and creates the initial clipmap texture array.
 fn setup_terrain(

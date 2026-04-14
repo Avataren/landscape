@@ -1,5 +1,6 @@
 use bevy::{
     asset::RenderAssetUsages,
+    image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     prelude::*,
     render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
@@ -51,8 +52,8 @@ const BYTES_PER_TEXEL: usize = 2; // R16Unorm
 pub fn generate_clipmap_layer(
     center: IVec2,
     level_scale_ws: f32,
-    ring_patches: u32,
-    patch_resolution: u32,
+    _ring_patches: u32,
+    _patch_resolution: u32,
     clipmap_resolution: u32,
     use_procedural: bool,
 ) -> Vec<u8> {
@@ -61,20 +62,26 @@ pub fn generate_clipmap_layer(
         return vec![0u8; texels * BYTES_PER_TEXEL];
     }
 
-    let ring_span = ring_patches as f32 * patch_resolution as f32 * level_scale_ws;
-    let origin_x  = center.x as f32 * level_scale_ws - ring_span * 0.5;
-    let origin_z  = center.y as f32 * level_scale_ws - ring_span * 0.5;
-    let texel_ws  = ring_span / clipmap_resolution as f32;
+    // Build a toroidal buffer: texel at (tx, tz) = (gx mod N, gz mod N) stores
+    // the height for grid position (gx, gz).  This matches the toroidal UV
+    // formula in the shader: uv = fract(world_xz * inv_ring_span).
+    let half   = (clipmap_resolution / 2) as i32;
+    let mut data = vec![0u8; texels * BYTES_PER_TEXEL];
 
-    let mut data = Vec::with_capacity(texels * BYTES_PER_TEXEL);
-
-    for row in 0..clipmap_resolution {
-        for col in 0..clipmap_resolution {
-            let wx = origin_x + (col as f32 + 0.5) * texel_ws;
-            let wz = origin_z + (row as f32 + 0.5) * texel_ws;
+    for row in 0..clipmap_resolution as i32 {
+        for col in 0..clipmap_resolution as i32 {
+            let gx = center.x - half + col;
+            let gz = center.y - half + row;
+            let wx = (gx as f32 + 0.5) * level_scale_ws;
+            let wz = (gz as f32 + 0.5) * level_scale_ws;
             let h  = height_at_world(wx, wz);
             let v  = (h * 65535.0) as u16;
-            data.extend_from_slice(&v.to_le_bytes());
+
+            // Toroidal texture position.
+            let tx = gx.rem_euclid(clipmap_resolution as i32) as usize;
+            let tz = gz.rem_euclid(clipmap_resolution as i32) as usize;
+            let off = (tz * clipmap_resolution as usize + tx) * BYTES_PER_TEXEL;
+            data[off..off + BYTES_PER_TEXEL].copy_from_slice(&v.to_le_bytes());
         }
     }
 
@@ -110,7 +117,7 @@ pub fn create_initial_clipmap_texture(config: &TerrainConfig) -> Image {
         data[offset..offset + bpl].copy_from_slice(&layer_data);
     }
 
-    Image::new(
+    let mut image = Image::new(
         Extent3d {
             width: res, height: res,
             depth_or_array_layers: layers,
@@ -120,7 +127,19 @@ pub fn create_initial_clipmap_texture(config: &TerrainConfig) -> Image {
         TextureFormat::R16Unorm,
         // Keep the CPU copy so `update_clipmap_textures` can patch layers.
         RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    )
+    );
+    // Repeat + Linear: toroidal UV uses fract() wrapping; linear filtering
+    // smooths sub-texel interpolation.  Repeat address mode is required so
+    // hardware wraps correctly at the 0/1 boundary.
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        address_mode_w: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        ..default()
+    });
+    image
 }
 
 // ---------------------------------------------------------------------------
@@ -129,7 +148,11 @@ pub fn create_initial_clipmap_texture(config: &TerrainConfig) -> Image {
 
 /// Computes `clip_levels[8]` for `TerrainMaterialUniforms` from a view state.
 ///
-/// Layout per entry: `(origin_x, origin_z, inv_ring_span, texel_world_size)`.
+/// Layout per entry: `(ring_center_x, ring_center_z, inv_ring_span, texel_world_size)`.
+///
+/// `.xy` stores the ring center in world space (used for morph-alpha distance).
+/// `.z`  = 1/ring_span, used for toroidal UV: `uv = fract(world_xz * inv_span)`.
+/// `.w`  = texel world size (used for finite-difference normal epsilon).
 pub fn compute_clip_levels(
     config: &TerrainConfig,
     clip_centers: &[IVec2],
@@ -142,13 +165,14 @@ pub fn compute_clip_levels(
         let scale  = level_scales.get(lod).copied()
             .unwrap_or_else(|| level_scale(config.world_scale, lod as u32));
 
-        let ring_span = config.ring_patches as f32 * config.patch_resolution as f32 * scale;
-        let origin_x  = center.x as f32 * scale - ring_span * 0.5;
-        let origin_z  = center.y as f32 * scale - ring_span * 0.5;
-        let inv_span  = 1.0 / ring_span;
-        let texel_ws  = ring_span / config.clipmap_resolution as f32;
+        let ring_span       = config.ring_patches as f32 * config.patch_resolution as f32 * scale;
+        let inv_span        = 1.0 / ring_span;
+        let texel_ws        = ring_span / config.clipmap_resolution as f32;
+        // Ring center: world-space position the clip center corresponds to.
+        let ring_center_x   = center.x as f32 * scale;
+        let ring_center_z   = center.y as f32 * scale;
 
-        levels[lod] = Vec4::new(origin_x, origin_z, inv_span, texel_ws);
+        levels[lod] = Vec4::new(ring_center_x, ring_center_z, inv_span, texel_ws);
     }
 
     levels
@@ -182,11 +206,115 @@ pub struct TerrainClipmapState {
 }
 
 // ---------------------------------------------------------------------------
+// Strip-only incremental update helpers
+// ---------------------------------------------------------------------------
+
+/// Writes a single height texel at toroidal position (gx, gz) into the layer.
+#[inline]
+fn write_texel_at(
+    data:         &mut Vec<u8>,
+    layer_offset: usize,
+    gx: i32, gz: i32,
+    n:            i32,
+    scale:        f32,
+    use_procedural: bool,
+) {
+    let wx = (gx as f32 + 0.5) * scale;
+    let wz = (gz as f32 + 0.5) * scale;
+    let h  = if use_procedural { height_at_world(wx, wz) } else { 0.0 };
+    let v  = (h * 65535.0) as u16;
+    let tx = gx.rem_euclid(n) as usize;
+    let tz = gz.rem_euclid(n) as usize;
+    let off = layer_offset + (tz * n as usize + tx) * BYTES_PER_TEXEL;
+    if off + BYTES_PER_TEXEL <= data.len() {
+        data[off..off + BYTES_PER_TEXEL].copy_from_slice(&v.to_le_bytes());
+    }
+}
+
+/// Writes only the newly-exposed strip into a toroidal clipmap layer.
+///
+/// When the clip centre shifts by `delta`, the positions entering the window
+/// on one edge are brand new — they need fresh heights written to their
+/// toroidal slots.  All other positions retain their existing (correct) data.
+///
+/// The window spans [new_center - half, new_center + half) in each axis.
+fn write_new_strip(
+    data:         &mut Vec<u8>,
+    layer_offset: usize,
+    res:          u32,
+    new_center:   IVec2,
+    old_center:   IVec2,
+    scale:        f32,
+    use_procedural: bool,
+) {
+    let n    = res as i32;
+    let half = (res / 2) as i32;
+    let delta = new_center - old_center;
+
+    // Guard: if the shift is >= ring size a full reset is needed; this should
+    // never happen during normal play but protects against teleports.
+    if delta.x.abs() >= n || delta.y.abs() >= n {
+        let full = generate_clipmap_layer(
+            new_center, scale, 0, 0, res, use_procedural,
+        );
+        if let Some(slice) = data.get_mut(layer_offset..layer_offset + full.len()) {
+            slice.copy_from_slice(&full);
+        }
+        return;
+    }
+
+    // ---- New X-strip (columns entering from one side) ----------------------
+    if delta.x != 0 {
+        let (x_lo, x_hi) = if delta.x > 0 {
+            (old_center.x + half, new_center.x + half - 1)
+        } else {
+            (new_center.x - half, old_center.x - half - 1)
+        };
+        let z_lo = new_center.y - half;
+        let z_hi = new_center.y + half - 1;
+        for gz in z_lo..=z_hi {
+            for gx in x_lo..=x_hi {
+                write_texel_at(data, layer_offset, gx, gz, n, scale, use_procedural);
+            }
+        }
+    }
+
+    // ---- New Z-strip (rows entering from one side) -------------------------
+    if delta.y != 0 {
+        let (z_lo, z_hi) = if delta.y > 0 {
+            (old_center.y + half, new_center.y + half - 1)
+        } else {
+            (new_center.y - half, old_center.y - half - 1)
+        };
+        // Exclude columns already written by the x-strip to avoid double-writes.
+        let (ex_lo, ex_hi) = if delta.x > 0 {
+            (old_center.x + half, new_center.x + half - 1)
+        } else if delta.x < 0 {
+            (new_center.x - half, old_center.x - half - 1)
+        } else {
+            (i32::MAX, i32::MIN)
+        };
+        let x_lo = new_center.x - half;
+        let x_hi = new_center.x + half - 1;
+        for gz in z_lo..=z_hi {
+            for gx in x_lo..=x_hi {
+                if gx >= ex_lo && gx <= ex_hi { continue; }
+                write_texel_at(data, layer_offset, gx, gz, n, scale, use_procedural);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Update system
 // ---------------------------------------------------------------------------
 
-/// Re-generates any clipmap layers whose clip centre has changed since the
-/// last frame, and refreshes the per-level origin uniforms in the material.
+/// Updates clipmap layers incrementally when clip centres change.
+///
+/// Instead of regenerating the full layer (which zeros all heights and forces
+/// a complete tile re-apply), only the newly-exposed strip is written.
+/// All other texels keep their existing data — which is already correct
+/// because the toroidal UV layout is stable for fixed world positions.
 ///
 /// Runs in `Update` after `update_terrain_view_state`.
 pub fn update_clipmap_textures(
@@ -205,7 +333,6 @@ pub fn update_clipmap_textures(
 
     // Pad the cached list so index comparisons don't go out of bounds.
     while state.last_clip_centers.len() < levels {
-        // Use a sentinel that guarantees the first run regenerates every layer.
         state.last_clip_centers.push(IVec2::new(i32::MAX, i32::MAX));
     }
 
@@ -219,22 +346,33 @@ pub fn update_clipmap_textures(
     let Some(image) = images.get_mut(&state.texture_handle) else { return };
 
     for lod in 0..levels {
-        let center = view.clip_centers.get(lod).copied().unwrap_or(IVec2::ZERO);
-        if center == state.last_clip_centers[lod] { continue; }
+        let new_center = view.clip_centers.get(lod).copied().unwrap_or(IVec2::ZERO);
+        let old_center = state.last_clip_centers[lod];
+        if new_center == old_center { continue; }
 
         let scale = view.level_scales.get(lod).copied()
             .unwrap_or_else(|| level_scale(config.world_scale, lod as u32));
 
-        let layer_data = generate_clipmap_layer(
-            center, scale,
-            config.ring_patches, config.patch_resolution, res,
-            config.procedural_fallback,
-        );
+        let layer_offset = lod * bpl;
 
-        let offset = lod * bpl;
         if let Some(ref mut data) = image.data {
-            if let Some(slice) = data.get_mut(offset..offset + bpl) {
-                slice.copy_from_slice(&layer_data);
+            // Sentinel means this level has never been written — old_center is
+            // meaningless, so fall back to a full layer initialisation.
+            if old_center.x == i32::MAX {
+                let full = generate_clipmap_layer(
+                    new_center, scale, 0, 0, res,
+                    config.procedural_fallback,
+                );
+                if let Some(slice) = data.get_mut(layer_offset..layer_offset + bpl) {
+                    slice.copy_from_slice(&full);
+                }
+            } else {
+                // Normal case: only write the newly-exposed strip.
+                write_new_strip(
+                    data, layer_offset, res,
+                    new_center, old_center, scale,
+                    config.procedural_fallback,
+                );
             }
         }
     }
@@ -334,15 +472,17 @@ pub fn apply_tiles_to_clipmap(
                 let gx = key.x * ts as i32 + col as i32;
                 let gz = key.y * ts as i32 + row as i32;
 
-                let cx = gx - clip_center.x + half;
-                let cz = gz - clip_center.y + half;
+                // Cull texels outside the current clip window.
+                let dx = gx - clip_center.x;
+                let dz = gz - clip_center.y;
+                if dx < -half || dx >= half || dz < -half || dz >= half { continue; }
 
-                if cx < 0 || cx >= res as i32 || cz < 0 || cz >= res as i32 { continue; }
-
-                let texel_off = (cz as usize * res as usize + cx as usize) * BYTES_PER_TEXEL;
-                let dst       = layer_base + texel_off;
-                let h         = tile_pixels[(row * ts + col) as usize];
-                let v         = (h * 65535.0) as u16;
+                // Toroidal texture position: UV = fract(grid / clipmap_resolution).
+                let tx  = gx.rem_euclid(res as i32) as usize;
+                let tz  = gz.rem_euclid(res as i32) as usize;
+                let dst = layer_base + (tz * res as usize + tx) * BYTES_PER_TEXEL;
+                let h   = tile_pixels[(row * ts + col) as usize];
+                let v   = (h * 65535.0) as u16;
 
                 if dst + BYTES_PER_TEXEL <= img_data.len() {
                     img_data[dst..dst + BYTES_PER_TEXEL].copy_from_slice(&v.to_le_bytes());

@@ -51,11 +51,17 @@ struct TerrainVOut {
 // ---------------------------------------------------------------------------
 
 /// Sample height from the given LOD level's clipmap layer.
+///
+/// Toroidal UV: UV = fract(xz * inv_ring_span).
+/// The UV for any world position is constant regardless of where the clip center
+/// is.  When the center shifts, only newly-exposed strips are rewritten in the
+/// texture; existing texels keep their data.  This eliminates the per-shift
+/// 1-texel UV jump that caused geometric shimmering on far LODs.
 fn height_at(lod: u32, xz: vec2<f32>) -> f32 {
     let lvl = terrain.clip_levels[lod];
-    // lvl.xy = world-space bottom-left corner of the clipmap region
-    // lvl.z  = 1 / ring_span  →  maps world XZ into [0,1] UV
-    let uv = clamp((xz - lvl.xy) * lvl.z, vec2<f32>(0.0), vec2<f32>(1.0));
+    // lvl.z  = 1 / ring_span
+    // Texture uses Repeat address mode so the fract wrap is handled by hardware.
+    let uv = fract(xz * lvl.z);
     return textureSampleLevel(height_tex, height_samp, uv, i32(lod), 0.0).r
            * terrain.height_scale;
 }
@@ -109,8 +115,8 @@ fn vertex(v: Vertex) -> TerrainVOut {
     let lvl_fine    = terrain.clip_levels[lod_level];
     // half_ring_ws = ring_span / 2 = 0.5 / inv_ring_span
     let half_ring_ws = 0.5 / lvl_fine.z;
-    // ring_center = origin + (half_ring, half_ring)
-    let ring_center  = lvl_fine.xy + vec2<f32>(half_ring_ws);
+    // clip_levels[L].xy = ring center in world space (clip_center * texel_ws).
+    let ring_center  = lvl_fine.xy;
 
     let vertex_delta     = abs(world_xz_orig - ring_center);
     let dist_from_center = max(vertex_delta.x, vertex_delta.y);  // Chebyshev
