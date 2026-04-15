@@ -12,6 +12,7 @@ struct TerrainParams {
     patch_resolution:   f32,
     world_bounds:       vec4<f32>,
     bounds_fade:        vec4<f32>,
+    sun_direction:      vec4<f32>,  // xyz = world-space toward-sun unit vector
     clip_levels: array<vec4<f32>, 16>,
 }
 
@@ -42,7 +43,12 @@ fn procedural_albedo(slope: f32, h_norm: f32) -> vec3<f32> {
 fn macro_color_uv(world_xz: vec2<f32>) -> vec2<f32> {
     let world_min = terrain.world_bounds.xy;
     let world_span = max(terrain.world_bounds.zw - world_min, vec2<f32>(1.0, 1.0));
-    return (world_xz - world_min) / world_span;
+    var uv = (world_xz - world_min) / world_span;
+    // bounds_fade.z > 0.5 → flip V to correct EXR files exported with V=0 at bottom.
+    if terrain.bounds_fade.z > 0.5 {
+        uv.y = 1.0 - uv.y;
+    }
+    return uv;
 }
 
 fn macro_color_in_bounds(world_xz: vec2<f32>) -> bool {
@@ -53,6 +59,12 @@ fn macro_color_in_bounds(world_xz: vec2<f32>) -> bool {
 
 @fragment
 fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
+    // Discard fragments outside the heightmap footprint so the mesh rings
+    // that extend beyond world_bounds don't render as flat green terrain.
+    if !macro_color_in_bounds(in.macro_xz_ws) {
+        discard;
+    }
+
     let n      = normalize(in.world_normal);
     let up     = vec3<f32>(0.0, 1.0, 0.0);
     let slope  = 1.0 - abs(dot(n, up));                         // 0=flat, 1=vertical
@@ -65,8 +77,8 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
         c = textureSampleLevel(macro_color_tex, macro_color_samp, macro_color_uv(in.macro_xz_ws), 0.0).rgb;
     }
 
-    // --- Simple directional sun ---
-    let sun = normalize(vec3<f32>(0.4, 1.0, 0.3));
+    // --- Directional sun from scene light ---
+    let sun = normalize(terrain.sun_direction.xyz);
     let lit = 0.18 + max(dot(n, sun), 0.0) * 0.82;
 
     // --- Subtle macro variation to break visual repetition on the procedural fallback ---

@@ -50,6 +50,9 @@ pub struct TerrainMaterialUniforms {
     pub world_bounds: Vec4,
     /// Bounds fade params: x = fade distance beyond the footprint.
     pub bounds_fade: Vec4,
+    /// World-space unit vector pointing TOWARD the sun (opposite of light ray direction).
+    /// Updated every frame from the scene DirectionalLight.
+    pub sun_direction: Vec4,
     /// Per-LOD clipmap data: (origin_x, origin_z, inv_ring_span, texel_world_size).
     /// Indexed by LOD level (0 = finest).  Unused entries are zero.
     pub clip_levels: [Vec4; MAX_SUPPORTED_CLIPMAP_LEVELS],

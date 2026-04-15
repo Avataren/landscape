@@ -1,9 +1,10 @@
+mod app_config;
 mod terrain;
 
 use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     core_pipeline::tonemapping::Tonemapping,
-    light::{light_consts::lux, AtmosphereEnvironmentMapLight},
+    light::{light_consts::lux, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder},
     pbr::{Atmosphere, AtmosphereSettings, ScatteringMedium},
     post_process::bloom::Bloom,
     prelude::*,
@@ -11,11 +12,25 @@ use bevy::{
     input::mouse::AccumulatedMouseMotion,
     window::PrimaryWindow,
 };
-use terrain::{components::TerrainCamera, TerrainDebugPlugin, TerrainPlugin, TerrainSourceDesc};
+use terrain::{
+    components::TerrainCamera,
+    config::TerrainConfig,
+    TerrainDebugPlugin, TerrainPlugin, TerrainSourceDesc,
+};
 
 const WINDOW_TITLE: &str = "Landscape Renderer";
 
 fn main() {
+    let cfg = app_config::load();
+
+    let terrain_config = {
+        let mut tc = TerrainConfig::default();
+        if let Some(v) = cfg.render.clipmap_levels    { tc.clipmap_levels    = v; }
+        if let Some(v) = cfg.render.height_scale      { tc.height_scale      = v; }
+        if let Some(v) = cfg.render.macro_color_flip_v { tc.macro_color_flip_v = v; }
+        tc
+    };
+
     App::new()
         .insert_resource(ClearColor(Color::BLACK))
         .insert_resource(GlobalAmbientLight::NONE)
@@ -30,18 +45,14 @@ fn main() {
         }))
         .add_plugins(TerrainPlugin)
         .add_plugins(TerrainDebugPlugin)
-        // Point the tile streamer at the pre-baked tiles from `cargo run --bin bake_tiles`.
-        // The baked 16k source heightmap spans [-8192, 8192) world units in X/Z.
+        .insert_resource(terrain_config)
         .insert_resource(TerrainSourceDesc {
-            tile_root: Some(std::path::PathBuf::from("assets/tiles")),
-            normal_root: Some("assets/tiles/normal".into()),
-            macro_color_root: Some(
-                "assets/height_maps/16k Rocky Terrain Heightmap/Diffuse 16k Rocky Terrain.exr"
-                    .into(),
-            ),
-            world_min: Vec2::splat(-8192.0),
-            world_max: Vec2::splat(8192.0),
-            max_mip_level: 5,
+            tile_root: cfg.source.tile_root,
+            normal_root: cfg.source.normal_root,
+            macro_color_root: cfg.source.macro_color_root,
+            world_min: cfg.source.world_min,
+            world_max: cfg.source.world_max,
+            max_mip_level: cfg.source.max_mip_level,
             ..default()
         })
         .add_systems(Startup, setup_scene)
@@ -80,7 +91,20 @@ fn setup_scene(
             shadows_enabled: true,
             ..default()
         },
-        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -1.0, 0.5, 0.0)),
+        // Low-angle sun (~14° elevation) casts long shadows across terrain features.
+        // X rotates the light down from horizontal; Y sets the azimuth.
+        Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.25, 0.8, 0.0)),
+        // Cascade shadow bounds tuned to the terrain scale (world ±2048, camera
+        // starts ~8 000 wu out).  Four cascades cover close detail through the
+        // full visible range.
+        CascadeShadowConfigBuilder {
+            num_cascades: 4,
+            minimum_distance: 1.0,
+            first_cascade_far_bound: 500.0,
+            maximum_distance: 20_000.0,
+            overlap_proportion: 0.2,
+        }
+        .build(),
     ));
 }
 

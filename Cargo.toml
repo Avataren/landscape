@@ -9,6 +9,8 @@ bevy = { version = "0.18" }
 bytemuck = { version = "1", features = ["derive"] }
 exr = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 # dynamic_linking speeds up dev iteration by splitting Bevy into a shared
 # library. It works on Linux/macOS but causes LNK2019 linker errors on Windows

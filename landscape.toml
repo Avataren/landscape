@@ -1,0 +1,29 @@
+# Terrain source configuration.
+# Edit this file to switch between baked tile sets without recompiling.
+# Paths are relative to the workspace root (where you run `cargo run`).
+
+[terrain]
+tile_root       = "assets/tiles_grand"
+normal_root     = "assets/tiles_grand/normal"
+diffuse_exr     = "assets/height_maps/Grand Mountain Height Map Shared/Diffuse Map EXR.exr"
+world_min       = -2048.0   # world-space X/Z minimum (square terrain)
+world_max       =  2048.0   # world-space X/Z maximum
+# Highest LOD index that has baked tiles. For a 4096px map / 256px tile_size,
+# the mip pyramid is: L0=16×16, L1=8×8, L2=4×4, L3=2×2 (coarsest).
+# Clipmap rings above this level resample height from L3 tiles.
+max_mip_level   = 3
+
+[terrain_config]
+# Clipmap LOD ring count. Each extra level doubles the view radius.
+# Outermost radius = 512 * 2^(clipmap_levels-1) world units.
+# 7 → ~32 000 wu. Keep low if the terrain is small to avoid loading tiles
+# that map to flat zero-height resamples far outside the heightmap bounds.
+clipmap_levels  = 7
+
+# World-space height range. Must match --height-scale used with bake_tiles.
+height_scale    = 1024.0
+
+# Set to true if the diffuse EXR colours appear V-flipped (e.g. snow at the
+# bottom of the screen instead of matching mountain peaks). Flips the V UV
+# coordinate when sampling the macro colour texture.
+# macro_color_flip_v = false

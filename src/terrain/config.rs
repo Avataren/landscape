@@ -35,6 +35,10 @@ pub struct TerrainConfig {
     /// Maximum resolution of the loaded macro color texture after startup
     /// downsampling. Keeps the 16k diffuse map at a practical runtime size.
     pub macro_color_resolution: u32,
+    /// Flip the V (world-Z) axis when sampling the macro color map.
+    /// Set to true when the diffuse EXR was exported with V=0 at the bottom
+    /// (OpenGL / Houdini convention) so that mountain colours align with terrain.
+    pub macro_color_flip_v: bool,
 }
 
 impl Default for TerrainConfig {
@@ -45,13 +49,14 @@ impl Default for TerrainConfig {
             ring_patches: 8,
             tile_size: 256,
             world_scale: 1.0,
-            height_scale: 2048.0,
+            height_scale: 1024.0,
             morph_start_ratio: 0.6,
             max_resident_tiles: 256,
             max_view_distance: 65536.0,
-            procedural_fallback: true,
-            use_macro_color_map: false,
-            macro_color_resolution: 16384,
+            procedural_fallback: false,
+            use_macro_color_map: true,
+            macro_color_resolution: 4096,
+            macro_color_flip_v: false,
         }
     }
 }

@@ -93,6 +93,7 @@ impl Plugin for TerrainPlugin {
                     .after(update_clipmap_textures)
                     .after(update_terrain_view_state),
             )
+            .add_systems(Update, sync_sun_direction)
             // Render sub-plugin
             .add_plugins(TerrainRenderPlugin);
     }
@@ -358,9 +359,11 @@ fn setup_terrain(
             bounds_fade: Vec4::new(
                 bounds_fade_distance,
                 if macro_color.enabled { 1.0 } else { 0.0 },
-                0.0,
+                if config.macro_color_flip_v { 1.0 } else { 0.0 },
                 0.0,
             ),
+            // Reasonable default until sync_sun_direction runs on the first frame.
+            sun_direction: Vec4::new(0.0, 1.0, 0.0, 0.0),
             clip_levels: compute_initial_clip_levels(&config),
         },
     });
@@ -501,4 +504,24 @@ fn update_patch_transforms(
     }
 
     patch_entities.last_clip_centers = view.clip_centers.clone();
+}
+
+/// Reads the scene DirectionalLight's transform and pushes its direction into
+/// the terrain material uniform so the shader always matches the scene light.
+///
+/// Light rays travel along the light's forward (-Z local) direction.
+/// The shader wants the vector pointing TOWARD the sun, which is the opposite.
+fn sync_sun_direction(
+    lights: Query<&Transform, With<DirectionalLight>>,
+    state: Option<Res<TerrainClipmapState>>,
+    mut materials: ResMut<Assets<TerrainMaterial>>,
+) {
+    let Some(state) = state else { return };
+    let Ok(transform) = lights.single() else { return };
+    let Some(mat) = materials.get_mut(&state.material_handle) else { return };
+
+    // forward() is the local -Z in world space = direction light rays travel.
+    // Negate to get the toward-sun direction used by dot(n, sun) in the shader.
+    let sun_dir = Vec3::from(-transform.forward());
+    mat.params.sun_direction = sun_dir.normalize_or_zero().extend(0.0);
 }

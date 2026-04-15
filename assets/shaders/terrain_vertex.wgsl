@@ -28,6 +28,7 @@ struct TerrainParams {
     patch_resolution:   f32,   // quads per patch edge
     world_bounds:       vec4<f32>, // (min_x, min_z, max_x, max_z)
     bounds_fade:        vec4<f32>, // x = fade distance beyond the footprint
+    sun_direction:      vec4<f32>, // xyz = world-space toward-sun unit vector
     clip_levels: array<vec4<f32>, 16>,
 }
 
@@ -91,14 +92,17 @@ fn height_at(lod: u32, xz: vec2<f32>) -> f32 {
 }
 
 fn normal_at(lod: u32, xz: vec2<f32>) -> vec3<f32> {
-    let lvl = terrain.clip_levels[lod];
-    let world_min = terrain.world_bounds.xy;
-    let world_max = terrain.world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
-    let sample_xz = clamp(xz, world_min, world_max);
-    let uv = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
-    let enc_xz = textureSampleLevel(normal_tex, normal_samp, uv, i32(lod), 0.0).rg;
-    let y = sqrt(max(1.0 - min(dot(enc_xz, enc_xz), 1.0), 0.0));
-    return normalize(vec3<f32>(enc_xz.x, y, enc_xz.y));
+    // Derive the world-space normal from height finite-differences.
+    // Sampling one texel step in +X and +Z gives the surface tangent vectors;
+    // their cross product is the outward normal.
+    //   tangent_x = (eps, h_r - h, 0)
+    //   tangent_z = (0,   h_u - h, eps)
+    //   normal    = tangent_x × tangent_z = (h - h_r, eps, h - h_u)
+    let eps = terrain.clip_levels[lod].w; // texel world size at this LOD
+    let h   = height_at(lod, xz);
+    let h_r = height_at(lod, xz + vec2<f32>(eps, 0.0));
+    let h_u = height_at(lod, xz + vec2<f32>(0.0, eps));
+    return normalize(vec3<f32>(h - h_r, eps, h - h_u));
 }
 
 /// Blend height between fine (lod) and coarse (lod+1) levels by morph_alpha.
