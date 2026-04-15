@@ -117,6 +117,7 @@ fn preload_terrain_startup(
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<TerrainMaterial>>,
     mut residency: ResMut<TerrainResidency>,
+    mut collision: ResMut<TerrainCollisionCache>,
 ) {
     let levels = config.active_clipmap_levels();
 
@@ -288,6 +289,13 @@ fn preload_terrain_startup(
         }
     }
 
+    // Initialise collision cache params before the tile loop so upload_tile
+    // can use them immediately (same initialisation update_collision_tiles does
+    // every frame, but we can't wait until the first Update tick).
+    collision.tile_size   = config.tile_size;
+    collision.world_scale = config.world_scale;
+    collision.height_scale = config.height_scale;
+
     for tile in &results {
         let key = tile.key;
         residency.resident_cpu.insert(key, crate::terrain::resources::HeightTileCpu {
@@ -298,6 +306,10 @@ fn preload_terrain_startup(
         });
         residency.tiles.insert(key, TileState::ResidentGpu { slot: 0 });
         residency.touch(key);
+        // Populate the collision cache directly — preloaded tiles bypass
+        // pending_upload (which apply_tiles_to_clipmap drains), so
+        // update_collision_tiles would never see them otherwise.
+        collision.upload_tile(tile);
         written += 1;
     }
 
