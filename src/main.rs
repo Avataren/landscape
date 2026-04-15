@@ -1,4 +1,5 @@
 mod app_config;
+mod player;
 mod terrain;
 
 use bevy::{
@@ -12,6 +13,7 @@ use bevy::{
     input::mouse::AccumulatedMouseMotion,
     window::PrimaryWindow,
 };
+use player::{CameraMode, PlayerPlugin};
 use terrain::{
     components::TerrainCamera,
     config::TerrainConfig,
@@ -45,6 +47,7 @@ fn main() {
         }))
         .add_plugins(TerrainPlugin)
         .add_plugins(TerrainDebugPlugin)
+        .add_plugins(PlayerPlugin)
         .insert_resource(terrain_config)
         .insert_resource(TerrainSourceDesc {
             tile_root: cfg.source.tile_root,
@@ -65,12 +68,12 @@ fn setup_scene(
     mut commands: Commands,
     mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
 ) {
-    // 16k heightmap: terrain spans ±8192 wu, max height 4096 wu.
-    // Average terrain near origin ~2400 wu; start well above that.
+    // Spawn camera at terrain centre so preload_terrain_startup loads tiles
+    // around (0, 0).  PlayerPlugin drives this Transform from frame 1 onward.
     commands.spawn((
         Camera3d::default(),
         Projection::Perspective(PerspectiveProjection {
-            near: 1.0,
+            near: 0.1,
             far: 10_000_000.0,
             ..default()
         }),
@@ -80,7 +83,7 @@ fn setup_scene(
         Exposure { ev100: 13.0 },
         Tonemapping::AcesFitted,
         Bloom::NATURAL,
-        Transform::from_xyz(0.0, 6000.0, -8000.0).looking_at(Vec3::new(0.0, 2500.0, 0.0), Vec3::Y),
+        Transform::from_xyz(0.0, 1200.0, 0.0),
         TerrainCamera,
     ));
 
@@ -115,10 +118,12 @@ fn setup_scene(
 // Hold Shift for 5× speed.
 // ---------------------------------------------------------------------------
 fn camera_move(
+    mode: Res<CameraMode>,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut query: Query<&mut Transform, With<TerrainCamera>>,
 ) {
+    if *mode != CameraMode::Freecam { return; }
     let Ok(mut t) = query.single_mut() else {
         return;
     };
@@ -160,10 +165,12 @@ fn camera_move(
 // Yaw rotates around the world Y axis; pitch rotates around the local X axis.
 // ---------------------------------------------------------------------------
 fn camera_look(
+    mode: Res<CameraMode>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     mouse_motion: Res<AccumulatedMouseMotion>,
     mut query: Query<&mut Transform, With<TerrainCamera>>,
 ) {
+    if *mode != CameraMode::Freecam { return; }
     if !mouse_buttons.pressed(MouseButton::Right) {
         return;
     }

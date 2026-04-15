@@ -6,6 +6,7 @@ default-run = "landscape"
 
 [dependencies]
 bevy = { version = "0.18" }
+avian3d = "0.6"
 bytemuck = { version = "1", features = ["derive"] }
 exr = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
