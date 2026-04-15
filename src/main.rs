@@ -23,7 +23,7 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: WINDOW_TITLE.into(),
-                resolution: (1920u32, 1080u32).into(),
+                resolution: (640u32, 480u32).into(),
                 ..default()
             }),
             ..default()

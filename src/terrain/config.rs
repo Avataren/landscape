@@ -49,8 +49,8 @@ impl Default for TerrainConfig {
             morph_start_ratio: 0.6,
             max_resident_tiles: 256,
             max_view_distance: 65536.0,
-            procedural_fallback: false,
-            use_macro_color_map: true,
+            procedural_fallback: true,
+            use_macro_color_map: false,
             macro_color_resolution: 16384,
         }
     }
