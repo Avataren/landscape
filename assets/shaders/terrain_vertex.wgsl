@@ -8,7 +8,6 @@
 // LOD L+1 always agree on height for the same world XZ position.
 
 #import bevy_pbr::{
-    mesh_functions::get_world_from_local,
     view_transformations::position_world_to_clip,
     forward_io::Vertex,
 }
@@ -37,6 +36,24 @@ struct TerrainParams {
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var<uniform> terrain: TerrainParams;
 @group(#{MATERIAL_BIND_GROUP}) @binding(5) var normal_tex: texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(6) var normal_samp: sampler;
+
+// ---------------------------------------------------------------------------
+// Patch storage buffer — one entry per draw instance, indexed by instance_index.
+// Matches PatchDescriptorGpu in src/terrain/render/gpu_types.rs exactly.
+// ---------------------------------------------------------------------------
+
+struct PatchDescriptor {
+    origin_ws:     vec2<f32>,
+    patch_size_ws: f32,
+    lod_level:     u32,
+    morph_start:   f32,
+    morph_end:     f32,
+    patch_kind:    u32,
+    _pad0:         u32,
+}
+
+@group(#{MATERIAL_BIND_GROUP}) @binding(7)
+var<storage, read> patch_descriptors: array<PatchDescriptor>;
 
 // ---------------------------------------------------------------------------
 // Vertex → fragment interface
@@ -120,23 +137,19 @@ fn blended_height(lod: u32, coarse_lod: u32, alpha: f32, xz: vec2<f32>) -> f32 {
 
 @vertex
 fn vertex(v: Vertex) -> TerrainVOut {
-    let model = get_world_from_local(v.instance_index);
-
-    // --- Patch world size from model X-scale. ---
-    // Transform encodes: scale = (patch_size_ws, 1, patch_size_ws).
-    let patch_size_ws = length(model[0].xyz);
-
-    // --- Derive LOD level. ---
-    // patch_size_ws = base_patch_size × 2^L  →  L = log2(size / base)
-    let lod_f     = round(log2(patch_size_ws / terrain.base_patch_size));
-    let lod_level = u32(clamp(lod_f, 0.0, 15.0));
+    // --- Read patch descriptor from storage buffer. ---
+    let pd = patch_descriptors[v.instance_index];
+    let patch_size_ws = pd.patch_size_ws;
+    let lod_level     = pd.lod_level;
 
     // Coarse LOD index for height blending: clamped so we never read layer N.
     let max_lod_idx = u32(terrain.num_lod_levels) - 1u;
     let coarse_lod  = min(lod_level + 1u, max_lod_idx);
 
     // --- World XZ before morphing. ---
-    let world_xz_orig = (model * vec4<f32>(v.position, 1.0)).xz;
+    // Mesh vertices are in [0,1] local XZ; scale by patch_size_ws and offset
+    // by origin to get world space.
+    let world_xz_orig = pd.origin_ws + v.position.xz * patch_size_ws;
 
     // --- Geomorphing ---
     // Blend vertices toward the 2× coarser grid near the outer ring edge so

@@ -17,7 +17,12 @@ pub mod world_desc;
 pub use debug::TerrainDebugPlugin;
 pub use world_desc::TerrainSourceDesc;
 
-use bevy::{camera::visibility::NoFrustumCulling, prelude::*};
+use bevy::{
+    asset::RenderAssetUsages,
+    camera::visibility::NoFrustumCulling,
+    prelude::*,
+    render::storage::ShaderStorageBuffer,
+};
 use clipmap::{build_patch_instances_for_view, PatchInstanceCpu};
 use clipmap_texture::{
     apply_tiles_to_clipmap, compute_clip_levels, compute_initial_clip_levels,
@@ -30,7 +35,7 @@ use config::TerrainConfig;
 use material::{TerrainMaterial, TerrainMaterialUniforms};
 use macro_color::load_macro_color_texture;
 use math::{compute_needed_tiles_for_level, level_scale, snap_camera_to_level_grid};
-use render::{extract::extract_terrain_frame, TerrainRenderPlugin};
+use render::{extract::extract_terrain_frame, gpu_types::PatchDescriptorGpu, TerrainRenderPlugin};
 use residency::update_required_tiles;
 use resources::{TerrainResidency, TerrainStreamQueue, TerrainViewState, TileKey, TileState};
 use streamer::{load_tile_data, poll_tile_stream_jobs, request_tile_loads, setup_tile_channel};
@@ -47,6 +52,10 @@ pub struct PatchEntities {
     pub entities: Vec<Entity>,
     /// Cached clip centers from last update (used to skip no-op frames).
     pub last_clip_centers: Vec<IVec2>,
+    /// Handle to the `ShaderStorageBuffer` containing one `PatchDescriptorGpu`
+    /// per patch, in the same order as `entities`.  Kept in sync whenever the
+    /// clip centers change (same condition that triggers Transform updates).
+    pub patch_buffer_handle: Handle<ShaderStorageBuffer>,
 }
 
 // ---------------------------------------------------------------------------
@@ -338,6 +347,7 @@ fn setup_terrain(
     mut meshes: ResMut<Assets<Mesh>>,
     mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     mut patch_entities: ResMut<PatchEntities>,
     mut commands: Commands,
 ) {
@@ -356,10 +366,42 @@ fn setup_terrain(
     let base_patch_size = config.patch_resolution as f32 * config.world_scale;
     let bounds_fade_distance = config.tile_size as f32 * config.world_scale * 4.0;
 
+    // --- Patch mesh (shared by all entities) ---
+    let patch_mesh = patch_mesh::build_patch_mesh(config.patch_resolution);
+    let mesh_handle = meshes.add(patch_mesh);
+
+    // --- Build initial patch list before creating the material so we can pass
+    //     the real storage-buffer handle into the material from the start ---
+    let view = TerrainViewState::default();
+    let patches: Vec<PatchInstanceCpu> = build_patch_instances_for_view(&config, &view);
+
+    // Build the initial patch storage buffer so the vertex shader can read
+    // per-patch data (origin, size, lod) without decoding the Transform matrix.
+    let patch_buffer_handle = {
+        let descs: Vec<PatchDescriptorGpu> = patches.iter().map(|p| PatchDescriptorGpu {
+            origin_ws:     [p.origin_ws.x, p.origin_ws.y],
+            patch_size_ws: p.patch_size_ws,
+            lod_level:     p.lod_level,
+            morph_start:   p.morph_start,
+            morph_end:     p.morph_end,
+            patch_kind:    p.patch_kind,
+            _pad0:         0,
+        }).collect();
+        let ssb = ShaderStorageBuffer::new(
+            bytemuck::cast_slice(&descs),
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        storage_buffers.add(ssb)
+    };
+
+    patch_entities.entities.clear();
+    patch_entities.patch_buffer_handle = patch_buffer_handle.clone();
+
     let mat_handle = terrain_materials.add(TerrainMaterial {
         height_texture: height_handle.clone(),
         macro_color_texture: macro_color_handle,
         normal_texture: normal_handle.clone(),
+        patch_buffer: patch_buffer_handle,
         params: TerrainMaterialUniforms {
             height_scale: config.height_scale,
             base_patch_size,
@@ -391,16 +433,6 @@ fn setup_terrain(
         // Sentinel forces a full tile re-apply on the first frame.
         tile_apply_centers: vec![IVec2::new(i32::MAX, i32::MAX); levels as usize],
     });
-
-    // --- Patch mesh (shared by all entities) ---
-    let patch_mesh = patch_mesh::build_patch_mesh(config.patch_resolution);
-    let mesh_handle = meshes.add(patch_mesh);
-
-    // --- Spawn one entity per patch from the default (zero) view state ---
-    let view = TerrainViewState::default();
-    let patches: Vec<PatchInstanceCpu> = build_patch_instances_for_view(&config, &view);
-
-    patch_entities.entities.clear();
 
     for patch in &patches {
         let entity = commands
@@ -478,13 +510,15 @@ pub fn update_terrain_view_state(
     }
 }
 
-/// Repositions patch entities to match the current clipmap ring layout.
-/// Only does work when the snapped clip centers have actually changed.
+/// Repositions patch entities and refreshes the patch storage buffer to match
+/// the current clipmap ring layout.  Only does work when the snapped clip
+/// centers have actually changed.
 fn update_patch_transforms(
     config: Res<TerrainConfig>,
     view: Res<TerrainViewState>,
     mut patch_entities: ResMut<PatchEntities>,
     mut query: Query<(&mut Transform, &mut components::TerrainPatchInstance)>,
+    mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
 ) {
     // Skip if nothing has moved to a new grid cell.
     if view.clip_centers == patch_entities.last_clip_centers {
@@ -504,6 +538,21 @@ fn update_patch_transforms(
             patch_entities.entities.len()
         );
         return;
+    }
+
+    // Rebuild the GPU patch descriptor buffer so the vertex shader sees the
+    // updated origins and LOD levels without decoding Transform matrices.
+    if let Some(ssb) = storage_buffers.get_mut(&patch_entities.patch_buffer_handle) {
+        let descs: Vec<PatchDescriptorGpu> = patches.iter().map(|p| PatchDescriptorGpu {
+            origin_ws:     [p.origin_ws.x, p.origin_ws.y],
+            patch_size_ws: p.patch_size_ws,
+            lod_level:     p.lod_level,
+            morph_start:   p.morph_start,
+            morph_end:     p.morph_end,
+            patch_kind:    p.patch_kind,
+            _pad0:         0,
+        }).collect();
+        ssb.data = Some(bytemuck::cast_slice(&descs).to_vec());
     }
 
     for (entity, patch) in patch_entities.entities.iter().zip(patches.iter()) {
