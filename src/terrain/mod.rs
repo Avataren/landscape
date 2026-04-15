@@ -19,7 +19,10 @@ pub use world_desc::TerrainSourceDesc;
 
 use bevy::{
     asset::RenderAssetUsages,
-    camera::visibility::NoFrustumCulling,
+    camera::{
+        primitives::{Aabb, Frustum},
+        visibility::NoFrustumCulling,
+    },
     prelude::*,
     render::storage::ShaderStorageBuffer,
 };
@@ -519,14 +522,13 @@ fn update_patch_transforms(
     mut patch_entities: ResMut<PatchEntities>,
     mut query: Query<(&mut Transform, &mut components::TerrainPatchInstance)>,
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
+    camera_q: Query<&Frustum, With<TerrainCamera>>,
 ) {
-    // Skip if nothing has moved to a new grid cell.
-    if view.clip_centers == patch_entities.last_clip_centers {
-        return;
-    }
     if view.clip_centers.is_empty() || patch_entities.entities.is_empty() {
         return;
     }
+
+    let positions_changed = view.clip_centers != patch_entities.last_clip_centers;
 
     let patches = build_patch_instances_for_view(&config, &view);
 
@@ -540,31 +542,50 @@ fn update_patch_transforms(
         return;
     }
 
-    // Rebuild the GPU patch descriptor buffer so the vertex shader sees the
-    // updated origins and LOD levels without decoding Transform matrices.
+    // Frustum-cull patches every frame: camera rotation changes visibility even
+    // when the clip grid cell has not changed.  Culled patches get patch_size_ws
+    // = 0.0 so all their vertices collapse to the same world position — the GPU
+    // rasteriser discards zero-area triangles with no shader changes required.
+    let frustum = camera_q.single().ok();
     if let Some(ssb) = storage_buffers.get_mut(&patch_entities.patch_buffer_handle) {
-        let descs: Vec<PatchDescriptorGpu> = patches.iter().map(|p| PatchDescriptorGpu {
-            origin_ws:     [p.origin_ws.x, p.origin_ws.y],
-            patch_size_ws: p.patch_size_ws,
-            lod_level:     p.lod_level,
-            morph_start:   p.morph_start,
-            morph_end:     p.morph_end,
-            patch_kind:    p.patch_kind,
-            _pad0:         0,
+        let descs: Vec<PatchDescriptorGpu> = patches.iter().map(|p| {
+            let visible = frustum.map_or(true, |f| {
+                let aabb = Aabb::from_min_max(
+                    Vec3::new(p.origin_ws.x, 0.0, p.origin_ws.y),
+                    Vec3::new(
+                        p.origin_ws.x + p.patch_size_ws,
+                        config.height_scale,
+                        p.origin_ws.y + p.patch_size_ws,
+                    ),
+                );
+                f.intersects_obb_identity(&aabb)
+            });
+            PatchDescriptorGpu {
+                origin_ws:     [p.origin_ws.x, p.origin_ws.y],
+                patch_size_ws: if visible { p.patch_size_ws } else { 0.0 },
+                lod_level:     p.lod_level,
+                morph_start:   p.morph_start,
+                morph_end:     p.morph_end,
+                patch_kind:    p.patch_kind,
+                _pad0:         0,
+            }
         }).collect();
         ssb.data = Some(bytemuck::cast_slice(&descs).to_vec());
     }
 
-    for (entity, patch) in patch_entities.entities.iter().zip(patches.iter()) {
-        if let Ok((mut transform, mut instance)) = query.get_mut(*entity) {
-            transform.translation = Vec3::new(patch.origin_ws.x, 0.0, patch.origin_ws.y);
-            transform.scale = Vec3::new(patch.patch_size_ws, 1.0, patch.patch_size_ws);
-            instance.patch_origin_ws = patch.origin_ws;
-            instance.patch_scale_ws = patch.patch_size_ws;
+    // Only update ECS Transforms when the clip grid cell changes — these drive
+    // Bevy's own visibility / AABB checks for the entity, not the vertex path.
+    if positions_changed {
+        for (entity, patch) in patch_entities.entities.iter().zip(patches.iter()) {
+            if let Ok((mut transform, mut instance)) = query.get_mut(*entity) {
+                transform.translation = Vec3::new(patch.origin_ws.x, 0.0, patch.origin_ws.y);
+                transform.scale = Vec3::new(patch.patch_size_ws, 1.0, patch.patch_size_ws);
+                instance.patch_origin_ws = patch.origin_ws;
+                instance.patch_scale_ws = patch.patch_size_ws;
+            }
         }
+        patch_entities.last_clip_centers = view.clip_centers.clone();
     }
-
-    patch_entities.last_clip_centers = view.clip_centers.clone();
 }
 
 /// Reads the scene DirectionalLight's transform and pushes its direction into
