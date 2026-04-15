@@ -1,6 +1,11 @@
 // terrain_fragment.wgsl
-// Slope + altitude layer blending with simple directional lighting.
-// Self-contained: no external common imports.
+// Slope + altitude layer blending with directional lighting + cascade shadows.
+
+#import bevy_pbr::{
+    mesh_view_bindings as view_bindings,
+    shadows,
+    mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
+}
 
 // Must match TerrainMaterialUniforms in material.rs exactly.
 struct TerrainParams {
@@ -78,8 +83,29 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     }
 
     // --- Directional sun from scene light ---
-    let sun = normalize(terrain.sun_direction.xyz);
-    let lit = 0.18 + max(dot(n, sun), 0.0) * 0.82;
+    let sun   = normalize(terrain.sun_direction.xyz);
+    let ndotl = max(dot(n, sun), 0.0);
+
+    // --- Cascade shadow from Bevy's shadow maps ---
+    // view_z is the view-space depth used to select the correct cascade.
+    // Computed by dotting the Z-row of view_from_world against world position.
+    let view_z = dot(vec4<f32>(
+        view_bindings::view.view_from_world[0].z,
+        view_bindings::view.view_from_world[1].z,
+        view_bindings::view.view_from_world[2].z,
+        view_bindings::view.view_from_world[3].z,
+    ), in.world_pos);
+
+    var shadow = 1.0;
+    if view_bindings::lights.n_directional_lights > 0u {
+        let flags = view_bindings::lights.directional_lights[0].flags;
+        if (flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
+            shadow = shadows::fetch_directional_shadow(0u, in.world_pos, n, view_z);
+        }
+    }
+
+    // Ambient is unshadowed; direct component is attenuated by shadow.
+    let lit = 0.18 + ndotl * 0.82 * shadow;
 
     // --- Subtle macro variation to break visual repetition on the procedural fallback ---
     let macro_v = select(
