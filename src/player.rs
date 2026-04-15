@@ -104,7 +104,12 @@ impl Plugin for PlayerPlugin {
                 toggle_mode,
                 player_look,
                 player_move.after(player_look),
-                update_heightfield,
+                // Must run after toggle_mode: when switching to Walking, toggle_mode
+                // sets Position (avian's source of truth) immediately but Transform
+                // is only synced in FixedPostUpdate writeback.  Reading Position here
+                // lets us detect the teleport and rebuild the heightfield in the same
+                // Update tick, before physics runs in FixedPostUpdate.
+                update_heightfield.after(toggle_mode),
             ))
             // PostUpdate runs after FixedPostUpdate (where Avian writeback lives),
             // so sync_camera_to_body always sees the settled physics Transform.
@@ -273,14 +278,18 @@ fn sync_camera_to_body(
 
 /// Rebuilds the heightfield when the player moves more than HF_UPDATE_DIST
 /// from the last centre (runs regardless of mode so it stays ready).
+///
+/// Reads avian3d `Position` rather than `Transform` so that a teleport
+/// performed in `toggle_mode` (same Update tick, same frame) is visible here
+/// before physics runs in FixedPostUpdate.
 fn update_heightfield(
-    body_q: Query<&Transform, With<PlayerBody>>,
+    body_q: Query<&Position, With<PlayerBody>>,
     cache: Res<TerrainCollisionCache>,
     mut commands: Commands,
     mut hf_state: ResMut<HeightfieldState>,
 ) {
-    let Ok(body_t) = body_q.single() else { return };
-    let player_xz = Vec2::new(body_t.translation.x, body_t.translation.z);
+    let Ok(body_pos) = body_q.single() else { return };
+    let player_xz = Vec2::new(body_pos.x, body_pos.z);
 
     let Some(last) = hf_state.center else { return };
     if last.distance(player_xz) <= HF_UPDATE_DIST { return; }
