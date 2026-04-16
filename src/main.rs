@@ -69,8 +69,9 @@ fn setup_scene(
     mut commands: Commands,
     mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
 ) {
-    // Spawn camera at terrain centre so preload_terrain_startup loads tiles
-    // around (0, 0).  PlayerPlugin drives this Transform from frame 1 onward.
+    // Spawn camera above terrain centre, angled downward so terrain is visible
+    // immediately in freecam mode.  preload_terrain_startup uses the XZ position
+    // to decide which tiles to load first.
     commands.spawn((
         Camera3d::default(),
         Projection::Perspective(PerspectiveProjection {
@@ -84,7 +85,10 @@ fn setup_scene(
         Exposure { ev100: 13.0 },
         Tonemapping::AcesFitted,
         Bloom::NATURAL,
-        Transform::from_xyz(0.0, 1200.0, 0.0),
+        // Position at a comfortable altitude and look at terrain centre so the
+        // view is correct from the first frame in freecam mode.
+        Transform::from_xyz(0.0, 800.0, 1200.0)
+            .looking_at(Vec3::ZERO, Vec3::Y),
         TerrainCamera,
     ));
 

@@ -53,8 +53,8 @@ const MOUSE_SENSITIVITY: f32 = 0.002;
 /// Active camera / movement mode.  Toggle with F1.
 #[derive(Resource, Default, PartialEq, Clone, Copy, Debug)]
 pub enum CameraMode {
-    #[default]
     Walking,
+    #[default]
     Freecam,
 }
 
@@ -110,18 +110,11 @@ fn spawn_player_once(
     cache: Res<TerrainCollisionCache>,
     config: Res<TerrainConfig>,
     mut commands: Commands,
-    mut cursor_q: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
     if *done { return; }
     // world_scale > 0 once preload_terrain_startup (PostStartup) has run.
     if cache.world_scale <= 0.0 { return; }
     *done = true;
-
-    // Lock cursor for walking mode (default starting mode).
-    if let Ok(mut cursor) = cursor_q.single_mut() {
-        cursor.grab_mode = CursorGrabMode::Locked;
-        cursor.visible = false;
-    }
 
     let spawn_xz = Vec2::ZERO;
     let ground_y = cache.sample_height(spawn_xz)

@@ -26,8 +26,7 @@ struct TerrainParams {
     num_lod_levels:     f32,   // active LOD count; used to clamp coarse index
     patch_resolution:   f32,   // quads per patch edge
     world_bounds:       vec4<f32>, // (min_x, min_z, max_x, max_z)
-    bounds_fade:        vec4<f32>, // x = fade distance beyond the footprint
-    sun_direction:      vec4<f32>, // xyz = world-space toward-sun unit vector
+    bounds_fade:        vec4<f32>, // x = fade distance, y = use_macro_color, z = flip_v
     clip_levels: array<vec4<f32>, 16>,
 }
 

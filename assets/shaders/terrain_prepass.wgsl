@@ -20,7 +20,6 @@ struct TerrainParams {
     patch_resolution:   f32,
     world_bounds:       vec4<f32>,
     bounds_fade:        vec4<f32>,
-    sun_direction:      vec4<f32>,
     clip_levels: array<vec4<f32>, 16>,
 }
 

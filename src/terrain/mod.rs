@@ -20,10 +20,7 @@ pub use world_desc::TerrainSourceDesc;
 
 use bevy::{
     asset::RenderAssetUsages,
-    camera::{
-        primitives::{Aabb, Frustum},
-        visibility::NoFrustumCulling,
-    },
+    camera::visibility::NoFrustumCulling,
     prelude::*,
     render::storage::ShaderStorageBuffer,
 };
@@ -40,7 +37,7 @@ use config::TerrainConfig;
 use material::{TerrainMaterial, TerrainMaterialUniforms};
 use macro_color::load_macro_color_texture;
 use math::{compute_needed_tiles_for_level, level_scale, snap_camera_to_level_grid};
-use render::{extract::extract_terrain_frame, gpu_types::PatchDescriptorGpu, TerrainRenderPlugin};
+use render::{gpu_types::PatchDescriptorGpu, TerrainRenderPlugin};
 use residency::update_required_tiles;
 use resources::{TerrainResidency, TerrainStreamQueue, TerrainViewState, TileKey, TileState};
 use streamer::{load_tile_data, poll_tile_stream_jobs, request_tile_loads, setup_tile_channel};
@@ -96,9 +93,8 @@ impl Plugin for TerrainPlugin {
                     request_tile_loads,
                     poll_tile_stream_jobs,
                     update_collision_tiles,
-                    extract_terrain_frame,
-                    update_patch_transforms, // Phase 1: live patch repositioning
-                    update_clipmap_textures, // Phase 5: procedural clipmap refresh
+                    update_patch_transforms,
+                    update_clipmap_textures,
                 )
                     .after(update_terrain_view_state),
             )
@@ -113,7 +109,6 @@ impl Plugin for TerrainPlugin {
                 Update,
                 sync_tile_colliders.after(apply_tiles_to_clipmap),
             )
-            .add_systems(Update, sync_sun_direction)
             // Render sub-plugin
             .add_plugins(TerrainRenderPlugin);
     }
@@ -427,8 +422,6 @@ fn setup_terrain(
                 if config.macro_color_flip_v { 1.0 } else { 0.0 },
                 0.0,
             ),
-            // Reasonable default until sync_sun_direction runs on the first frame.
-            sun_direction: Vec4::new(0.0, 1.0, 0.0, 0.0),
             clip_levels: compute_initial_clip_levels(&config),
         },
     });
@@ -530,13 +523,21 @@ fn update_patch_transforms(
     mut patch_entities: ResMut<PatchEntities>,
     mut query: Query<(&mut Transform, &mut components::TerrainPatchInstance)>,
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
-    camera_q: Query<&Frustum, With<TerrainCamera>>,
 ) {
     if view.clip_centers.is_empty() || patch_entities.entities.is_empty() {
         return;
     }
 
     let positions_changed = view.clip_centers != patch_entities.last_clip_centers;
+
+    // Only rebuild the patch list and upload the storage buffer when the clip
+    // grid changes.  Entities carry NoFrustumCulling so Bevy never hides them;
+    // the GPU rasteriser discards out-of-view triangles at near-zero cost, so
+    // storage-buffer frustum culling (which had incorrect results for non-ground-
+    // level cameras in Bevy 0.18) is not needed.
+    if !positions_changed {
+        return;
+    }
 
     let patches = build_patch_instances_for_view(&config, &view);
 
@@ -550,33 +551,15 @@ fn update_patch_transforms(
         return;
     }
 
-    // Frustum-cull patches every frame: camera rotation changes visibility even
-    // when the clip grid cell has not changed.  Culled patches get patch_size_ws
-    // = 0.0 so all their vertices collapse to the same world position — the GPU
-    // rasteriser discards zero-area triangles with no shader changes required.
-    let frustum = camera_q.single().ok();
     if let Some(ssb) = storage_buffers.get_mut(&patch_entities.patch_buffer_handle) {
-        let descs: Vec<PatchDescriptorGpu> = patches.iter().map(|p| {
-            let visible = frustum.map_or(true, |f| {
-                let aabb = Aabb::from_min_max(
-                    Vec3::new(p.origin_ws.x, 0.0, p.origin_ws.y),
-                    Vec3::new(
-                        p.origin_ws.x + p.patch_size_ws,
-                        config.height_scale,
-                        p.origin_ws.y + p.patch_size_ws,
-                    ),
-                );
-                f.intersects_obb_identity(&aabb)
-            });
-            PatchDescriptorGpu {
-                origin_ws:     [p.origin_ws.x, p.origin_ws.y],
-                patch_size_ws: if visible { p.patch_size_ws } else { 0.0 },
-                lod_level:     p.lod_level,
-                morph_start:   p.morph_start,
-                morph_end:     p.morph_end,
-                patch_kind:    p.patch_kind,
-                _pad0:         0,
-            }
+        let descs: Vec<PatchDescriptorGpu> = patches.iter().map(|p| PatchDescriptorGpu {
+            origin_ws:     [p.origin_ws.x, p.origin_ws.y],
+            patch_size_ws: p.patch_size_ws,
+            lod_level:     p.lod_level,
+            morph_start:   p.morph_start,
+            morph_end:     p.morph_end,
+            patch_kind:    p.patch_kind,
+            _pad0:         0,
         }).collect();
         ssb.data = Some(bytemuck::cast_slice(&descs).to_vec());
     }
@@ -596,22 +579,3 @@ fn update_patch_transforms(
     }
 }
 
-/// Reads the scene DirectionalLight's transform and pushes its direction into
-/// the terrain material uniform so the shader always matches the scene light.
-///
-/// Light rays travel along the light's forward (-Z local) direction.
-/// The shader wants the vector pointing TOWARD the sun, which is the opposite.
-fn sync_sun_direction(
-    lights: Query<&Transform, With<DirectionalLight>>,
-    state: Option<Res<TerrainClipmapState>>,
-    mut materials: ResMut<Assets<TerrainMaterial>>,
-) {
-    let Some(state) = state else { return };
-    let Ok(transform) = lights.single() else { return };
-    let Some(mat) = materials.get_mut(&state.material_handle) else { return };
-
-    // forward() is the local -Z in world space = direction light rays travel.
-    // Negate to get the toward-sun direction used by dot(n, sun) in the shader.
-    let sun_dir = Vec3::from(-transform.forward());
-    mat.params.sun_direction = sun_dir.normalize_or_zero().extend(0.0);
-}

@@ -24,7 +24,7 @@ use crate::terrain::config::MAX_SUPPORTED_CLIPMAP_LEVELS;
 //   offset 16 – num_lod_levels    f32   (= clipmap_levels, used to clamp coarse index)
 //   offset 20 – patch_resolution  f32
 //   offset 24 – world_bounds      vec4<f32>   (min_x, min_z, max_x, max_z)
-//   offset 40 – bounds_fade       vec4<f32>   (fade_distance, use_macro_color_map, unused, unused)
+//   offset 40 – bounds_fade       vec4<f32>   (fade_distance, use_macro_color_map, flip_v, unused)
 //   offset 56 – clip_levels[0]    vec4<f32>
 //   offset 72 – clip_levels[1]    vec4<f32>
 //   …
@@ -32,6 +32,8 @@ use crate::terrain::config::MAX_SUPPORTED_CLIPMAP_LEVELS;
 //   Total: 312 bytes
 //
 // Each clip_levels entry: (origin_x, origin_z, inv_ring_span, texel_world_size)
+// Note: lighting data is NOT stored here — the fragment shader uses Bevy's
+// pbr_functions::apply_pbr_lighting which reads from mesh_view_bindings::lights.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Default, ShaderType)]
@@ -51,11 +53,8 @@ pub struct TerrainMaterialUniforms {
     pub patch_resolution: f32,
     /// Terrain footprint in world space: (min_x, min_z, max_x, max_z).
     pub world_bounds: Vec4,
-    /// Bounds fade params: x = fade distance beyond the footprint.
+    /// Bounds fade params: x = fade distance, y = use_macro_color, z = flip_v.
     pub bounds_fade: Vec4,
-    /// World-space unit vector pointing TOWARD the sun (opposite of light ray direction).
-    /// Updated every frame from the scene DirectionalLight.
-    pub sun_direction: Vec4,
     /// Per-LOD clipmap data: (origin_x, origin_z, inv_ring_span, texel_world_size).
     /// Indexed by LOD level (0 = finest).  Unused entries are zero.
     pub clip_levels: [Vec4; MAX_SUPPORTED_CLIPMAP_LEVELS],
