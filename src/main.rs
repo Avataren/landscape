@@ -35,7 +35,13 @@ fn main() {
 
     App::new()
         .insert_resource(ClearColor(Color::BLACK))
-        .insert_resource(GlobalAmbientLight::NONE)
+        // The terrain shader adds its own hemisphere ambient (sky/ground bounce),
+        // so this is only a flat fill for non-terrain objects.  Keep it small.
+        .insert_resource(GlobalAmbientLight {
+            color: Color::WHITE,
+            brightness: 500.0,
+            ..default()
+        })
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {

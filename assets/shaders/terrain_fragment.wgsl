@@ -1,12 +1,28 @@
 // terrain_fragment.wgsl
-// Terrain surface shading: iterates all scene directional lights directly via
-// mesh_view_bindings so the terrain reacts to every light in the scene without
-// storing any light data in the terrain uniform.
+// Terrain surface shading integrated with Bevy's clustered forward rendering.
+//
+// Supports all Bevy light types:
+//   - Directional lights  (iterated globally, with cascade shadows)
+//   - Point lights        (clustered, with optional shadows)
+//   - Spot lights         (clustered, with optional shadows)
+//
+// Albedo is a world-aligned macro colour map (baked data) or a procedural
+// slope/altitude blend (fallback).  Lambertian diffuse BRDF; no specular
+// (terrain reads best with diffuse-only shading).
 
 #import bevy_pbr::{
-    mesh_view_bindings::{lights, view},
-    mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
-    shadows::fetch_directional_shadow,
+    mesh_view_bindings::{lights, view, clusterable_objects},
+    mesh_view_types::{
+        DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
+        POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
+        POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
+    },
+    shadows::{fetch_directional_shadow, fetch_point_shadow, fetch_spot_shadow},
+    clustered_forward::{
+        fragment_cluster_index,
+        unpack_clusterable_object_index_ranges,
+        get_clusterable_object_id,
+    },
 }
 
 // Must match TerrainMaterialUniforms in material.rs exactly.
@@ -66,6 +82,39 @@ fn macro_color_uv(world_xz: vec2<f32>) -> vec2<f32> {
 }
 
 // ---------------------------------------------------------------------------
+// Sky hemisphere ambient
+//
+// Approximates diffuse IBL from the atmosphere without cubemap sampling.
+// The sky and ground bounce values are in *display-space* (0–1 fractions).
+// Dividing by view.exposure converts them to the physical-unit scale used by
+// the rest of the lighting, so that when the final (direct + ambient) is
+// multiplied by view.exposure the hemisphere values survive as their original
+// display-space fractions.
+//
+// Adjust these to match the scene's sky colour and ground albedo.
+// ---------------------------------------------------------------------------
+
+const SKY_AMBIENT:    vec3<f32> = vec3<f32>(0.20, 0.26, 0.40); // clear-sky blue, ~25 % brightness
+const GROUND_BOUNCE:  vec3<f32> = vec3<f32>(0.04, 0.03, 0.02); // dark earth, ~4 % brightness
+
+fn hemisphere_ambient(world_normal: vec3<f32>, albedo: vec3<f32>) -> vec3<f32> {
+    // sky_t = 1 for normals pointing straight up, 0 for straight down.
+    let sky_t  = saturate(world_normal.y * 0.5 + 0.5);
+    let irr    = mix(GROUND_BOUNCE, SKY_AMBIENT, sky_t);
+    return albedo * irr;
+}
+
+// ---------------------------------------------------------------------------
+// Attenuation — same formula as pbr_lighting::getDistanceAttenuation
+// ---------------------------------------------------------------------------
+
+fn distance_attenuation(dist_sq: f32, inv_range_sq: f32) -> f32 {
+    let factor       = dist_sq * inv_range_sq;
+    let smooth_factor = saturate(1.0 - factor * factor);
+    return (smooth_factor * smooth_factor) / max(dist_sq, 0.0001);
+}
+
+// ---------------------------------------------------------------------------
 // Fragment
 // ---------------------------------------------------------------------------
 
@@ -89,7 +138,9 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
         ).rgb;
     }
 
-    // --- View-space depth used for shadow cascade selection ---
+    // --- Shared values ---
+    // view_z: view-space depth, used for shadow cascade selection and
+    // cluster z-slice lookup.  Negative for fragments in front of camera.
     let view_z = dot(
         vec4<f32>(view.view_from_world[0].z,
                   view.view_from_world[1].z,
@@ -97,27 +148,104 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
                   view.view_from_world[3].z),
         in.world_pos,
     );
+    let is_orthographic = view.clip_from_view[3].w == 1.0;
 
-    // --- Directional lights ---
-    // light.color.rgb is pre-multiplied by illuminance in the GPU buffer.
-    // Lambertian diffuse: albedo * NdotL * color / π.
+    // Lambertian BRDF numerator: albedo / π (denominator is cancelled by
+    // the π in the irradiance-to-radiance conversion already baked into
+    // light.color.rgb for directional lights, and absent for point/spot
+    // which pass colour × intensity directly).
+    let diffuse = albedo / 3.14159;
+
     var direct = vec3<f32>(0.0);
+
+    // -----------------------------------------------------------------------
+    // Directional lights  (global, not clustered)
+    // light.color.rgb is pre-multiplied by illuminance (lux) in the GPU buffer.
+    // -----------------------------------------------------------------------
     for (var i: u32 = 0u; i < lights.n_directional_lights; i++) {
-        let light  = lights.directional_lights[i];
-        let ndotl  = max(dot(n, light.direction_to_light), 0.0);
+        let light = lights.directional_lights[i];
+        let ndotl = max(dot(n, light.direction_to_light), 0.0);
 
         var shadow = 1.0;
         if (light.flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
             shadow = fetch_directional_shadow(i, in.world_pos, in.world_normal, view_z);
         }
 
-        direct += (albedo / 3.14159) * ndotl * shadow * light.color.rgb;
+        direct += diffuse * ndotl * shadow * light.color.rgb;
     }
 
-    // --- Ambient (GlobalAmbientLight + environment map contribution baked in) ---
-    let ambient = albedo * lights.ambient_color.rgb;
+    // -----------------------------------------------------------------------
+    // Clustered point and spot lights
+    // color_inverse_square_range.rgb = colour × intensity (cd/m²)
+    // color_inverse_square_range.w   = 1 / range²
+    // -----------------------------------------------------------------------
+    let cluster_index = fragment_cluster_index(in.clip_pos.xy, view_z, is_orthographic);
+    let ranges        = unpack_clusterable_object_index_ranges(cluster_index);
 
-    // Apply camera exposure (converts physical luminance to display values).
+    // --- Point lights ---
+    for (var i: u32 = ranges.first_point_light_index_offset;
+             i < ranges.first_spot_light_index_offset; i++) {
+        let light_id  = get_clusterable_object_id(i);
+        let light     = &clusterable_objects.data[light_id];
+        let to_frag   = (*light).position_radius.xyz - in.world_pos.xyz;
+        let dist_sq   = dot(to_frag, to_frag);
+        let L         = normalize(to_frag);
+        let ndotl     = max(dot(n, L), 0.0);
+        let atten     = distance_attenuation(dist_sq, (*light).color_inverse_square_range.w);
+
+        var shadow = 1.0;
+        if ((*light).flags & POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
+            shadow = fetch_point_shadow(light_id, in.world_pos, in.world_normal);
+        }
+
+        direct += diffuse * ndotl * atten * shadow * (*light).color_inverse_square_range.rgb;
+    }
+
+    // --- Spot lights ---
+    for (var i: u32 = ranges.first_spot_light_index_offset;
+             i < ranges.first_reflection_probe_index_offset; i++) {
+        let light_id  = get_clusterable_object_id(i);
+        let light     = &clusterable_objects.data[light_id];
+        let to_frag   = (*light).position_radius.xyz - in.world_pos.xyz;
+        let dist_sq   = dot(to_frag, to_frag);
+        let L         = normalize(to_frag);
+        let ndotl     = max(dot(n, L), 0.0);
+        let atten     = distance_attenuation(dist_sq, (*light).color_inverse_square_range.w);
+
+        // Spot cone attenuation.
+        // light_custom_data.xy = normalised spot direction (xz components);
+        // light_custom_data.zw = precomputed scale and offset for cone falloff.
+        var spot_dir = vec3<f32>((*light).light_custom_data.x, 0.0, (*light).light_custom_data.y);
+        spot_dir.y = sqrt(max(0.0, 1.0 - spot_dir.x * spot_dir.x - spot_dir.z * spot_dir.z));
+        if ((*light).flags & POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE) != 0u {
+            spot_dir.y = -spot_dir.y;
+        }
+        let cd           = dot(-spot_dir, L);
+        let cone_raw     = saturate(cd * (*light).light_custom_data.z + (*light).light_custom_data.w);
+        let cone_atten   = cone_raw * cone_raw;
+
+        var shadow = 1.0;
+        if ((*light).flags & POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
+            shadow = fetch_spot_shadow(
+                light_id, in.world_pos, in.world_normal, (*light).shadow_map_near_z,
+            );
+        }
+
+        direct += diffuse * ndotl * atten * cone_atten * shadow
+            * (*light).color_inverse_square_range.rgb;
+    }
+
+    // --- Ambient ---
+    // Hemisphere ambient (sky/ground bounce) gives physically motivated diffuse
+    // sky light without requiring cubemap sampling.  The result is in display
+    // space; dividing by view.exposure puts it in the same physical-unit scale
+    // as `direct` so the final `* view.exposure` restores the display fraction.
+    // lights.ambient_color is the GlobalAmbientLight flat term (may be zero).
+    let sky_ambient_physical = hemisphere_ambient(n, albedo) / max(view.exposure, 1e-10);
+    let flat_ambient         = albedo * lights.ambient_color.rgb;
+    let ambient              = sky_ambient_physical + flat_ambient;
+
+    // Apply camera exposure (physical luminance → display values).
     let out_rgb = (direct + ambient) * view.exposure;
 
     return vec4<f32>(out_rgb, 1.0);
