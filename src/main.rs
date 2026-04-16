@@ -3,21 +3,28 @@ mod player;
 mod terrain;
 
 use bevy::{
-    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
+    camera::Exposure,
     core_pipeline::tonemapping::Tonemapping,
+    diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
+    input::mouse::AccumulatedMouseMotion,
     light::{light_consts::lux, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder},
-    pbr::{Atmosphere, AtmosphereSettings, ScatteringMedium},
+    pbr::{
+        wireframe::{WireframeConfig, WireframePlugin},
+        Atmosphere, AtmosphereSettings, ScatteringMedium,
+    },
     post_process::bloom::Bloom,
     prelude::*,
-    camera::Exposure,
-    input::mouse::AccumulatedMouseMotion,
+    render::{
+        render_resource::WgpuFeatures,
+        settings::{RenderCreation, WgpuSettings},
+        RenderPlugin,
+    },
     window::PrimaryWindow,
 };
 use player::{CameraMode, PlayerPlugin};
 use terrain::{
-    components::TerrainCamera,
-    config::TerrainConfig,
-    TerrainDebugPlugin, TerrainPlugin, TerrainSourceDesc,
+    components::TerrainCamera, config::TerrainConfig, TerrainDebugPlugin, TerrainPlugin,
+    TerrainSourceDesc,
 };
 
 const WINDOW_TITLE: &str = "Landscape Renderer";
@@ -27,9 +34,15 @@ fn main() {
 
     let terrain_config = {
         let mut tc = TerrainConfig::default();
-        if let Some(v) = cfg.render.clipmap_levels    { tc.clipmap_levels    = v; }
-        if let Some(v) = cfg.render.height_scale      { tc.height_scale      = v; }
-        if let Some(v) = cfg.render.macro_color_flip_v { tc.macro_color_flip_v = v; }
+        if let Some(v) = cfg.render.clipmap_levels {
+            tc.clipmap_levels = v;
+        }
+        if let Some(v) = cfg.render.height_scale {
+            tc.height_scale = v;
+        }
+        if let Some(v) = cfg.render.macro_color_flip_v {
+            tc.macro_color_flip_v = v;
+        }
         tc
     };
 
@@ -43,18 +56,33 @@ fn main() {
             ..default()
         })
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: WINDOW_TITLE.into(),
-                present_mode: bevy::window::PresentMode::Immediate,
-                resolution: (640u32, 480u32).into(),
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(
+            DefaultPlugins
+                .set(RenderPlugin {
+                    render_creation: RenderCreation::Automatic(WgpuSettings {
+                        features: WgpuFeatures::POLYGON_MODE_LINE,
+                        ..default()
+                    }),
+                    ..default()
+                })
+                .set(WindowPlugin {
+                    primary_window: Some(Window {
+                        title: WINDOW_TITLE.into(),
+                        present_mode: bevy::window::PresentMode::Immediate,
+                        resolution: (640u32, 480u32).into(),
+                        ..default()
+                    }),
+                    ..default()
+                }),
+        )
+        .add_plugins(WireframePlugin::default())
         .add_plugins(TerrainPlugin)
         .add_plugins(TerrainDebugPlugin)
         .add_plugins(PlayerPlugin)
+        .insert_resource(WireframeConfig {
+            global: false,
+            default_color: Color::WHITE.into(),
+        })
         .insert_resource(terrain_config)
         .insert_resource(TerrainSourceDesc {
             tile_root: cfg.source.tile_root,
@@ -71,10 +99,7 @@ fn main() {
         .run();
 }
 
-fn setup_scene(
-    mut commands: Commands,
-    mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
-) {
+fn setup_scene(mut commands: Commands, mut scattering_mediums: ResMut<Assets<ScatteringMedium>>) {
     // Spawn camera above terrain centre, angled downward so terrain is visible
     // immediately in freecam mode.  preload_terrain_startup uses the XZ position
     // to decide which tiles to load first.
@@ -93,8 +118,7 @@ fn setup_scene(
         Bloom::NATURAL,
         // Position at a comfortable altitude and look at terrain centre so the
         // view is correct from the first frame in freecam mode.
-        Transform::from_xyz(0.0, 800.0, 1200.0)
-            .looking_at(Vec3::ZERO, Vec3::Y),
+        Transform::from_xyz(0.0, 800.0, 1200.0).looking_at(Vec3::ZERO, Vec3::Y),
         TerrainCamera,
     ));
 
@@ -134,7 +158,9 @@ fn camera_move(
     time: Res<Time>,
     mut query: Query<&mut Transform, With<TerrainCamera>>,
 ) {
-    if *mode != CameraMode::Freecam { return; }
+    if *mode != CameraMode::Freecam {
+        return;
+    }
     let Ok(mut t) = query.single_mut() else {
         return;
     };
@@ -181,7 +207,9 @@ fn camera_look(
     mouse_motion: Res<AccumulatedMouseMotion>,
     mut query: Query<&mut Transform, With<TerrainCamera>>,
 ) {
-    if *mode != CameraMode::Freecam { return; }
+    if *mode != CameraMode::Freecam {
+        return;
+    }
     if !mouse_buttons.pressed(MouseButton::Right) {
         return;
     }

@@ -34,7 +34,7 @@ struct TerrainParams {
     num_lod_levels:     f32,
     patch_resolution:   f32,
     world_bounds:       vec4<f32>,
-    bounds_fade:        vec4<f32>, // x = fade dist, y = use_macro_color, z = flip_v
+    bounds_fade:        vec4<f32>, // x = fade dist, y = use_macro_color, z = flip_v, w = show_wireframe
     clip_levels: array<vec4<f32>, 16>,
 }
 
@@ -48,6 +48,7 @@ struct TerrainVOut {
     @location(0)       world_pos:    vec4<f32>,
     @location(1)       world_normal: vec3<f32>,
     @location(2)       macro_xz_ws:  vec2<f32>,
+    @location(3)       patch_uv:     vec2<f32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -112,6 +113,19 @@ fn distance_attenuation(dist_sq: f32, inv_range_sq: f32) -> f32 {
     let factor       = dist_sq * inv_range_sq;
     let smooth_factor = saturate(1.0 - factor * factor);
     return (smooth_factor * smooth_factor) / max(dist_sq, 0.0001);
+}
+
+fn patch_grid_wireframe(patch_uv: vec2<f32>) -> f32 {
+    let grid_uv = patch_uv * terrain.patch_resolution;
+    let grid_fw = max(fwidth(grid_uv), vec2<f32>(1e-4, 1e-4));
+    let quad_dist = abs(fract(grid_uv - 0.5) - 0.5) / grid_fw;
+    let quad_line = 1.0 - saturate(min(quad_dist.x, quad_dist.y));
+
+    let patch_fw = max(fwidth(patch_uv), vec2<f32>(1e-4, 1e-4));
+    let patch_dist = min(patch_uv, 1.0 - patch_uv) / patch_fw;
+    let patch_line = 1.0 - saturate(min(patch_dist.x, patch_dist.y) - 0.5);
+
+    return max(quad_line * 0.75, patch_line);
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +260,13 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     let ambient              = sky_ambient_physical + flat_ambient;
 
     // Apply camera exposure (physical luminance → display values).
-    let out_rgb = (direct + ambient) * view.exposure;
+    var out_rgb = (direct + ambient) * view.exposure;
+
+    if terrain.bounds_fade.w > 0.5 {
+        let wire = patch_grid_wireframe(in.patch_uv);
+        let wire_color = vec3<f32>(0.98, 0.94, 0.35);
+        out_rgb = mix(out_rgb, wire_color, wire * 0.92);
+    }
 
     return vec4<f32>(out_rgb, 1.0);
 }

@@ -1,17 +1,16 @@
+use crate::terrain::config::MAX_SUPPORTED_CLIPMAP_LEVELS;
 use bevy::{
     mesh::MeshVertexBufferLayoutRef,
     pbr::{MaterialPipeline, MaterialPipelineKey},
     prelude::*,
     render::{
         render_resource::{
-            AsBindGroup, RenderPipelineDescriptor, ShaderType,
-            SpecializedMeshPipelineError,
+            AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
         },
         storage::ShaderStorageBuffer,
     },
     shader::ShaderRef,
 };
-use crate::terrain::config::MAX_SUPPORTED_CLIPMAP_LEVELS;
 
 // ---------------------------------------------------------------------------
 // Uniform struct — must match TerrainParams in both WGSL shaders exactly.
@@ -24,7 +23,7 @@ use crate::terrain::config::MAX_SUPPORTED_CLIPMAP_LEVELS;
 //   offset 16 – num_lod_levels    f32   (= clipmap_levels, used to clamp coarse index)
 //   offset 20 – patch_resolution  f32
 //   offset 24 – world_bounds      vec4<f32>   (min_x, min_z, max_x, max_z)
-//   offset 40 – bounds_fade       vec4<f32>   (fade_distance, use_macro_color_map, flip_v, unused)
+//   offset 40 – bounds_fade       vec4<f32>   (fade_distance, use_macro_color_map, flip_v, show_wireframe)
 //   offset 56 – clip_levels[0]    vec4<f32>
 //   offset 72 – clip_levels[1]    vec4<f32>
 //   …
@@ -53,7 +52,8 @@ pub struct TerrainMaterialUniforms {
     pub patch_resolution: f32,
     /// Terrain footprint in world space: (min_x, min_z, max_x, max_z).
     pub world_bounds: Vec4,
-    /// Bounds fade params: x = fade distance, y = use_macro_color, z = flip_v.
+    /// Bounds/debug params:
+    /// x = fade distance, y = use_macro_color, z = flip_v, w = show_wireframe.
     pub bounds_fade: Vec4,
     /// Per-LOD clipmap data: (origin_x, origin_z, inv_ring_span, texel_world_size).
     /// Indexed by LOD level (0 = finest).  Unused entries are zero.

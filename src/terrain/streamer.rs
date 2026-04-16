@@ -4,8 +4,8 @@ use crate::terrain::{
     world_desc::TerrainSourceDesc,
 };
 use bevy::prelude::*;
-use std::path::{Path, PathBuf};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{
     mpsc::{self, Sender},
     Arc, Mutex,
@@ -240,7 +240,8 @@ where
             let src_tile = cache.get(&src_key)?;
             let local_x = gx.rem_euclid(tile_size_i32) as usize;
             let local_y = gz.rem_euclid(tile_size_i32) as usize;
-            out[(row * tile_size + col) as usize] = src_tile[local_y * tile_size as usize + local_x];
+            out[(row * tile_size + col) as usize] =
+                src_tile[local_y * tile_size as usize + local_x];
         }
     }
 
@@ -266,10 +267,8 @@ where
 
     for row in 0..tile_size {
         for col in 0..tile_size {
-            let world_x =
-                ((key.x * tile_size_i32 + col as i32) as f32 + 0.5) * requested_scale_ws;
-            let world_z =
-                ((key.y * tile_size_i32 + row as i32) as f32 + 0.5) * requested_scale_ws;
+            let world_x = ((key.x * tile_size_i32 + col as i32) as f32 + 0.5) * requested_scale_ws;
+            let world_z = ((key.y * tile_size_i32 + row as i32) as f32 + 0.5) * requested_scale_ws;
 
             let gx = (world_x / source_scale_ws).floor() as i32;
             let gz = (world_z / source_scale_ws).floor() as i32;
@@ -294,7 +293,8 @@ where
             let src_tile = cache.get(&src_key)?;
             let local_x = gx.rem_euclid(tile_size_i32) as usize;
             let local_y = gz.rem_euclid(tile_size_i32) as usize;
-            out[(row * tile_size + col) as usize] = src_tile[local_y * tile_size as usize + local_x];
+            out[(row * tile_size + col) as usize] =
+                src_tile[local_y * tile_size as usize + local_x];
         }
     }
 
@@ -351,12 +351,7 @@ fn read_rg8_snorm_tile(path: &Path, tile_size: u32) -> Option<Vec<[u8; 2]>> {
     if bytes.len() != expected {
         return None;
     }
-    Some(
-        bytes
-            .chunks_exact(2)
-            .map(|b| [b[0], b[1]])
-            .collect(),
-    )
+    Some(bytes.chunks_exact(2).map(|b| [b[0], b[1]]).collect())
 }
 
 fn encode_normal_xz_snorm(normal: Vec3) -> [u8; 2] {
@@ -376,10 +371,8 @@ fn build_procedural_normal_tile(
     let mut pixels = Vec::with_capacity(len);
     for row in 0..tile_size {
         for col in 0..tile_size {
-            let world_x =
-                ((key.x * tile_size as i32 + col as i32) as f32 + 0.5) * level_scale_ws;
-            let world_z =
-                ((key.y * tile_size as i32 + row as i32) as f32 + 0.5) * level_scale_ws;
+            let world_x = ((key.x * tile_size as i32 + col as i32) as f32 + 0.5) * level_scale_ws;
+            let world_z = ((key.y * tile_size as i32 + row as i32) as f32 + 0.5) * level_scale_ws;
             pixels.push(encode_normal_xz_snorm(normal_at_world(
                 world_x,
                 world_z,
@@ -520,13 +513,45 @@ mod tests {
     #[test]
     fn resamples_from_coarsest_available_mip() {
         let mut source_tiles = HashMap::new();
-        source_tiles.insert(TileKey { level: 0, x: 0, y: 0 }, vec![1.0, 2.0, 3.0, 4.0]);
-        source_tiles.insert(TileKey { level: 0, x: 1, y: 0 }, vec![5.0, 6.0, 7.0, 8.0]);
-        source_tiles.insert(TileKey { level: 0, x: 0, y: 1 }, vec![9.0, 10.0, 11.0, 12.0]);
-        source_tiles.insert(TileKey { level: 0, x: 1, y: 1 }, vec![13.0, 14.0, 15.0, 16.0]);
+        source_tiles.insert(
+            TileKey {
+                level: 0,
+                x: 0,
+                y: 0,
+            },
+            vec![1.0, 2.0, 3.0, 4.0],
+        );
+        source_tiles.insert(
+            TileKey {
+                level: 0,
+                x: 1,
+                y: 0,
+            },
+            vec![5.0, 6.0, 7.0, 8.0],
+        );
+        source_tiles.insert(
+            TileKey {
+                level: 0,
+                x: 0,
+                y: 1,
+            },
+            vec![9.0, 10.0, 11.0, 12.0],
+        );
+        source_tiles.insert(
+            TileKey {
+                level: 0,
+                x: 1,
+                y: 1,
+            },
+            vec![13.0, 14.0, 15.0, 16.0],
+        );
 
         let tile = build_resampled_tile(
-            TileKey { level: 1, x: 0, y: 0 },
+            TileKey {
+                level: 1,
+                x: 0,
+                y: 0,
+            },
             2,
             2.0,
             0,

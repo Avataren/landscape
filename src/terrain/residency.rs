@@ -1,9 +1,9 @@
-use bevy::prelude::*;
 use crate::terrain::{
     config::TerrainConfig,
     math::{compute_needed_tiles_for_level, level_scale, snap_camera_to_level_grid},
     resources::{TerrainResidency, TerrainViewState},
 };
+use bevy::prelude::*;
 
 /// Recomputes the `required_now` set from the current view state and evicts
 /// excess tiles.

@@ -4,8 +4,8 @@ pub mod collision;
 pub mod components;
 pub mod config;
 pub mod debug;
-pub mod material;
 pub mod macro_color;
+pub mod material;
 pub mod math;
 pub mod patch_mesh;
 pub mod physics_colliders;
@@ -19,24 +19,22 @@ pub use debug::TerrainDebugPlugin;
 pub use world_desc::TerrainSourceDesc;
 
 use bevy::{
-    asset::RenderAssetUsages,
-    camera::visibility::NoFrustumCulling,
-    prelude::*,
-    render::storage::ShaderStorageBuffer,
+    asset::RenderAssetUsages, camera::visibility::NoFrustumCulling, pbr::wireframe::NoWireframe,
+    prelude::*, render::storage::ShaderStorageBuffer,
 };
-use clipmap::{build_patch_instances_for_view, PatchInstanceCpu};
+use clipmap::{build_patch_instances_for_view_in_bounds, PatchInstanceCpu};
 use clipmap_texture::{
     apply_tiles_to_clipmap, compute_clip_levels, compute_initial_clip_levels,
-    create_initial_clipmap_texture, create_initial_normal_clipmap_texture,
-    update_clipmap_textures, TerrainClipmapState,
+    create_initial_clipmap_texture, create_initial_normal_clipmap_texture, update_clipmap_textures,
+    TerrainClipmapState,
 };
 use collision::{update_collision_tiles, TerrainCollisionCache};
-use physics_colliders::{spawn_coarse_global_heightfield, sync_tile_colliders, TileColliders};
 use components::TerrainCamera;
 use config::TerrainConfig;
-use material::{TerrainMaterial, TerrainMaterialUniforms};
 use macro_color::load_macro_color_texture;
+use material::{TerrainMaterial, TerrainMaterialUniforms};
 use math::{compute_needed_tiles_for_level, level_scale, snap_camera_to_level_grid};
+use physics_colliders::{spawn_coarse_global_heightfield, sync_tile_colliders, TileColliders};
 use render::{gpu_types::PatchDescriptorGpu, TerrainRenderPlugin};
 use residency::update_required_tiles;
 use resources::{TerrainResidency, TerrainStreamQueue, TerrainViewState, TileKey, TileState};
@@ -58,6 +56,10 @@ pub struct PatchEntities {
     /// per patch, in the same order as `entities`.  Kept in sync whenever the
     /// clip centers change (same condition that triggers Transform updates).
     pub patch_buffer_handle: Handle<ShaderStorageBuffer>,
+    /// Shared mesh handle used by all terrain patches.
+    pub mesh_handle: Handle<Mesh>,
+    /// Shared material handle used by all terrain patches.
+    pub material_handle: Handle<TerrainMaterial>,
 }
 
 // ---------------------------------------------------------------------------
@@ -83,7 +85,10 @@ impl Plugin for TerrainPlugin {
             // Startup
             .add_systems(Startup, (setup_tile_channel, setup_terrain).chain())
             .add_systems(PostStartup, preload_terrain_startup)
-            .add_systems(PostStartup, spawn_coarse_global_heightfield.after(preload_terrain_startup))
+            .add_systems(
+                PostStartup,
+                spawn_coarse_global_heightfield.after(preload_terrain_startup),
+            )
             // Update: ordered as per handoff spec
             .add_systems(Update, update_terrain_view_state)
             .add_systems(
@@ -105,10 +110,7 @@ impl Plugin for TerrainPlugin {
                     .after(update_clipmap_textures)
                     .after(update_terrain_view_state),
             )
-            .add_systems(
-                Update,
-                sync_tile_colliders.after(apply_tiles_to_clipmap),
-            )
+            .add_systems(Update, sync_tile_colliders.after(apply_tiles_to_clipmap))
             // Render sub-plugin
             .add_plugins(TerrainRenderPlugin);
     }
@@ -307,19 +309,24 @@ fn preload_terrain_startup(
     // Initialise collision cache params before the tile loop so upload_tile
     // can use them immediately (same initialisation update_collision_tiles does
     // every frame, but we can't wait until the first Update tick).
-    collision.tile_size   = config.tile_size;
+    collision.tile_size = config.tile_size;
     collision.world_scale = config.world_scale;
     collision.height_scale = config.height_scale;
 
     for tile in &results {
         let key = tile.key;
-        residency.resident_cpu.insert(key, crate::terrain::resources::HeightTileCpu {
+        residency.resident_cpu.insert(
             key,
-            data: tile.data.clone(),
-            normal_data: tile.normal_data.clone(),
-            tile_size: tile.tile_size,
-        });
-        residency.tiles.insert(key, TileState::ResidentGpu { slot: 0 });
+            crate::terrain::resources::HeightTileCpu {
+                key,
+                data: tile.data.clone(),
+                normal_data: tile.normal_data.clone(),
+                tile_size: tile.tile_size,
+            },
+        );
+        residency
+            .tiles
+            .insert(key, TileState::ResidentGpu { slot: 0 });
         residency.touch(key);
         // Populate the collision cache directly — preloaded tiles bypass
         // pending_upload (which apply_tiles_to_clipmap drains), so
@@ -379,20 +386,24 @@ fn setup_terrain(
     // --- Build initial patch list before creating the material so we can pass
     //     the real storage-buffer handle into the material from the start ---
     let view = TerrainViewState::default();
-    let patches: Vec<PatchInstanceCpu> = build_patch_instances_for_view(&config, &view);
+    let patches: Vec<PatchInstanceCpu> =
+        build_patch_instances_for_view_in_bounds(&config, &view, desc.world_min, desc.world_max);
 
     // Build the initial patch storage buffer so the vertex shader can read
     // per-patch data (origin, size, lod) without decoding the Transform matrix.
     let patch_buffer_handle = {
-        let descs: Vec<PatchDescriptorGpu> = patches.iter().map(|p| PatchDescriptorGpu {
-            origin_ws:     [p.origin_ws.x, p.origin_ws.y],
-            patch_size_ws: p.patch_size_ws,
-            lod_level:     p.lod_level,
-            morph_start:   p.morph_start,
-            morph_end:     p.morph_end,
-            patch_kind:    p.patch_kind,
-            _pad0:         0,
-        }).collect();
+        let descs: Vec<PatchDescriptorGpu> = patches
+            .iter()
+            .map(|p| PatchDescriptorGpu {
+                origin_ws: [p.origin_ws.x, p.origin_ws.y],
+                patch_size_ws: p.patch_size_ws,
+                lod_level: p.lod_level,
+                morph_start: p.morph_start,
+                morph_end: p.morph_end,
+                patch_kind: p.patch_kind,
+                _pad0: 0,
+            })
+            .collect();
         let ssb = ShaderStorageBuffer::new(
             bytemuck::cast_slice(&descs),
             RenderAssetUsages::RENDER_WORLD,
@@ -402,6 +413,7 @@ fn setup_terrain(
 
     patch_entities.entities.clear();
     patch_entities.patch_buffer_handle = patch_buffer_handle.clone();
+    patch_entities.mesh_handle = mesh_handle.clone();
 
     let mat_handle = terrain_materials.add(TerrainMaterial {
         height_texture: height_handle.clone(),
@@ -415,7 +427,12 @@ fn setup_terrain(
             ring_patches: config.ring_patches as f32,
             num_lod_levels: levels as f32,
             patch_resolution: config.patch_resolution as f32,
-            world_bounds: Vec4::new(desc.world_min.x, desc.world_min.y, desc.world_max.x, desc.world_max.y),
+            world_bounds: Vec4::new(
+                desc.world_min.x,
+                desc.world_min.y,
+                desc.world_max.x,
+                desc.world_max.y,
+            ),
             bounds_fade: Vec4::new(
                 bounds_fade_distance,
                 if macro_color.enabled { 1.0 } else { 0.0 },
@@ -425,6 +442,7 @@ fn setup_terrain(
             clip_levels: compute_initial_clip_levels(&config),
         },
     });
+    patch_entities.material_handle = mat_handle.clone();
 
     // Insert the runtime state resource so `update_clipmap_textures` can find it.
     // Initialise last_clip_centers to ZERO (matching the initial texture), so the
@@ -438,28 +456,7 @@ fn setup_terrain(
         tile_apply_centers: vec![IVec2::new(i32::MAX, i32::MAX); levels as usize],
     });
 
-    for patch in &patches {
-        let entity = commands
-            .spawn((
-                Mesh3d(mesh_handle.clone()),
-                MeshMaterial3d(mat_handle.clone()),
-                Transform {
-                    translation: Vec3::new(patch.origin_ws.x, 0.0, patch.origin_ws.y),
-                    scale: Vec3::new(patch.patch_size_ws, 1.0, patch.patch_size_ws),
-                    ..default()
-                },
-                components::TerrainPatchInstance {
-                    lod_level: patch.lod_level,
-                    patch_kind: patch.patch_kind,
-                    patch_origin_ws: patch.origin_ws,
-                    patch_scale_ws: patch.patch_size_ws,
-                },
-                NoFrustumCulling,
-            ))
-            .id();
-
-        patch_entities.entities.push(entity);
-    }
+    respawn_patch_entities(&mut commands, &mut patch_entities, &patches);
 
     info!(
         "[Terrain] Setup complete: {} patches across {} LOD levels. \
@@ -519,10 +516,12 @@ pub fn update_terrain_view_state(
 /// centers have actually changed.
 fn update_patch_transforms(
     config: Res<TerrainConfig>,
+    desc: Res<TerrainSourceDesc>,
     view: Res<TerrainViewState>,
     mut patch_entities: ResMut<PatchEntities>,
     mut query: Query<(&mut Transform, &mut components::TerrainPatchInstance)>,
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
+    mut commands: Commands,
 ) {
     if view.clip_centers.is_empty() || patch_entities.entities.is_empty() {
         return;
@@ -539,43 +538,79 @@ fn update_patch_transforms(
         return;
     }
 
-    let patches = build_patch_instances_for_view(&config, &view);
+    let patches =
+        build_patch_instances_for_view_in_bounds(&config, &view, desc.world_min, desc.world_max);
 
+    let mut respawned = false;
     if patches.len() != patch_entities.entities.len() {
-        // Config changed — would need full respawn. Skip for now.
-        warn!(
-            "[Terrain] Patch count mismatch ({} vs {})",
-            patches.len(),
-            patch_entities.entities.len()
-        );
-        return;
+        respawn_patch_entities(&mut commands, &mut patch_entities, &patches);
+        respawned = true;
     }
 
     if let Some(ssb) = storage_buffers.get_mut(&patch_entities.patch_buffer_handle) {
-        let descs: Vec<PatchDescriptorGpu> = patches.iter().map(|p| PatchDescriptorGpu {
-            origin_ws:     [p.origin_ws.x, p.origin_ws.y],
-            patch_size_ws: p.patch_size_ws,
-            lod_level:     p.lod_level,
-            morph_start:   p.morph_start,
-            morph_end:     p.morph_end,
-            patch_kind:    p.patch_kind,
-            _pad0:         0,
-        }).collect();
+        let descs: Vec<PatchDescriptorGpu> = patches
+            .iter()
+            .map(|p| PatchDescriptorGpu {
+                origin_ws: [p.origin_ws.x, p.origin_ws.y],
+                patch_size_ws: p.patch_size_ws,
+                lod_level: p.lod_level,
+                morph_start: p.morph_start,
+                morph_end: p.morph_end,
+                patch_kind: p.patch_kind,
+                _pad0: 0,
+            })
+            .collect();
         ssb.data = Some(bytemuck::cast_slice(&descs).to_vec());
+    }
+
+    if respawned {
+        patch_entities.last_clip_centers = view.clip_centers.clone();
+        return;
     }
 
     // Only update ECS Transforms when the clip grid cell changes — these drive
     // Bevy's own visibility / AABB checks for the entity, not the vertex path.
-    if positions_changed {
-        for (entity, patch) in patch_entities.entities.iter().zip(patches.iter()) {
-            if let Ok((mut transform, mut instance)) = query.get_mut(*entity) {
-                transform.translation = Vec3::new(patch.origin_ws.x, 0.0, patch.origin_ws.y);
-                transform.scale = Vec3::new(patch.patch_size_ws, 1.0, patch.patch_size_ws);
-                instance.patch_origin_ws = patch.origin_ws;
-                instance.patch_scale_ws = patch.patch_size_ws;
-            }
+    for (entity, patch) in patch_entities.entities.iter().zip(patches.iter()) {
+        if let Ok((mut transform, mut instance)) = query.get_mut(*entity) {
+            transform.translation = Vec3::new(patch.origin_ws.x, 0.0, patch.origin_ws.y);
+            transform.scale = Vec3::new(patch.patch_size_ws, 1.0, patch.patch_size_ws);
+            instance.patch_origin_ws = patch.origin_ws;
+            instance.patch_scale_ws = patch.patch_size_ws;
         }
-        patch_entities.last_clip_centers = view.clip_centers.clone();
     }
+    patch_entities.last_clip_centers = view.clip_centers.clone();
 }
 
+fn respawn_patch_entities(
+    commands: &mut Commands,
+    patch_entities: &mut PatchEntities,
+    patches: &[PatchInstanceCpu],
+) {
+    for entity in patch_entities.entities.drain(..) {
+        commands.entity(entity).despawn();
+    }
+
+    for patch in patches {
+        let entity = commands
+            .spawn((
+                Mesh3d(patch_entities.mesh_handle.clone()),
+                MeshMaterial3d(patch_entities.material_handle.clone()),
+                Transform {
+                    translation: Vec3::new(patch.origin_ws.x, 0.0, patch.origin_ws.y),
+                    scale: Vec3::new(patch.patch_size_ws, 1.0, patch.patch_size_ws),
+                    ..default()
+                },
+                components::TerrainPatchInstance {
+                    lod_level: patch.lod_level,
+                    patch_kind: patch.patch_kind,
+                    patch_origin_ws: patch.origin_ws,
+                    patch_scale_ws: patch.patch_size_ws,
+                },
+                NoWireframe,
+                NoFrustumCulling,
+            ))
+            .id();
+
+        patch_entities.entities.push(entity);
+    }
+}

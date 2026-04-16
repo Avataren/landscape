@@ -1,9 +1,12 @@
-use bevy::prelude::*;
 use crate::terrain::{
-    clipmap::build_patch_instances_for_view,
+    clipmap::build_patch_instances_for_view_in_bounds,
+    clipmap_texture::TerrainClipmapState,
     config::TerrainConfig,
+    material::TerrainMaterial,
     resources::{TerrainResidency, TerrainViewState},
+    world_desc::TerrainSourceDesc,
 };
+use bevy::{pbr::wireframe::WireframeConfig, prelude::*};
 
 // ---------------------------------------------------------------------------
 // Debug config resource
@@ -15,6 +18,7 @@ pub struct TerrainDebugConfig {
     pub show_patch_bounds: bool,
     pub show_lod_colors: bool,
     pub show_stats: bool,
+    pub show_wireframe: bool,
 }
 
 impl Default for TerrainDebugConfig {
@@ -22,7 +26,8 @@ impl Default for TerrainDebugConfig {
         Self {
             show_patch_bounds: false,
             show_lod_colors: false,
-            show_stats: true,
+            show_stats: false,
+            show_wireframe: false,
         }
     }
 }
@@ -42,6 +47,85 @@ const LOD_COLORS: [Color; 8] = [
     Color::srgb(1.0, 1.0, 1.0),
 ];
 
+/// Runtime debug hotkeys:
+/// - F9  = stats logging
+/// - F10 = patch bounds
+/// - F11 = LOD center markers
+/// - F12 = global wireframe + terrain wireframe overlay
+pub fn toggle_terrain_debug_hotkeys(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut debug_cfg: ResMut<TerrainDebugConfig>,
+) {
+    if keys.just_pressed(KeyCode::F9) {
+        debug_cfg.show_stats = !debug_cfg.show_stats;
+        info!(
+            "[Terrain] Debug stats {} (F9)",
+            if debug_cfg.show_stats {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+    }
+
+    if keys.just_pressed(KeyCode::F10) {
+        debug_cfg.show_patch_bounds = !debug_cfg.show_patch_bounds;
+        info!(
+            "[Terrain] Patch bounds {} (F10)",
+            if debug_cfg.show_patch_bounds {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+    }
+
+    if keys.just_pressed(KeyCode::F11) {
+        debug_cfg.show_lod_colors = !debug_cfg.show_lod_colors;
+        info!(
+            "[Terrain] LOD markers {} (F11)",
+            if debug_cfg.show_lod_colors {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+    }
+
+    if keys.just_pressed(KeyCode::F12) {
+        debug_cfg.show_wireframe = !debug_cfg.show_wireframe;
+        info!(
+            "[Terrain] Global wireframe {} (F12)",
+            if debug_cfg.show_wireframe {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+    }
+}
+
+/// Keep Bevy's global wireframe mode and the terrain material wireframe flag in sync.
+pub fn sync_wireframe_modes(
+    debug_cfg: Res<TerrainDebugConfig>,
+    clipmap_state: Res<TerrainClipmapState>,
+    mut wireframe_cfg: ResMut<WireframeConfig>,
+    mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
+) {
+    if wireframe_cfg.global != debug_cfg.show_wireframe {
+        wireframe_cfg.global = debug_cfg.show_wireframe;
+    }
+
+    let Some(material) = terrain_materials.get_mut(&clipmap_state.material_handle) else {
+        return;
+    };
+
+    let desired = if debug_cfg.show_wireframe { 1.0 } else { 0.0 };
+    if material.params.bounds_fade.w != desired {
+        material.params.bounds_fade.w = desired;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Debug systems
 // ---------------------------------------------------------------------------
@@ -49,13 +133,19 @@ const LOD_COLORS: [Color; 8] = [
 /// Draw wireframe patch bounds using Bevy's built-in gizmo API.
 pub fn draw_terrain_debug(
     config: Res<TerrainConfig>,
+    desc: Res<TerrainSourceDesc>,
     view: Res<TerrainViewState>,
     debug_cfg: Res<TerrainDebugConfig>,
     _residency: Res<TerrainResidency>,
     mut gizmos: Gizmos,
 ) {
     if debug_cfg.show_patch_bounds {
-        let patches = build_patch_instances_for_view(&config, &view);
+        let patches = build_patch_instances_for_view_in_bounds(
+            &config,
+            &view,
+            desc.world_min,
+            desc.world_max,
+        );
         for patch in &patches {
             let color = LOD_COLORS[patch.lod_level as usize % LOD_COLORS.len()];
             let cx = patch.origin_ws.x + patch.patch_size_ws * 0.5;
@@ -92,7 +182,8 @@ pub fn draw_terrain_debug(
 
 /// Log terrain stats to the console (throttled).
 pub fn log_terrain_stats(
-    config: Res<TerrainConfig>,
+    _config: Res<TerrainConfig>,
+    desc: Res<TerrainSourceDesc>,
     view: Res<TerrainViewState>,
     residency: Res<TerrainResidency>,
     debug_cfg: Res<TerrainDebugConfig>,
@@ -106,19 +197,9 @@ pub fn log_terrain_stats(
         return;
     }
 
-    let patch_count: usize = (0..config.active_clipmap_levels() as usize)
-        .map(|level| {
-            let has_hole = level > 0;
-            let full = config.ring_patches * config.ring_patches;
-            let hole = if has_hole {
-                let inner = config.ring_patches / 2;
-                inner * inner
-            } else {
-                0
-            };
-            (full - hole) as usize
-        })
-        .sum();
+    let patch_count =
+        build_patch_instances_for_view_in_bounds(&_config, &view, desc.world_min, desc.world_max)
+            .len();
 
     info!(
         "[Terrain] cam={:.1},{:.1},{:.1}  patches={}  resident_tiles={}  pending_upload={}  required_now={}",
@@ -140,10 +221,14 @@ pub struct TerrainDebugPlugin;
 
 impl Plugin for TerrainDebugPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<TerrainDebugConfig>()
-            .add_systems(
-                Update,
-                (draw_terrain_debug, log_terrain_stats),
-            );
+        app.init_resource::<TerrainDebugConfig>().add_systems(
+            Update,
+            (
+                toggle_terrain_debug_hotkeys,
+                sync_wireframe_modes,
+                draw_terrain_debug,
+                log_terrain_stats,
+            ),
+        );
     }
 }

@@ -21,16 +21,14 @@
 // Switching Freecam → Walking: cursor locked; body teleported to camera XZ;
 //   yaw/pitch synced from camera rotation so the view is continuous.
 
+use crate::terrain::{
+    collision::TerrainCollisionCache, components::TerrainCamera, config::TerrainConfig,
+};
 use avian3d::prelude::*;
 use bevy::{
     input::mouse::AccumulatedMouseMotion,
     prelude::*,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
-};
-use crate::terrain::{
-    collision::TerrainCollisionCache,
-    components::TerrainCamera,
-    config::TerrainConfig,
 };
 
 // ---------------------------------------------------------------------------
@@ -81,16 +79,18 @@ pub struct PlayerPlugin;
 
 impl Plugin for PlayerPlugin {
     fn build(&self, app: &mut App) {
-        app
-            .add_plugins(PhysicsPlugins::default())
+        app.add_plugins(PhysicsPlugins::default())
             .insert_resource(CameraMode::default())
             .insert_resource(PlayerLook::default())
-            .add_systems(Update, (
-                spawn_player_once,
-                toggle_mode,
-                player_look,
-                player_move.after(player_look),
-            ))
+            .add_systems(
+                Update,
+                (
+                    spawn_player_once,
+                    toggle_mode,
+                    player_look,
+                    player_move.after(player_look),
+                ),
+            )
             // PostUpdate runs after FixedPostUpdate (where Avian writeback lives),
             // so sync_camera_to_body always sees the settled physics Transform.
             .add_systems(PostUpdate, sync_camera_to_body);
@@ -111,13 +111,18 @@ fn spawn_player_once(
     config: Res<TerrainConfig>,
     mut commands: Commands,
 ) {
-    if *done { return; }
+    if *done {
+        return;
+    }
     // world_scale > 0 once preload_terrain_startup (PostStartup) has run.
-    if cache.world_scale <= 0.0 { return; }
+    if cache.world_scale <= 0.0 {
+        return;
+    }
     *done = true;
 
     let spawn_xz = Vec2::ZERO;
-    let ground_y = cache.sample_height(spawn_xz)
+    let ground_y = cache
+        .sample_height(spawn_xz)
         .unwrap_or(config.height_scale * 0.5);
     // Place body centre just above the surface so the first physics step settles it.
     let spawn_y = ground_y + CAPSULE_RADIUS + CAPSULE_LENGTH * 0.5 + 0.5;
@@ -144,8 +149,12 @@ fn toggle_mode(
     cam_q: Query<&Transform, (With<TerrainCamera>, Without<PlayerBody>)>,
     mut look: ResMut<PlayerLook>,
 ) {
-    if !keys.just_pressed(KeyCode::F1) { return; }
-    let Ok(mut cursor) = cursor_q.single_mut() else { return };
+    if !keys.just_pressed(KeyCode::F1) {
+        return;
+    }
+    let Ok(mut cursor) = cursor_q.single_mut() else {
+        return;
+    };
 
     match *mode {
         CameraMode::Walking => {
@@ -184,16 +193,17 @@ fn player_look(
     mut look: ResMut<PlayerLook>,
     mouse_motion: Res<AccumulatedMouseMotion>,
 ) {
-    if *mode != CameraMode::Walking { return; }
+    if *mode != CameraMode::Walking {
+        return;
+    }
 
     let delta = mouse_motion.delta;
     if delta != Vec2::ZERO {
-        look.yaw  -= delta.x * MOUSE_SENSITIVITY;
-        look.pitch = (look.pitch - delta.y * MOUSE_SENSITIVITY)
-            .clamp(
-                -std::f32::consts::FRAC_PI_2 + 0.05,
-                 std::f32::consts::FRAC_PI_2 - 0.05,
-            );
+        look.yaw -= delta.x * MOUSE_SENSITIVITY;
+        look.pitch = (look.pitch - delta.y * MOUSE_SENSITIVITY).clamp(
+            -std::f32::consts::FRAC_PI_2 + 0.05,
+            std::f32::consts::FRAC_PI_2 - 0.05,
+        );
     }
 }
 
@@ -204,18 +214,30 @@ fn player_move(
     keys: Res<ButtonInput<KeyCode>>,
     look: Res<PlayerLook>,
 ) {
-    if *mode != CameraMode::Walking { return; }
-    let Ok(mut vel) = body_q.single_mut() else { return };
+    if *mode != CameraMode::Walking {
+        return;
+    }
+    let Ok(mut vel) = body_q.single_mut() else {
+        return;
+    };
 
     let (sin_y, cos_y) = look.yaw.sin_cos();
     let forward = Vec3::new(-sin_y, 0.0, -cos_y);
-    let right   = Vec3::new( cos_y, 0.0, -sin_y);
+    let right = Vec3::new(cos_y, 0.0, -sin_y);
 
     let mut dir = Vec3::ZERO;
-    if keys.pressed(KeyCode::KeyW) { dir += forward; }
-    if keys.pressed(KeyCode::KeyS) { dir -= forward; }
-    if keys.pressed(KeyCode::KeyA) { dir -= right;   }
-    if keys.pressed(KeyCode::KeyD) { dir += right;   }
+    if keys.pressed(KeyCode::KeyW) {
+        dir += forward;
+    }
+    if keys.pressed(KeyCode::KeyS) {
+        dir -= forward;
+    }
+    if keys.pressed(KeyCode::KeyA) {
+        dir -= right;
+    }
+    if keys.pressed(KeyCode::KeyD) {
+        dir += right;
+    }
 
     let horiz = if dir.length_squared() > 0.0 {
         dir.normalize() * WALK_SPEED
@@ -239,10 +261,13 @@ fn sync_camera_to_body(
     mut cam_q: Query<&mut Transform, (With<TerrainCamera>, Without<PlayerBody>)>,
     look: Res<PlayerLook>,
 ) {
-    if *mode != CameraMode::Walking { return; }
-    let (Ok(body_t), Ok(mut cam_t)) = (body_q.single(), cam_q.single_mut()) else { return };
+    if *mode != CameraMode::Walking {
+        return;
+    }
+    let (Ok(body_t), Ok(mut cam_t)) = (body_q.single(), cam_q.single_mut()) else {
+        return;
+    };
 
     cam_t.translation = body_t.translation + Vec3::Y * EYE_OFFSET;
-    cam_t.rotation    = Quat::from_rotation_y(look.yaw) * Quat::from_rotation_x(look.pitch);
+    cam_t.rotation = Quat::from_rotation_y(look.yaw) * Quat::from_rotation_x(look.pitch);
 }
-

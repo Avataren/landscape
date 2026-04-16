@@ -1,6 +1,6 @@
+use crate::terrain::resources::{HeightTileCpu, TileKey};
 use bevy::prelude::*;
 use std::collections::HashMap;
-use crate::terrain::resources::{HeightTileCpu, TileKey};
 
 // ---------------------------------------------------------------------------
 // CPU collision cache
@@ -78,7 +78,14 @@ impl TerrainCollisionCache {
         let local_x = (world_xz.x - tx as f32 * tile_world_size) / tile_world_size;
         let local_y = (world_xz.y - ty as f32 * tile_world_size) / tile_world_size;
         // Use LOD 0 for collision (highest detail available)
-        Some((TileKey { level: 0, x: tx, y: ty }, Vec2::new(local_x, local_y)))
+        Some((
+            TileKey {
+                level: 0,
+                x: tx,
+                y: ty,
+            },
+            Vec2::new(local_x, local_y),
+        ))
     }
 }
 

@@ -50,7 +50,11 @@ fn fallback_macro_color_image() -> Image {
     make_macro_color_image(1, 1, vec![255, 255, 255, 255])
 }
 
-fn downsample_dimensions(src_width: usize, src_height: usize, max_resolution: u32) -> (usize, usize) {
+fn downsample_dimensions(
+    src_width: usize,
+    src_height: usize,
+    max_resolution: u32,
+) -> (usize, usize) {
     let max_resolution = max_resolution.max(1) as usize;
     let longest_edge = src_width.max(src_height);
     if longest_edge <= max_resolution {
@@ -141,7 +145,10 @@ pub fn load_macro_color_texture(
             }
         }
         Err(err) => {
-            warn!("[Terrain] failed to load macro color EXR '{}': {}", path, err);
+            warn!(
+                "[Terrain] failed to load macro color EXR '{}': {}",
+                path, err
+            );
             MacroColorLoadResult {
                 image: fallback_macro_color_image(),
                 enabled: false,

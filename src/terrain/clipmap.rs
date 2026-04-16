@@ -1,9 +1,9 @@
-use bevy::prelude::*;
 use crate::terrain::{
     config::TerrainConfig,
     math::{build_ring_patch_origins, level_scale},
     resources::TerrainViewState,
 };
+use bevy::prelude::*;
 
 // ---------------------------------------------------------------------------
 // CPU patch instance descriptor
@@ -84,6 +84,33 @@ pub fn build_patch_instances_for_view(
     out
 }
 
+/// Builds only the patch instances that overlap the terrain footprint.
+pub fn build_patch_instances_for_view_in_bounds(
+    config: &TerrainConfig,
+    view: &TerrainViewState,
+    world_min: Vec2,
+    world_max: Vec2,
+) -> Vec<PatchInstanceCpu> {
+    build_patch_instances_for_view(config, view)
+        .into_iter()
+        .filter(|patch| patch_intersects_world_bounds(patch, world_min, world_max))
+        .collect()
+}
+
+fn patch_intersects_world_bounds(
+    patch: &PatchInstanceCpu,
+    world_min: Vec2,
+    world_max: Vec2,
+) -> bool {
+    let patch_min = patch.origin_ws;
+    let patch_max = patch.origin_ws + Vec2::splat(patch.patch_size_ws);
+
+    patch_max.x > world_min.x
+        && patch_min.x < world_max.x
+        && patch_max.y > world_min.y
+        && patch_min.y < world_max.y
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
@@ -128,10 +155,7 @@ mod tests {
 
         // Level 0 has no inner hole, so it should have ring_patches^2 patches.
         let count_l0 = patches.iter().filter(|p| p.lod_level == 0).count();
-        assert_eq!(
-            count_l0 as u32,
-            config.ring_patches * config.ring_patches
-        );
+        assert_eq!(count_l0 as u32, config.ring_patches * config.ring_patches);
     }
 
     #[test]
@@ -170,5 +194,21 @@ mod tests {
                 "each level should double the patch size"
             );
         }
+    }
+
+    #[test]
+    fn bounds_filter_removes_off_world_patches() {
+        let config = TerrainConfig::default();
+        let view = make_view(&config, Vec3::ZERO);
+        let full = build_patch_instances_for_view(&config, &view);
+        let filtered = build_patch_instances_for_view_in_bounds(
+            &config,
+            &view,
+            Vec2::new(-64.0, -64.0),
+            Vec2::new(64.0, 64.0),
+        );
+
+        assert!(!filtered.is_empty());
+        assert!(filtered.len() < full.len());
     }
 }

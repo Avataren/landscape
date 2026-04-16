@@ -1,5 +1,5 @@
-use bevy::prelude::*;
 use crate::terrain::resources::TileKey;
+use bevy::prelude::*;
 
 // ---------------------------------------------------------------------------
 // LOD scale helpers
@@ -88,15 +88,21 @@ pub fn compute_needed_tiles_for_level(
     let min_grid = center + IVec2::splat(-half * patch_size_grid);
     let max_grid = center + IVec2::splat(half * patch_size_grid);
 
-    let tx_min = (min_grid.x as f32 * level_scale / (tile_grid as f32 * level_scale)).floor() as i32;
-    let ty_min = (min_grid.y as f32 * level_scale / (tile_grid as f32 * level_scale)).floor() as i32;
+    let tx_min =
+        (min_grid.x as f32 * level_scale / (tile_grid as f32 * level_scale)).floor() as i32;
+    let ty_min =
+        (min_grid.y as f32 * level_scale / (tile_grid as f32 * level_scale)).floor() as i32;
     let tx_max = (max_grid.x as f32 * level_scale / (tile_grid as f32 * level_scale)).ceil() as i32;
     let ty_max = (max_grid.y as f32 * level_scale / (tile_grid as f32 * level_scale)).ceil() as i32;
 
     let mut keys = Vec::new();
     for ty in ty_min..ty_max {
         for tx in tx_min..tx_max {
-            keys.push(TileKey { level, x: tx, y: ty });
+            keys.push(TileKey {
+                level,
+                x: tx,
+                y: ty,
+            });
         }
     }
     keys

@@ -49,8 +49,7 @@ pub fn load() -> AppConfig {
     let toml_str = std::fs::read_to_string("landscape.toml")
         .expect("Could not read landscape.toml — make sure you run from the workspace root");
 
-    let cfg: ConfigFile =
-        toml::from_str(&toml_str).expect("Failed to parse landscape.toml");
+    let cfg: ConfigFile = toml::from_str(&toml_str).expect("Failed to parse landscape.toml");
 
     let t = cfg.terrain;
     let rc = cfg.terrain_config.unwrap_or(TerrainConfigToml {

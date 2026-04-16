@@ -97,8 +97,7 @@ fn parse_args() -> Result<Config, String> {
                 i += 2;
             }
             "--bump-scale" => {
-                cfg.bump_scale =
-                    Some(next()?.parse::<f32>().map_err(|e| format!("{flag}: {e}"))?);
+                cfg.bump_scale = Some(next()?.parse::<f32>().map_err(|e| format!("{flag}: {e}"))?);
                 i += 2;
             }
             "--world-scale" => {
@@ -106,7 +105,9 @@ fn parse_args() -> Result<Config, String> {
                 i += 2;
             }
             "--tile-size" => {
-                cfg.tile_size = next()?.parse::<usize>().map_err(|e| format!("{flag}: {e}"))?;
+                cfg.tile_size = next()?
+                    .parse::<usize>()
+                    .map_err(|e| format!("{flag}: {e}"))?;
                 i += 2;
             }
             "--flip-green" => {
@@ -150,19 +151,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Loading height map: {} ...", cfg.height_path.display());
     let (height_pixels_raw, img_w, img_h) = load_grayscale_image(&cfg.height_path)?;
-    println!("Loaded {}×{} in {:.1}s", img_w, img_h, t_start.elapsed().as_secs_f32());
+    println!(
+        "Loaded {}×{} in {:.1}s",
+        img_w,
+        img_h,
+        t_start.elapsed().as_secs_f32()
+    );
 
     if img_w != img_h {
         return Err(format!("Expected square heightmap, got {}×{}", img_w, img_h).into());
     }
 
     // Normalise height to [0, 1].
-    let h_min = height_pixels_raw.iter().cloned().fold(f32::INFINITY, f32::min);
-    let h_max = height_pixels_raw.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let h_min = height_pixels_raw
+        .iter()
+        .cloned()
+        .fold(f32::INFINITY, f32::min);
+    let h_max = height_pixels_raw
+        .iter()
+        .cloned()
+        .fold(f32::NEG_INFINITY, f32::max);
     let h_range = h_max - h_min;
-    println!("Height range: min={:.6}  max={:.6}  range={:.6}", h_min, h_max, h_range);
+    println!(
+        "Height range: min={:.6}  max={:.6}  range={:.6}",
+        h_min, h_max, h_range
+    );
     let height_pixels: Vec<f32> = if h_range > 1e-6 {
-        height_pixels_raw.iter().map(|&h| (h - h_min) / h_range).collect()
+        height_pixels_raw
+            .iter()
+            .map(|&h| (h - h_min) / h_range)
+            .collect()
     } else {
         height_pixels_raw
     };
@@ -266,7 +284,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let lod_scale = cfg.world_scale * (1u32 << lod) as f32;
 
-
         for ty in tile_start..tile_end {
             for tx in tile_start..tile_end {
                 let px_start = (tx * tile_size as i32 + mip_half) as usize;
@@ -303,9 +320,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 ))
                             } else {
                                 // Grayscale displacement or height-derived normals.
-                                let normal_src = current_bump_height
-                                    .as_deref()
-                                    .unwrap_or(&current_height);
+                                let normal_src =
+                                    current_bump_height.as_deref().unwrap_or(&current_height);
                                 let normal_scale = if current_bump_height.is_some() {
                                     bump_scale
                                 } else {
@@ -338,7 +354,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if lod == 0 {
                 let pct = level_done * 100 / level_tile_count;
-                print!("\r  Level 0: {}%  ({}/{})", pct, level_done, level_tile_count);
+                print!(
+                    "\r  Level 0: {}%  ({}/{})",
+                    pct, level_done, level_tile_count
+                );
                 let _ = std::io::stdout().flush();
             }
         }
@@ -412,9 +431,7 @@ fn load_grayscale_raster(
 }
 
 /// EXR via the `exr` crate — reads the first channel regardless of name.
-fn load_height_exr(
-    path: &Path,
-) -> Result<(Vec<f32>, usize, usize), Box<dyn std::error::Error>> {
+fn load_height_exr(path: &Path) -> Result<(Vec<f32>, usize, usize), Box<dyn std::error::Error>> {
     let image = read_first_flat_layer_from_file(path)?;
     let layer = &image.layer_data;
     let w = layer.size.x();
@@ -429,14 +446,25 @@ fn load_height_exr(
     // so .first() returns the alpha channel (always 1.0) on multi-channel EXRs,
     // producing all-maximum-height terrain.
     // Priority: Y (standard grayscale EXR) → R → first non-alpha → fallback to first.
-    let channel = layer.channel_data.list.iter()
+    let channel = layer
+        .channel_data
+        .list
+        .iter()
         .find(|ch| ch.name.to_string().to_lowercase() == "y")
-        .or_else(|| layer.channel_data.list.iter().find(|ch| {
-            ch.name.to_string().to_lowercase() == "r"
-        }))
-        .or_else(|| layer.channel_data.list.iter().find(|ch| {
-            ch.name.to_string().to_lowercase() != "a"
-        }))
+        .or_else(|| {
+            layer
+                .channel_data
+                .list
+                .iter()
+                .find(|ch| ch.name.to_string().to_lowercase() == "r")
+        })
+        .or_else(|| {
+            layer
+                .channel_data
+                .list
+                .iter()
+                .find(|ch| ch.name.to_string().to_lowercase() != "a")
+        })
         .or_else(|| layer.channel_data.list.first())
         .ok_or("EXR file has no channels")?;
     println!("Using channel {:?} as height", channel.name);
@@ -461,8 +489,7 @@ fn load_height_exr(
 /// Returns `(height_pixels, normal_pixels_xy, width, height)`.
 fn load_bump_map(
     path: &Path,
-) -> Result<(Option<Vec<f32>>, Option<Vec<[f32; 2]>>, usize, usize), Box<dyn std::error::Error>>
-{
+) -> Result<(Option<Vec<f32>>, Option<Vec<[f32; 2]>>, usize, usize), Box<dyn std::error::Error>> {
     let img = ImageReader::open(path)?.decode()?;
     let w = img.width() as usize;
     let h = img.height() as usize;
@@ -488,12 +515,7 @@ fn load_bump_map(
         // shader already reconstructs ny_world = sqrt(1 - nx^2 - nz^2).
         let pixels: Vec<[f32; 2]> = rgb
             .pixels()
-            .map(|p| {
-                [
-                    (p[0] as f32 - 128.0) / 128.0,
-                    (p[1] as f32 - 128.0) / 128.0,
-                ]
-            })
+            .map(|p| [(p[0] as f32 - 128.0) / 128.0, (p[1] as f32 - 128.0) / 128.0])
             .collect();
         Ok((None, Some(pixels), w, h))
     }
@@ -514,10 +536,7 @@ fn box_filter_2x_normal_ts(src: &[[f32; 2]], w: usize, h: usize) -> Vec<[f32; 2]
             let [bx, by] = src[sy * w + sx + 1];
             let [cx, cy] = src[(sy + 1) * w + sx];
             let [ddx, ddy] = src[(sy + 1) * w + sx + 1];
-            dst[dy * dw + dx] = [
-                (ax + bx + cx + ddx) * 0.25,
-                (ay + by + cy + ddy) * 0.25,
-            ];
+            dst[dy * dw + dx] = [(ax + bx + cx + ddx) * 0.25, (ay + by + cy + ddy) * 0.25];
         }
     }
     dst
@@ -548,16 +567,20 @@ fn compute_normal_from_ts(
     let ts_z = (1.0_f32 - ts_x * ts_x - ts_y * ts_y).max(0.0).sqrt();
 
     // Compute the terrain surface TBN from height field finite differences.
-    let h   = sample_height_clamped(height_src, size, px, py) * height_scale;
+    let h = sample_height_clamped(height_src, size, px, py) * height_scale;
     let h_r = sample_height_clamped(height_src, size, px.saturating_add(1), py) * height_scale;
     let h_u = sample_height_clamped(height_src, size, px, py.saturating_add(1)) * height_scale;
 
     // Tangent T = ∂P/∂u = direction of increasing world X.
-    let tl = (lod_scale * lod_scale + (h_r - h) * (h_r - h)).sqrt().max(1e-6);
+    let tl = (lod_scale * lod_scale + (h_r - h) * (h_r - h))
+        .sqrt()
+        .max(1e-6);
     let t = [lod_scale / tl, (h_r - h) / tl, 0.0_f32];
 
     // Bitangent B = ∂P/∂v = direction of increasing world Z.
-    let bl = (lod_scale * lod_scale + (h_u - h) * (h_u - h)).sqrt().max(1e-6);
+    let bl = (lod_scale * lod_scale + (h_u - h) * (h_u - h))
+        .sqrt()
+        .max(1e-6);
     let b = [0.0_f32, (h_u - h) / bl, lod_scale / bl];
 
     // Surface normal N = B × T (right-hand rule, Y-up: gives (0,1,0) for flat terrain).

@@ -26,7 +26,7 @@ struct TerrainParams {
     num_lod_levels:     f32,   // active LOD count; used to clamp coarse index
     patch_resolution:   f32,   // quads per patch edge
     world_bounds:       vec4<f32>, // (min_x, min_z, max_x, max_z)
-    bounds_fade:        vec4<f32>, // x = fade distance, y = use_macro_color, z = flip_v
+    bounds_fade:        vec4<f32>, // x = fade distance, y = use_macro_color, z = flip_v, w = show_wireframe
     clip_levels: array<vec4<f32>, 16>,
 }
 
@@ -63,6 +63,7 @@ struct TerrainVOut {
     @location(0)       world_pos:    vec4<f32>,
     @location(1)       world_normal: vec3<f32>,
     @location(2)       macro_xz_ws:  vec2<f32>,
+    @location(3)       patch_uv:     vec2<f32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -222,5 +223,6 @@ fn vertex(v: Vertex) -> TerrainVOut {
     out.world_pos    = vec4<f32>(pos, 1.0);
     out.world_normal = nrm;
     out.macro_xz_ws  = world_xz_orig;
+    out.patch_uv     = v.uv;
     return out;
 }
