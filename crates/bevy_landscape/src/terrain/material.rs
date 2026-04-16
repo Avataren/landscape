@@ -5,8 +5,7 @@ use bevy::{
     prelude::*,
     render::{
         render_resource::{
-            AsBindGroup, Face, RenderPipelineDescriptor, ShaderType,
-            SpecializedMeshPipelineError,
+            AsBindGroup, Face, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
         },
         storage::ShaderStorageBuffer,
     },

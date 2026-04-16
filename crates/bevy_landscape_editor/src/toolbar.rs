@@ -18,10 +18,7 @@ pub(crate) fn toolbar_system(
                 }
             });
             ui.menu_button("Tools", |ui| {
-                if ui
-                    .checkbox(&mut material_panel.open, "Materials")
-                    .clicked()
-                {
+                if ui.checkbox(&mut material_panel.open, "Materials").clicked() {
                     ui.close();
                 }
             });

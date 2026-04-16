@@ -6,8 +6,8 @@
 tile_root       = "assets/tiles"
 normal_root     = "assets/tiles/normal"
 diffuse_exr     = "assets/height_maps/16k Rocky Terrain Heightmap/Diffuse 16k Rocky Terrain.exr"
-world_min       = -8192.0   # world-space X/Z minimum (square terrain)
-world_max       =  8192.0   # world-space X/Z maximum
+world_min       = -8192.0   # base X/Z minimum before terrain_config.world_scale
+world_max       =  8192.0   # base X/Z maximum before terrain_config.world_scale
 # Highest LOD index that has baked tiles. For a 4096px map / 256px tile_size,
 # the mip pyramid is: L0=16×16, L1=8×8, L2=4×4, L3=2×2 (coarsest).
 # Clipmap rings above this level resample height from L3 tiles.
@@ -22,21 +22,27 @@ max_mip_level   = 5
 collision_mip_level = 2
 
 [terrain_config]
+# Source of truth for uniform terrain scale.
+# The app copies this into the runtime `TerrainConfig.world_scale` field, and
+# bake_tiles uses it automatically when --world-scale is not provided.
+# Set to 2.0 to make the same landscape twice as large in X, Y, and Z.
+world_scale     = 16.0
+
 # Clipmap LOD ring count. Each extra level doubles the view radius.
 # Outermost radius = 512 * 2^(clipmap_levels-1) world units.
 # 7 → ~32 000 wu. Keep low if the terrain is small to avoid loading tiles
 # that map to flat zero-height resamples far outside the heightmap bounds.
 clipmap_levels  = 12
 
-# World-space height range: a fully-white height texel (R16Unorm = 1.0)
-# maps to this many world units on the Y axis.
+# Base world-space height range: a fully-white height texel (R16Unorm = 1.0)
+# maps to this many world units on the Y axis before `world_scale` is applied.
 #
-# This value is the single source of truth for height_scale:
-#   - The renderer reads it here at runtime to convert stored [0,1] heights
-#     to world-space Y coordinates.
+# This value is the single source of truth for the base height scale:
+#   - The renderer reads it here at runtime, then multiplies it by
+#     `world_scale` so the whole terrain scales uniformly.
 #   - bake_tiles reads it here automatically when --height-scale is not
-#     provided on the command line, so baked normals always use the same
-#     scale as the renderer.
+#     provided on the command line, and applies the same `world_scale`
+#     multiplier when deriving normals.
 #
 # If you change this value, re-bake your tiles so the normals remain correct.
 height_scale    = 2048.0

@@ -116,7 +116,7 @@ Each level's texel spacing is:
 level_scale(L) = world_scale × 2^L
 ```
 
-With the default `world_scale = 1.0` m/texel:
+With the default runtime `world_scale = 1.0`:
 - LOD 0: 1 m per patch vertex, 64 m patch side
 - LOD 1: 2 m, 128 m patch side
 - LOD 2: 4 m, 256 m patch side
@@ -304,8 +304,8 @@ before `TerrainPlugin`; the duplicate is suppressed.
 | `clipmap_levels` | 12 | Number of LOD rings. Each adds 2× view range. |
 | `patch_resolution` | 64 | Vertices per patch edge. Higher = smoother slopes, more GPU cost. |
 | `ring_patches` | 8 | Patches per ring edge. Higher = wider rings, more draw calls. |
-| `world_scale` | 1.0 | World metres per height texel at LOD 0. |
-| `height_scale` | 1024.0 | World metres for a fully-white (R16Unorm = 1.0) height texel. |
+| `world_scale` | 1.0 | Uniform runtime terrain scale. `2.0` makes the same landscape 2× larger in X, Y, and Z. In the app binary this is usually loaded from `landscape.toml`. |
+| `height_scale` | 1024.0 | Base height range before the uniform `world_scale` multiplier is applied. |
 | `morph_start_ratio` | 0.6 | Fraction of ring width where morphing begins. |
 | `max_resident_tiles` | 256 | GPU tile cache size. Increase for lower pop-in. |
 | `use_macro_color_map` | true | Use the world-aligned EXR for distant albedo. |

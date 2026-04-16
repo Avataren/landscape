@@ -143,7 +143,11 @@ pub fn sync_wireframe_modes(
         material.params.bounds_fade.w = desired;
     }
 
-    let desired_normals = if debug_cfg.show_normals_only { 1.0 } else { 0.0 };
+    let desired_normals = if debug_cfg.show_normals_only {
+        1.0
+    } else {
+        0.0
+    };
     if material.params.debug_flags.x != desired_normals {
         material.params.debug_flags.x = desired_normals;
     }

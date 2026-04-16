@@ -21,6 +21,8 @@ struct TerrainSourceToml {
 #[derive(Deserialize)]
 struct TerrainConfigToml {
     clipmap_levels: Option<u32>,
+    /// Source-of-truth X/Z terrain scale; copied into TerrainConfig.world_scale at startup.
+    world_scale: Option<f32>,
     height_scale: Option<f32>,
     macro_color_flip_v: Option<bool>,
 }
@@ -37,6 +39,9 @@ pub struct TerrainSourceCfg {
 
 pub struct TerrainRenderCfg {
     pub clipmap_levels: Option<u32>,
+    /// Value loaded from `landscape.toml`; the app copies this into the runtime
+    /// `TerrainConfig.world_scale` field during startup.
+    pub world_scale: Option<f32>,
     pub height_scale: Option<f32>,
     pub macro_color_flip_v: Option<bool>,
 }
@@ -57,6 +62,7 @@ pub fn load() -> AppConfig {
     let t = cfg.terrain;
     let rc = cfg.terrain_config.unwrap_or(TerrainConfigToml {
         clipmap_levels: None,
+        world_scale: None,
         height_scale: None,
         macro_color_flip_v: None,
     });
@@ -73,6 +79,7 @@ pub fn load() -> AppConfig {
         },
         render: TerrainRenderCfg {
             clipmap_levels: rc.clipmap_levels,
+            world_scale: rc.world_scale,
             height_scale: rc.height_scale,
             macro_color_flip_v: rc.macro_color_flip_v,
         },

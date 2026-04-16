@@ -206,10 +206,9 @@ pub(crate) fn sync_material_library_to_terrain_material(
     // `bounds_fade.y` is the shader's "sample macro color instead of library"
     // flag.  Gate the user toggle on whether the EXR was actually loaded so
     // flipping the panel switch without a configured texture is a no-op.
-    mat.params.bounds_fade.y =
-        if library.use_macro_color_override && library.macro_color_loaded {
-            1.0
-        } else {
-            0.0
-        };
+    mat.params.bounds_fade.y = if library.use_macro_color_override && library.macro_color_loaded {
+        1.0
+    } else {
+        0.0
+    };
 }

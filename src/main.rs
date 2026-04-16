@@ -33,14 +33,25 @@ fn main() {
         if let Some(v) = cfg.render.clipmap_levels {
             tc.clipmap_levels = v;
         }
+        if let Some(v) = cfg.render.world_scale {
+            assert!(v > 0.0, "terrain_config.world_scale must be > 0");
+            tc.world_scale = v;
+        }
         if let Some(v) = cfg.render.height_scale {
             tc.height_scale = v;
         }
         if let Some(v) = cfg.render.macro_color_flip_v {
             tc.macro_color_flip_v = v;
         }
+        // `world_scale` is intended to be a uniform world multiplier, not an
+        // X/Z-only spacing tweak, so fold it into the runtime height scale too.
+        tc.height_scale *= tc.world_scale;
         tc
     };
+
+    let world_scale = terrain_config.world_scale;
+    let world_min = cfg.source.world_min * world_scale;
+    let world_max = cfg.source.world_max * world_scale;
 
     App::new()
         .insert_resource(ClearColor(Color::BLACK))
@@ -77,8 +88,8 @@ fn main() {
                 tile_root: cfg.source.tile_root,
                 normal_root: cfg.source.normal_root,
                 macro_color_root: cfg.source.macro_color_root,
-                world_min: cfg.source.world_min,
-                world_max: cfg.source.world_max,
+                world_min,
+                world_max,
                 max_mip_level: cfg.source.max_mip_level,
                 collision_mip_level: cfg.source.collision_mip_level,
                 ..default()

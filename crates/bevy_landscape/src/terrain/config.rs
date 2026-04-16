@@ -14,12 +14,18 @@ pub struct TerrainConfig {
     pub ring_patches: u32,
     /// Height/material tile texel resolution (square).
     pub tile_size: u32,
-    /// World-space units per texel at LOD 0.
+    /// Uniform terrain scale multiplier at LOD 0, expressed as world-space
+    /// units per height texel in X/Z.
+    ///
+    /// This is the runtime value used by terrain rendering, streaming, and
+    /// collision. In the app binary it is normally loaded from
+    /// `landscape.toml` `[terrain_config] world_scale`; the `1.0` default
+    /// below is only a fallback when no external config overrides it.
     pub world_scale: f32,
-    /// World-space Y range: a fully-white height texel (R16Unorm = 1.0) maps
-    /// to this many world units.  This is set from `landscape.toml`
-    /// `[terrain_config] height_scale` at startup; the value here is only the
-    /// compile-time fallback used when the toml key is absent.
+    /// Effective runtime world-space Y range: a fully-white height texel
+    /// (R16Unorm = 1.0) maps to this many world units after the app folds in
+    /// the uniform `world_scale` multiplier. The compile-time default below is
+    /// only a fallback before external config is applied.
     ///
     /// **Must match the height_scale used during baking.**  bake_tiles reads
     /// the same toml key automatically, so keeping it in one place is enough.

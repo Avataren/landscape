@@ -109,10 +109,7 @@ fn draw_material_library(
                     ui.checkbox(&mut slot.visible, "");
                     // Small tint swatch doubles as a colour picker.
                     ui.color_edit_button_rgb(&mut slot.tint);
-                    if ui
-                        .selectable_label(selected, &slot.name)
-                        .clicked()
-                    {
+                    if ui.selectable_label(selected, &slot.name).clicked() {
                         panel.selected_slot = Some(idx);
                     }
                     if ui.small_button("⧉").on_hover_text("Duplicate").clicked() {
