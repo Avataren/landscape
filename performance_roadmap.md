@@ -56,244 +56,134 @@ GPU texture upload bandwidth (RenderDoc), and per-system CPU time (tracy):
 
 ---
 
-### P0 — Full clipmap texture GPU re-upload every camera-move frame
+### ✅ P0 — Full clipmap texture GPU re-upload every camera-move frame
 
-**Estimated impact: HIGH — ~12 MB/frame GPU upload when moving**
+**Status: FIXED** (`8945d2d`, `16a5793`)
 
-**Root cause**
+**Original impact: HIGH — ~12 MB/frame GPU upload when moving**
 
-Both clipmap images are created with:
-```rust
-// clipmap_texture.rs:177
-RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD
-```
+**What was done**
 
-When any system calls `images.get_mut(&handle)` and writes even one byte, Bevy
-marks the entire `Image` asset as changed and re-uploads the full texture to the
-GPU on the next render frame.
+Implemented a custom `TerrainRenderPlugin` with a `RenderQueue::write_texture`
+path that uploads only the dirty rectangles to the GPU each frame:
 
-Texture sizes:
-- Height: 512 × 512 × 2 B (R16Unorm) × 12 levels = **6.3 MB**
-- Normal: 512 × 512 × 2 B (RG8Snorm) × 12 levels = **6.3 MB**
-- **Total: ~12.5 MB uploaded to GPU every frame the camera moves**
+1. **`8945d2d`** — Removed `MAIN_WORLD | RENDER_WORLD` as the mutation target.
+   Introduced `TerrainClipmapUploads` (an `ExtractResource`) to carry dirty-level
+   descriptors from the main world to the render world.  `TerrainRenderPlugin`
+   now runs `apply_terrain_texture_uploads` in `PrepareResources`, calling
+   `RenderQueue::write_texture` once per dirty level.  Repeated uploads to the
+   same level within a frame are deduplicated before submission.
 
-`update_clipmap_textures` (which calls `get_mut`) fires whenever any clip center
-changes — i.e., on every frame the camera crosses a texel boundary, which in
-practice is most frames during movement.
+2. **`16a5793`** — Refined further: instead of uploading an entire layer per
+   dirty level, the system now slices only the bytes corresponding to the L-shaped
+   strip that actually changed (the same region `write_new_strip` computed on the
+   CPU side).  Toroidal seam splits are handled — strips that wrap around the
+   texture edge are submitted as two separate `write_texture` calls.
 
-**Fix: partial texture writes via a staging buffer**
-
-Stop using `MAIN_WORLD | RENDER_WORLD` images as the mutation target.  Instead:
-
-1. Keep a CPU-side `Vec<u8>` for each level layer (already done — it's
-   `image.data`).
-2. In a custom render extract system, diff the dirty rect against a
-   `last_uploaded_center` and call `wgpu::Queue::write_texture` targeting only
-   the sub-region that changed — the same L-shaped strip computed by
-   `write_new_strip`.
-
-Alternatively, as a lower-effort interim fix, split the texture into per-level
-separate `Image` handles (12 images instead of 1 array) and only call `get_mut`
-on the levels that actually moved their clip center that frame.  This still
-re-uploads the full 512 KB per dirty level, but only the levels that moved
-(usually 1–3 per frame at walking speed) instead of all 12.
-
-**Implementation detail**
-
-The `write_new_strip` function already computes the correct dirty rect (gx range,
-gz range).  Translate that to texel coordinates and call:
-
-```rust
-queue.write_texture(
-    wgpu::TexelCopyTextureInfo {
-        texture: &gpu_texture,
-        mip_level: 0,
-        origin: wgpu::Origin3d { x: tx_lo, y: tz_lo, z: level as u32 },
-        aspect: wgpu::TextureAspect::All,
-    },
-    &strip_bytes,
-    wgpu::TexelCopyBufferLayout {
-        offset: 0,
-        bytes_per_row: Some(strip_width_texels * 2),
-        rows_per_image: None,
-    },
-    wgpu::Extent3d { width: strip_width_texels, height: strip_height_texels, depth_or_array_layers: 1 },
-);
-```
-
-This requires moving to a custom `RenderPlugin` (Phase 2+ of the render
-roadmap), which is already planned (`TerrainRenderPlugin` is a stub).
+**Result**: normal camera motion uploads only the exposed border strips (a thin
+band of texels per level per frame) rather than full 512×512 layers.  Full-layer
+uploads are retained as a fallback for rebuilds and large teleports.
 
 ---
 
-### P1 — `apply_tiles_to_clipmap`: O(tiles × tile_texels) CPU writes per clip-center shift
+### ✅ P1 — `apply_tiles_to_clipmap`: O(tiles × tile_texels) CPU writes per clip-center shift
 
-**Estimated impact: HIGH — up to ~33 MB of CPU memory writes per frame when moving**
+**Status: FIXED** (`352d2d1`, `16a5793`)
 
-**Root cause**
+**Original impact: HIGH — up to ~33 MB of CPU memory writes per frame when moving**
 
-`apply_tiles_to_clipmap` (`clipmap_texture.rs:634`) re-stamps every resident CPU
-tile into the clipmap image buffer whenever clip centers change *or* new tiles
-arrive.  With 256 resident tiles at 256 × 256 texels each:
+**What was done**
 
-```
-256 tiles × 256 × 256 texels × 2 bytes = 33.6 MB of CPU memcpy per frame
-```
+`352d2d1` rewrote `apply_tiles_to_clipmap` with two separate paths:
 
-The full re-stamp is necessary today because `update_clipmap_textures` runs
-first and may regenerate entire layers from the procedural fallback, overwriting
-tile data.  But this coupling creates an O(tiles × tile_texels) cost on every
-frame the camera moves.
+- **New tiles / full rebuild**: write the full intersection of the tile with the
+  current clipmap window (unchanged from before, only triggered when a new tile
+  arrives or an eviction forces a rebuild).
 
-**Fix: tile-level incremental stamping**
+- **Resident tiles during camera movement**: compute the newly exposed strip for
+  each resident tile (the intersection of the tile with the delta between old and
+  new window) and write only those texels.  Tiles that have not moved relative to
+  the current window contribute zero bytes.
 
-Maintain a per-tile "last write clip center" cache alongside `TileColliders`:
+`16a5793` then replaced the direct CPU-buffer memcpy with enqueuing dirty rects
+into `TerrainClipmapUploads`, which the render plugin submits via
+`RenderQueue::write_texture` (see P0 above).
 
-```rust
-// In apply_tiles_to_clipmap, for each tile:
-let tile_min_grid = IVec2::new(key.x * ts as i32, key.y * ts as i32);
-let tile_max_grid = tile_min_grid + IVec2::splat(ts as i32);
-
-// Clip center window: [center - half, center + half)
-let win_min = new_center - IVec2::splat(half);
-let win_max = new_center + IVec2::splat(half);
-
-// Intersection of tile and new window that wasn't in old window:
-let dirty_x = compute_new_strip_range(win_min.x, win_max.x, old_win_min.x, old_win_max.x);
-let dirty_z = compute_new_strip_range(win_min.y, win_max.y, old_win_min.y, old_win_max.y);
-// Only write the L-shaped strip of texels that newly entered the window.
-```
-
-When `procedural_fallback = false` (the production path), `update_clipmap_textures`
-only writes zeros into new strips and tile data is the ground truth.  In this
-case, tile re-stamping can be skipped entirely for tiles that haven't moved in
-or out of the window.
-
-**Additional fix: decouple tile stamping from procedural regeneration**
-
-Instead of procedural regeneration zeroing tiles and then tile stamping
-re-applying them, separate the paths entirely:
-
-- Procedural path: `update_clipmap_textures` generates the full layer.
-- Tile path: `apply_tiles_to_clipmap` incrementally stamps new tiles only.
-- Tiles never need to be re-stamped when the clip center shifts — only the
-  newly exposed strip for each tile needs writing, and only if that strip
-  intersects the tile's bounds.
+**Result**: during steady panning, CPU tile writes drop from O(tiles × tile²) to
+O(newly_visible_strip_area), typically a thin band of texels per tile per axis of
+motion rather than the full 256 × 256 tile.
 
 ---
 
-### P2 — `build_patch_instances_for_view` called twice per frame
+### ✅ P2 — `build_patch_instances_for_view` called twice per frame
 
-**Estimated impact: MEDIUM — double CPU allocation and computation every frame**
+**Status: FIXED** (`b8a695a`)
 
-**Root cause**
+**Original impact: MEDIUM — double CPU allocation and computation every frame**
 
-`build_patch_instances_for_view` is called independently in two systems:
+**What was done**
 
-```rust
-// extract.rs:37
-let patches = build_patch_instances_for_view(&config, &view);
+Removed `extract_terrain_frame` and `ExtractedTerrainFrame` entirely — the
+result was never consumed by anything.  `update_patch_transforms` was already
+computing the patch list independently; that single call remains.
 
-// mod.rs:533 (update_patch_transforms)
-let patches = build_patch_instances_for_view(&config, &view);
-```
-
-Both systems run every `Update` frame.  The function iterates all LOD levels,
-calls `build_ring_patch_origins` per level (which allocates a `Vec<Vec2>`), and
-collects into a final `Vec<PatchInstanceCpu>`.  With the default config
-(12 levels, 8 ring patches): ~592 patches.
-
-**Fix: compute once, share via `TerrainViewState`**
-
-Add a `patches` field to `TerrainViewState` (or a dedicated `PatchLayout`
-resource) and populate it in `update_patch_transforms`, which already does
-the computation.  Remove the call from `extract_terrain_frame` and read from the
-shared resource instead:
-
-```rust
-// In TerrainViewState or a new PatchLayout resource:
-pub patches: Vec<PatchInstanceCpu>,
-
-// update_patch_transforms computes patches once and stores them:
-let patches = build_patch_instances_for_view(&config, &view);
-view.patches = patches.clone();  // or store in PatchLayout
-
-// extract_terrain_frame reads without recomputing:
-extracted.patches = view.patches.clone();
-```
-
-A further optimisation: skip `build_patch_instances_for_view` entirely on frames
-where clip centers haven't changed — the layout is identical.  Use the
-`positions_changed` flag already computed in `update_patch_transforms`:
-
-```rust
-if !positions_changed && !view.patches.is_empty() {
-    // Frustum cull only — reuse existing patch layout.
-}
-```
+Additionally, `update_patch_transforms` now returns early when clip centers
+haven't changed (`!positions_changed`), so `build_patch_instances_for_view` is
+not called at all on static-camera frames.
 
 ---
 
-### P3 — Storage buffer re-upload every frame (unconditional frustum cull path)
+### ✅ P3 — Storage buffer re-upload every frame
 
-**Estimated impact: MEDIUM — ~18 KB GPU upload per frame even when nothing changed**
+**Status: FIXED** (as part of `b8a695a`, frustum-cull removal)
 
-**Root cause**
+**Original impact: MEDIUM — ~18 KB GPU upload per frame even when nothing changed**
 
-`update_patch_transforms` (`mod.rs:550`) unconditionally rebuilds and re-uploads
-the `ShaderStorageBuffer` every frame:
+**What was done**
 
-```rust
-// Always runs, every frame:
-if let Some(ssb) = storage_buffers.get_mut(&patch_entities.patch_buffer_handle) {
-    let descs: Vec<PatchDescriptorGpu> = patches.iter().map(|p| { ... }).collect();
-    ssb.data = Some(bytemuck::cast_slice(&descs).to_vec());
-}
-```
+The storage buffer frustum-cull path (which unconditionally rebuilt and
+re-uploaded the buffer every frame to zero-out culled patches) was removed after
+it was found to incorrectly cull all patches from altitude in Bevy 0.18
+(reversed-Z frustum planes).  `update_patch_transforms` now:
 
-Calling `storage_buffers.get_mut()` marks the buffer as changed and triggers a
-GPU upload every frame (592 patches × 32 bytes = ~18 KB).  Frustum culling is
-the reason this runs every frame — the `patch_size_ws` field is zeroed for
-culled patches, which changes with camera rotation.
+- Returns early if `!positions_changed`.
+- Rebuilds and uploads the storage buffer only when the clip grid shifts.
 
-**Fix: cache the last frustum and skip re-upload when nothing changed**
+Entities carry `NoFrustumCulling`, so Bevy's visibility system never hides them;
+the GPU hardware rasteriser discards out-of-view triangles at near-zero cost.
 
-```rust
-#[derive(Default)]
-struct FrustumCache {
-    last_planes: [Vec4; 6],
-    last_clip_centers: Vec<IVec2>,
-}
+**Remaining note**: a correct GPU-side frustum cull (driven by the shader or by
+compute) is still a future optimisation opportunity, but the correctness bug must
+be understood before reintroducing it.
 
-fn update_patch_transforms(
-    mut frustum_cache: Local<FrustumCache>,
-    ...
-) {
-    let frustum_planes = extract_frustum_planes(&frustum);
-    let frustum_changed = frustum_planes != frustum_cache.last_planes;
-    let centers_changed = view.clip_centers != patch_entities.last_clip_centers;
+---
 
-    if !frustum_changed && !centers_changed { return; }
+### ✅ P5 — `sync_sun_direction` mutates material unconditionally every frame
 
-    // rebuild + upload
-    frustum_cache.last_planes = frustum_planes;
-    ...
-}
-```
+**Status: FIXED** (`b8a695a`)
 
-For the static camera case (S1), this eliminates the storage buffer upload
-entirely.
+**Original impact: LOW — spurious material re-upload each frame**
+
+**What was done**
+
+`sync_sun_direction` was deleted entirely.  The terrain fragment shader now reads
+all light directions directly from `mesh_view_bindings::lights` (Bevy's clustered
+forward lighting bindings), so no per-frame CPU-side sync is needed.  As a side
+effect the `sun_direction` field was removed from `TerrainMaterialUniforms`,
+shrinking the uniform buffer by 16 bytes.
 
 ---
 
 ### P4 — Backface culling disabled on terrain mesh
+
+**Status: OPEN**
 
 **Estimated impact: MEDIUM — up to 2× triangle throughput on steep terrain**
 
 **Root cause**
 
 ```rust
-// material.rs:118
+// material.rs
 descriptor.primitive.cull_mode = None;
 ```
 
@@ -318,41 +208,9 @@ LOD 0–2 where steep geometry is densest.
 
 ---
 
-### P5 — `sync_sun_direction` mutates material unconditionally every frame
-
-**Estimated impact: LOW — spurious material re-upload each frame**
-
-**Root cause**
-
-```rust
-// mod.rs (sync_sun_direction) — runs every Update frame:
-let Some(mat) = materials.get_mut(&state.material_handle) else { return };
-mat.params.sun_direction = ...;
-```
-
-`materials.get_mut()` marks the material as changed regardless of whether the
-sun direction actually changed.  This triggers Bevy to re-upload the 312-byte
-`TerrainMaterialUniforms` uniform buffer every frame, even when the
-`DirectionalLight` is perfectly still.
-
-**Fix: compare before mutating**
-
-```rust
-fn sync_sun_direction(...) {
-    let Ok(transform) = lights.single() else { return };
-    let new_dir = Vec3::from(-transform.forward()).normalize_or_zero().extend(0.0);
-
-    let Some(mat) = materials.get(&state.material_handle) else { return };
-    if mat.params.sun_direction == new_dir { return; }  // skip if unchanged
-
-    let Some(mat) = materials.get_mut(&state.material_handle) else { return };
-    mat.params.sun_direction = new_dir;
-}
-```
-
----
-
 ### P6 — Cascade shadow range and far clip plane
+
+**Status: OPEN**
 
 **Estimated impact: MEDIUM — GPU shadow map and depth buffer precision costs**
 
@@ -390,21 +248,20 @@ depth precision toward the near plane where it matters most.
 
 ---
 
-## Implementation order
+## Status summary
 
-| Priority | Bottleneck | Effort | Risk |
-|---|---|---|---|
-| P2 | Deduplicate `build_patch_instances_for_view` | Low | Low |
-| P5 | Guard `sync_sun_direction` | Trivial | None |
-| P6 | Reduce shadow range and far clip | Trivial | Visual regression check |
-| P3 | Cache frustum for storage buffer skip | Low | Low |
-| P4 | Backface culling | Medium | Visual regression check |
-| P1 | Tile incremental stamping | Medium | Clipmap correctness |
-| P0 | Partial texture upload via staging buffer | High | Requires render plugin |
+| Item | Description | Status |
+|---|---|---|
+| P0 | Partial GPU texture upload via `write_texture` | ✅ Fixed (`8945d2d`, `16a5793`) |
+| P1 | Incremental tile stamping in `apply_tiles_to_clipmap` | ✅ Fixed (`352d2d1`, `16a5793`) |
+| P2 | Deduplicate `build_patch_instances_for_view` | ✅ Fixed (`b8a695a`) |
+| P3 | Storage buffer upload gated on clip-center change | ✅ Fixed (`b8a695a`) |
+| P4 | Backface culling on terrain mesh | Open |
+| P5 | Remove `sync_sun_direction` | ✅ Fixed (`b8a695a`) |
+| P6 | Cascade shadow range and far clip plane | Open |
 
-P2, P5, P6 are safe wins achievable in a single session.  P0 and P1 are the
-largest gains but require either the custom render pipeline (P0) or careful
-correctness work on the tile stamping logic (P1).
+The two remaining open items (P4, P6) are independent and low-risk.  P6 in
+particular is a two-line config change with immediate GPU benefit.
 
 ---
 
@@ -412,10 +269,11 @@ correctness work on the tile stamping logic (P1).
 
 | Fix | S1 (static) | S2 (normal pan) | S3 (fast pan) |
 |---|---|---|---|
-| P2 + P3 | −0.5 ms CPU | −0.5 ms CPU | −0.5 ms CPU |
-| P5 + P6 | −0.1 ms GPU | −0.1 ms GPU | −0.1 ms GPU |
+| P2 + P3 ✅ | −0.5 ms CPU | −0.5 ms CPU | −0.5 ms CPU |
+| P5 ✅ | −0.1 ms GPU | −0.1 ms GPU | −0.1 ms GPU |
+| P6 | −0.1 ms GPU | −0.1 ms GPU | −0.1 ms GPU |
 | P4 | — | −1–3 ms GPU | −1–3 ms GPU |
-| P1 | — | −2–5 ms CPU | −5–15 ms CPU |
-| P0 | — | −2–8 ms GPU BW | −5–20 ms GPU BW |
+| P1 ✅ | — | −2–5 ms CPU | −5–15 ms CPU |
+| P0 ✅ | — | −2–8 ms GPU BW | −5–20 ms GPU BW |
 
 All estimates are speculative until measured.  Profile first, implement second.
