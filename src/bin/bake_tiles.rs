@@ -22,6 +22,11 @@
 //!                         [default: same as height-scale]
 //!   --world-scale <f32>   World-space units per texel at LOD 0  [default: 1.0]
 //!   --tile-size <usize>   Tile resolution in pixels  [default: 256]
+//!   --smooth-sigma <f32>  Gaussian blur sigma (in source texels) applied to
+//!                         the heightmap before mip pyramid + normal
+//!                         derivation.  0 = off (default).  ~1.0 removes
+//!                         single-texel outliers without softening real
+//!                         topography.
 
 use exr::prelude::{read_first_flat_layer_from_file, FlatSamples};
 use image::ImageReader;
@@ -68,6 +73,11 @@ struct Config {
     /// Use for OpenGL-convention maps (G points toward UV top = world -Z).
     /// Default false = DirectX convention (G toward UV bottom = world +Z).
     flip_green: bool,
+    /// Gaussian blur sigma (in source texels) applied to the heightmap *before*
+    /// the mip pyramid is built and *before* baked normals are derived.  0 =
+    /// off.  Removes single-texel outliers that turn into pyramid spikes at
+    /// LOD 0; values around 1.0 work well for natural-looking terrain.
+    smooth_sigma: f32,
 }
 
 impl Default for Config {
@@ -81,6 +91,7 @@ impl Default for Config {
             world_scale: 1.0,
             tile_size: 256,
             flip_green: false,
+            smooth_sigma: 0.0,
         }
     }
 }
@@ -143,6 +154,14 @@ fn parse_args() -> Result<Config, String> {
                 cfg.flip_green = true;
                 i += 1;
             }
+            "--smooth-sigma" => {
+                cfg.smooth_sigma =
+                    next()?.parse::<f32>().map_err(|e| format!("{flag}: {e}"))?;
+                if cfg.smooth_sigma < 0.0 {
+                    return Err(format!("--smooth-sigma must be >= 0, got {}", cfg.smooth_sigma));
+                }
+                i += 2;
+            }
             other => return Err(format!("Unknown argument: {other}")),
         }
     }
@@ -165,6 +184,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Usage: bake_tiles --height <path> [--bump <path>] [--output <dir>]");
         eprintln!("                  [--height-scale <f>] [--bump-scale <f>]");
         eprintln!("                  [--world-scale <f>] [--tile-size <n>]");
+        eprintln!("                  [--smooth-sigma <f>] [--flip-green]");
         std::process::exit(1);
     });
 
@@ -219,7 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Height range: min={:.6}  max={:.6}  range={:.6}",
         h_min, h_max, h_range
     );
-    let height_pixels: Vec<f32> = if h_range > 1e-6 {
+    let mut height_pixels: Vec<f32> = if h_range > 1e-6 {
         height_pixels_raw
             .iter()
             .map(|&h| (h - h_min) / h_range)
@@ -227,6 +247,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         height_pixels_raw
     };
+
+    // Optional Gaussian pre-smoothing at native resolution.
+    //
+    // Applied *before* the mip pyramid and normal derivation so coarse LODs
+    // and baked normals all describe the same smoothed surface the renderer
+    // will display.  Single-texel outliers in the source (very common in
+    // authored "rocky terrain" 16k heightmaps) show up as pyramid spikes at
+    // LOD 0 because the clipmap's vertex spacing is 1:1 with the source;
+    // low-passing here removes them at the cost of sub-texel detail that
+    // the renderer cannot resolve anyway.
+    if cfg.smooth_sigma > 0.0 {
+        let t = Instant::now();
+        print!("Smoothing heightmap (sigma={:.2})... ", cfg.smooth_sigma);
+        let _ = std::io::stdout().flush();
+        height_pixels = gaussian_blur_f32(&height_pixels, img_w, img_h, cfg.smooth_sigma);
+        println!("done in {:.1}s", t.elapsed().as_secs_f32());
+    }
 
     // Load bump map for normal derivation if provided.
     // Auto-detects type: single-channel images → displacement (finite-difference
@@ -733,4 +770,105 @@ fn encode_normal_xz(normal: [f32; 3]) -> [u8; 2] {
         (normal[0].clamp(-1.0, 1.0) * 127.0).round() as i8 as u8,
         (normal[2].clamp(-1.0, 1.0) * 127.0).round() as i8 as u8,
     ]
+}
+
+// ---------------------------------------------------------------------------
+// Separable Gaussian blur (f32 single-channel)
+//
+// Two 1-D passes — horizontal then vertical — with clamp-to-edge borders.
+// Rows are partitioned across worker threads via `std::thread::scope` so a
+// 16k² bake completes in a few seconds instead of tens.  No new crate
+// dependency required.
+// ---------------------------------------------------------------------------
+
+fn gaussian_kernel_1d(sigma: f32) -> Vec<f32> {
+    // 3σ captures >99 % of the Gaussian; rounding up keeps the kernel odd.
+    let radius = (3.0 * sigma).ceil() as i32;
+    let width = (2 * radius + 1) as usize;
+    let two_sigma_sq = 2.0 * sigma * sigma;
+    let mut k = Vec::with_capacity(width);
+    let mut sum = 0.0f32;
+    for i in 0..width {
+        let x = i as i32 - radius;
+        let v = (-(x as f32 * x as f32) / two_sigma_sq).exp();
+        k.push(v);
+        sum += v;
+    }
+    for v in k.iter_mut() {
+        *v /= sum;
+    }
+    k
+}
+
+fn gaussian_blur_f32(src: &[f32], w: usize, h: usize, sigma: f32) -> Vec<f32> {
+    if sigma <= 0.0 {
+        return src.to_vec();
+    }
+    let kernel = gaussian_kernel_1d(sigma);
+    let radius = (kernel.len() / 2) as i32;
+
+    let thread_count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .max(1);
+
+    // --- Horizontal pass: read `src`, write `tmp`. ---
+    let mut tmp = vec![0.0f32; src.len()];
+    {
+        let chunk = (h + thread_count - 1) / thread_count;
+        let tmp_chunks: Vec<&mut [f32]> = tmp.chunks_mut(chunk * w).collect();
+        std::thread::scope(|s| {
+            for (i, out) in tmp_chunks.into_iter().enumerate() {
+                let kernel = &kernel;
+                let src = &src;
+                let y0 = i * chunk;
+                let rows = out.len() / w;
+                s.spawn(move || {
+                    for dy in 0..rows {
+                        let y = y0 + dy;
+                        for x in 0..w {
+                            let mut acc = 0.0f32;
+                            for (ki, &kv) in kernel.iter().enumerate() {
+                                let sx =
+                                    (x as i32 + ki as i32 - radius).clamp(0, w as i32 - 1) as usize;
+                                acc += src[y * w + sx] * kv;
+                            }
+                            out[dy * w + x] = acc;
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    // --- Vertical pass: read `tmp`, write `dst`. ---
+    let mut dst = vec![0.0f32; src.len()];
+    {
+        let chunk = (h + thread_count - 1) / thread_count;
+        let dst_chunks: Vec<&mut [f32]> = dst.chunks_mut(chunk * w).collect();
+        std::thread::scope(|s| {
+            for (i, out) in dst_chunks.into_iter().enumerate() {
+                let kernel = &kernel;
+                let tmp = &tmp;
+                let y0 = i * chunk;
+                let rows = out.len() / w;
+                s.spawn(move || {
+                    for dy in 0..rows {
+                        let y = y0 + dy;
+                        for x in 0..w {
+                            let mut acc = 0.0f32;
+                            for (ki, &kv) in kernel.iter().enumerate() {
+                                let sy =
+                                    (y as i32 + ki as i32 - radius).clamp(0, h as i32 - 1) as usize;
+                                acc += tmp[sy * w + x] * kv;
+                            }
+                            out[dy * w + x] = acc;
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    dst
 }
