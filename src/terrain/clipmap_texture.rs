@@ -2,7 +2,7 @@ use crate::terrain::{
     config::{TerrainConfig, MAX_SUPPORTED_CLIPMAP_LEVELS},
     material::TerrainMaterial,
     math::level_scale,
-    resources::{HeightTileCpu, TerrainResidency, TerrainViewState, TileState},
+    resources::{HeightTileCpu, TerrainResidency, TerrainViewState, TileKey, TileState},
 };
 use bevy::{
     asset::RenderAssetUsages,
@@ -513,6 +513,221 @@ fn write_new_normal_strip(
     }
 }
 
+fn write_height_tile_rect(
+    img_data: &mut [u8],
+    layer_base: usize,
+    res: u32,
+    tile: &HeightTileCpu,
+    rect_min: IVec2,
+    rect_max: IVec2,
+) {
+    let ts = tile.tile_size as i32;
+    let tile_min = IVec2::new(tile.key.x * ts, tile.key.y * ts);
+    let tile_max = tile_min + IVec2::splat(ts);
+    let write_min = rect_min.max(tile_min);
+    let write_max = rect_max.min(tile_max);
+
+    if write_min.x >= write_max.x || write_min.y >= write_max.y {
+        return;
+    }
+
+    let n = res as i32;
+    for gz in write_min.y..write_max.y {
+        let row = (gz - tile_min.y) as usize;
+        for gx in write_min.x..write_max.x {
+            let col = (gx - tile_min.x) as usize;
+            let src = row * tile.tile_size as usize + col;
+            let tx = gx.rem_euclid(n) as usize;
+            let tz = gz.rem_euclid(n) as usize;
+            let dst = layer_base + (tz * res as usize + tx) * HEIGHT_BYTES_PER_TEXEL;
+
+            if dst + HEIGHT_BYTES_PER_TEXEL <= img_data.len() {
+                let v = (tile.data[src] * 65535.0) as u16;
+                img_data[dst..dst + HEIGHT_BYTES_PER_TEXEL].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+    }
+}
+
+fn write_normal_tile_rect(
+    img_data: &mut [u8],
+    layer_base: usize,
+    res: u32,
+    tile: &HeightTileCpu,
+    rect_min: IVec2,
+    rect_max: IVec2,
+) {
+    let ts = tile.tile_size as i32;
+    let tile_min = IVec2::new(tile.key.x * ts, tile.key.y * ts);
+    let tile_max = tile_min + IVec2::splat(ts);
+    let write_min = rect_min.max(tile_min);
+    let write_max = rect_max.min(tile_max);
+
+    if write_min.x >= write_max.x || write_min.y >= write_max.y {
+        return;
+    }
+
+    let n = res as i32;
+    for gz in write_min.y..write_max.y {
+        let row = (gz - tile_min.y) as usize;
+        for gx in write_min.x..write_max.x {
+            let col = (gx - tile_min.x) as usize;
+            let src = row * tile.tile_size as usize + col;
+            let tx = gx.rem_euclid(n) as usize;
+            let tz = gz.rem_euclid(n) as usize;
+            let dst = layer_base + (tz * res as usize + tx) * NORMAL_BYTES_PER_TEXEL;
+
+            if dst + NORMAL_BYTES_PER_TEXEL <= img_data.len() {
+                img_data[dst..dst + NORMAL_BYTES_PER_TEXEL].copy_from_slice(&tile.normal_data[src]);
+            }
+        }
+    }
+}
+
+fn write_height_tile_window(
+    img_data: &mut [u8],
+    layer_base: usize,
+    res: u32,
+    tile: &HeightTileCpu,
+    clip_center: IVec2,
+) {
+    let half = (res / 2) as i32;
+    write_height_tile_rect(
+        img_data,
+        layer_base,
+        res,
+        tile,
+        clip_center - IVec2::splat(half),
+        clip_center + IVec2::splat(half),
+    );
+}
+
+fn write_normal_tile_window(
+    img_data: &mut [u8],
+    layer_base: usize,
+    res: u32,
+    tile: &HeightTileCpu,
+    clip_center: IVec2,
+) {
+    let half = (res / 2) as i32;
+    write_normal_tile_rect(
+        img_data,
+        layer_base,
+        res,
+        tile,
+        clip_center - IVec2::splat(half),
+        clip_center + IVec2::splat(half),
+    );
+}
+
+fn write_height_tile_new_strips(
+    img_data: &mut [u8],
+    layer_base: usize,
+    res: u32,
+    tile: &HeightTileCpu,
+    new_center: IVec2,
+    old_center: IVec2,
+) {
+    let n = res as i32;
+    let half = (res / 2) as i32;
+    let delta = new_center - old_center;
+
+    if delta == IVec2::ZERO {
+        return;
+    }
+
+    if delta.x.abs() >= n || delta.y.abs() >= n || old_center.x == i32::MAX {
+        write_height_tile_window(img_data, layer_base, res, tile, new_center);
+        return;
+    }
+
+    if delta.x != 0 {
+        let (x_lo, x_hi) = if delta.x > 0 {
+            (old_center.x + half, new_center.x + half)
+        } else {
+            (new_center.x - half, old_center.x - half)
+        };
+        write_height_tile_rect(
+            img_data,
+            layer_base,
+            res,
+            tile,
+            IVec2::new(x_lo, new_center.y - half),
+            IVec2::new(x_hi, new_center.y + half),
+        );
+    }
+
+    if delta.y != 0 {
+        let (z_lo, z_hi) = if delta.y > 0 {
+            (old_center.y + half, new_center.y + half)
+        } else {
+            (new_center.y - half, old_center.y - half)
+        };
+        write_height_tile_rect(
+            img_data,
+            layer_base,
+            res,
+            tile,
+            IVec2::new(new_center.x - half, z_lo),
+            IVec2::new(new_center.x + half, z_hi),
+        );
+    }
+}
+
+fn write_normal_tile_new_strips(
+    img_data: &mut [u8],
+    layer_base: usize,
+    res: u32,
+    tile: &HeightTileCpu,
+    new_center: IVec2,
+    old_center: IVec2,
+) {
+    let n = res as i32;
+    let half = (res / 2) as i32;
+    let delta = new_center - old_center;
+
+    if delta == IVec2::ZERO {
+        return;
+    }
+
+    if delta.x.abs() >= n || delta.y.abs() >= n || old_center.x == i32::MAX {
+        write_normal_tile_window(img_data, layer_base, res, tile, new_center);
+        return;
+    }
+
+    if delta.x != 0 {
+        let (x_lo, x_hi) = if delta.x > 0 {
+            (old_center.x + half, new_center.x + half)
+        } else {
+            (new_center.x - half, old_center.x - half)
+        };
+        write_normal_tile_rect(
+            img_data,
+            layer_base,
+            res,
+            tile,
+            IVec2::new(x_lo, new_center.y - half),
+            IVec2::new(x_hi, new_center.y + half),
+        );
+    }
+
+    if delta.y != 0 {
+        let (z_lo, z_hi) = if delta.y > 0 {
+            (old_center.y + half, new_center.y + half)
+        } else {
+            (new_center.y - half, old_center.y - half)
+        };
+        write_normal_tile_rect(
+            img_data,
+            layer_base,
+            res,
+            tile,
+            IVec2::new(new_center.x - half, z_lo),
+            IVec2::new(new_center.x + half, z_hi),
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Update system
 // ---------------------------------------------------------------------------
@@ -690,6 +905,8 @@ pub fn apply_tiles_to_clipmap(
 
     // --- Step 1: absorb newly loaded tiles into the persistent CPU cache --------
     let new_tiles = std::mem::take(&mut residency.pending_upload);
+    let new_tile_keys: std::collections::HashSet<TileKey> =
+        new_tiles.iter().map(|tile| tile.key).collect();
     let has_new = !new_tiles.is_empty();
     for tile in new_tiles {
         residency
@@ -721,9 +938,6 @@ pub fn apply_tiles_to_clipmap(
     let res = config.clipmap_resolution();
     let height_bpl = bytes_per_layer(res, HEIGHT_BYTES_PER_TEXEL);
     let normal_bpl = bytes_per_layer(res, NORMAL_BYTES_PER_TEXEL);
-    let half = (res / 2) as i32;
-    let ts = config.tile_size;
-
     // If eviction removed cached tiles, stale texels can remain in the clipmap.
     // Rebuild each layer from fallback once, then re-apply resident tiles.
     if needs_rebuild {
@@ -782,10 +996,17 @@ pub fn apply_tiles_to_clipmap(
         residency.clipmap_needs_rebuild = false;
     }
 
-    // Collect resident tiles into a Vec to avoid holding the HashMap borrow
-    // while mutating img_data (both live in TerrainResidency but img_data is
-    // from Assets<Image> — the compiler is happy; we just need a stable iter).
-    let tile_snapshot: Vec<&HeightTileCpu> = residency.resident_cpu.values().collect();
+    // Avoid rewriting every resident tile when only a clip-center strip moved.
+    // Existing texels stay valid in the toroidal layout; only newly exposed
+    // texels need resident tile data stamped back in.
+    let tile_snapshot: Vec<&HeightTileCpu> = if needs_rebuild || centers_changed {
+        residency.resident_cpu.values().collect()
+    } else {
+        new_tile_keys
+            .iter()
+            .filter_map(|key| residency.resident_cpu.get(key))
+            .collect()
+    };
 
     {
         let Some(image) = images.get_mut(&state.height_texture_handle) else {
@@ -806,30 +1027,20 @@ pub fn apply_tiles_to_clipmap(
                 Some(&c) => c,
                 None => continue,
             };
-
             let layer_base = level * height_bpl;
 
-            for row in 0..ts {
-                for col in 0..ts {
-                    let gx = key.x * ts as i32 + col as i32;
-                    let gz = key.y * ts as i32 + row as i32;
-                    let dx = gx - clip_center.x;
-                    let dz = gz - clip_center.y;
-                    if dx < -half || dx >= half || dz < -half || dz >= half {
-                        continue;
-                    }
-
-                    let tx = gx.rem_euclid(res as i32) as usize;
-                    let tz = gz.rem_euclid(res as i32) as usize;
-                    let dst = layer_base + (tz * res as usize + tx) * HEIGHT_BYTES_PER_TEXEL;
-                    let h = tile.data[(row * ts + col) as usize];
-                    let v = (h * 65535.0) as u16;
-
-                    if dst + HEIGHT_BYTES_PER_TEXEL <= img_data.len() {
-                        img_data[dst..dst + HEIGHT_BYTES_PER_TEXEL]
-                            .copy_from_slice(&v.to_le_bytes());
-                    }
-                }
+            if needs_rebuild || new_tile_keys.contains(&key) {
+                write_height_tile_window(img_data, layer_base, res, tile, clip_center);
+            } else {
+                let old_center = state.tile_apply_centers[level];
+                write_height_tile_new_strips(
+                    img_data,
+                    layer_base,
+                    res,
+                    tile,
+                    clip_center,
+                    old_center,
+                );
             }
         }
     }
@@ -853,28 +1064,20 @@ pub fn apply_tiles_to_clipmap(
                 Some(&c) => c,
                 None => continue,
             };
-
             let layer_base = level * normal_bpl;
 
-            for row in 0..ts {
-                for col in 0..ts {
-                    let gx = key.x * ts as i32 + col as i32;
-                    let gz = key.y * ts as i32 + row as i32;
-                    let dx = gx - clip_center.x;
-                    let dz = gz - clip_center.y;
-                    if dx < -half || dx >= half || dz < -half || dz >= half {
-                        continue;
-                    }
-
-                    let tx = gx.rem_euclid(res as i32) as usize;
-                    let tz = gz.rem_euclid(res as i32) as usize;
-                    let dst = layer_base + (tz * res as usize + tx) * NORMAL_BYTES_PER_TEXEL;
-                    let enc = tile.normal_data[(row * ts + col) as usize];
-
-                    if dst + NORMAL_BYTES_PER_TEXEL <= img_data.len() {
-                        img_data[dst..dst + NORMAL_BYTES_PER_TEXEL].copy_from_slice(&enc);
-                    }
-                }
+            if needs_rebuild || new_tile_keys.contains(&key) {
+                write_normal_tile_window(img_data, layer_base, res, tile, clip_center);
+            } else {
+                let old_center = state.tile_apply_centers[level];
+                write_normal_tile_new_strips(
+                    img_data,
+                    layer_base,
+                    res,
+                    tile,
+                    clip_center,
+                    old_center,
+                );
             }
         }
     }
