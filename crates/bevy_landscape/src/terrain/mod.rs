@@ -489,7 +489,15 @@ fn setup_terrain(
                 if config.macro_color_flip_v { 1.0 } else { 0.0 },
                 0.0,
             ),
-            debug_flags: Vec4::ZERO,
+            // debug_flags.y = 1.0 → fragment shader samples baked normals.
+            // Enabled whenever a normal tile root is configured; falls back to
+            // finite-difference normals on the height clipmap otherwise.
+            debug_flags: Vec4::new(
+                0.0,
+                if desc.normal_root.is_some() { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
+            ),
             clip_levels: compute_initial_clip_levels(&config),
             // Slot data is filled in on the first Update tick by
             // sync_material_library_to_terrain_material.  Until then, the

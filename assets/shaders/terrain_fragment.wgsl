@@ -51,6 +51,8 @@ struct TerrainParams {
 @group(#{MATERIAL_BIND_GROUP}) @binding(3) var macro_color_tex:  texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(4) var macro_color_samp: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var<uniform> terrain: TerrainParams;
+@group(#{MATERIAL_BIND_GROUP}) @binding(5) var normal_tex:  texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(6) var normal_samp: sampler;
 
 // Must match TerrainVOut in terrain_vertex.wgsl.
 struct TerrainVOut {
@@ -194,6 +196,37 @@ fn pixel_normal(lod: u32, xz: vec2<f32>) -> vec3<f32> {
     return normalize(vec3<f32>(h - h_r, eps, h - h_u));
 }
 
+// Sample the baked RG8Snorm normal array for this LOD.
+//
+// The baked normals were computed at bake time from the f32 heightmap via a
+// Sobel kernel — *before* the R16Unorm quantization that produces the
+// contour-shading artefacts we see in the FD path.  Using them here is the
+// single biggest shading-quality win available with no extra cost; this
+// replaces three `height_at_frag` samples with one `textureSample`.
+//
+// UV math mirrors `height_at_frag` exactly (same half-texel offset) so
+// normals line up with geometry on every LOD.
+fn baked_normal_at(lod: u32, xz: vec2<f32>) -> vec3<f32> {
+    let lvl       = terrain.clip_levels[lod];
+    let world_min = terrain.world_bounds.xy;
+    let world_max = terrain.world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
+    let sample_xz = clamp(xz, world_min, world_max);
+    let uv        = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
+    // RG = tangent-space XZ components, stored as signed [-1, 1].
+    let rg = textureSample(normal_tex, normal_samp, uv, i32(lod)).rg;
+    // Reconstruct Y from the half-sphere constraint; positive because the
+    // surface normal always points upward for heightfield terrain.
+    let y2 = max(1.0 - rg.x * rg.x - rg.y * rg.y, 0.0);
+    return normalize(vec3<f32>(rg.x, sqrt(y2), rg.y));
+}
+
+fn shading_normal(lod: u32, xz: vec2<f32>) -> vec3<f32> {
+    if terrain.debug_flags.y > 0.5 {
+        return baked_normal_at(lod, xz);
+    }
+    return pixel_normal(lod, xz);
+}
+
 // ---------------------------------------------------------------------------
 // Attenuation — same formula as pbr_lighting::getDistanceAttenuation
 // ---------------------------------------------------------------------------
@@ -244,8 +277,8 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     let vertex_n   = normalize(in.world_normal);
     let coarse_lod = min(in.lod_level + 1u, u32(terrain.num_lod_levels) - 1u);
     let frag_xz    = in.world_pos.xz;
-    let n_fine     = pixel_normal(in.lod_level, frag_xz);
-    let n_coarse   = pixel_normal(coarse_lod,   frag_xz);
+    let n_fine     = shading_normal(in.lod_level, frag_xz);
+    let n_coarse   = shading_normal(coarse_lod,   frag_xz);
     let n          = normalize(mix(n_fine, n_coarse, in.morph_alpha));
 
     // --- Debug: render normals as colour and skip lighting/material ---

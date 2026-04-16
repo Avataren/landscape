@@ -78,7 +78,9 @@ pub struct TerrainMaterialUniforms {
     pub bounds_fade: Vec4,
     /// Per-pixel debug toggles applied in the fragment shader.
     /// x = show_normals_only (0 = normal shading, 1 = output `n*0.5+0.5` as colour).
-    /// y, z, w = reserved.
+    /// y = use_baked_normals (1 = sample baked RG8Snorm normal array for shading,
+    ///     0 = recompute via finite-differences on the height clipmap).
+    /// z, w = reserved.
     pub debug_flags: Vec4,
     /// Per-LOD clipmap data: (origin_x, origin_z, inv_ring_span, texel_world_size).
     /// Indexed by LOD level (0 = finest).  Unused entries are zero.
@@ -116,8 +118,14 @@ pub struct TerrainMaterial {
     pub macro_color_texture: Handle<Image>,
 
     /// RG8Snorm texture array containing baked XZ normals per LOD level.
-    #[texture(5, visibility(vertex), dimension = "2d_array")]
-    #[sampler(6, visibility(vertex))]
+    ///
+    /// Visible to both stages: the vertex stage used to derive geometry
+    /// normals from finite differences (kept as a fallback), and the fragment
+    /// stage samples this directly when `debug_flags.y = 1.0` so shading is
+    /// driven by the high-precision f32 normals produced at bake time instead
+    /// of the R16Unorm-quantized height clipmap.
+    #[texture(5, visibility(vertex, fragment), dimension = "2d_array")]
+    #[sampler(6, visibility(vertex, fragment))]
     pub normal_texture: Handle<Image>,
 
     /// One `PatchDescriptorGpu` per patch instance, indexed by `instance_index`
