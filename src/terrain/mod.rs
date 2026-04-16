@@ -8,6 +8,7 @@ pub mod material;
 pub mod macro_color;
 pub mod math;
 pub mod patch_mesh;
+pub mod physics_colliders;
 pub mod render;
 pub mod residency;
 pub mod resources;
@@ -33,6 +34,7 @@ use clipmap_texture::{
     update_clipmap_textures, TerrainClipmapState,
 };
 use collision::{update_collision_tiles, TerrainCollisionCache};
+use physics_colliders::{spawn_coarse_global_heightfield, sync_tile_colliders, TileColliders};
 use components::TerrainCamera;
 use config::TerrainConfig;
 use material::{TerrainMaterial, TerrainMaterialUniforms};
@@ -79,10 +81,12 @@ impl Plugin for TerrainPlugin {
             .init_resource::<TerrainResidency>()
             .init_resource::<TerrainStreamQueue>()
             .init_resource::<TerrainCollisionCache>()
+            .init_resource::<TileColliders>()
             .init_resource::<PatchEntities>()
             // Startup
             .add_systems(Startup, (setup_tile_channel, setup_terrain).chain())
             .add_systems(PostStartup, preload_terrain_startup)
+            .add_systems(PostStartup, spawn_coarse_global_heightfield.after(preload_terrain_startup))
             // Update: ordered as per handoff spec
             .add_systems(Update, update_terrain_view_state)
             .add_systems(
@@ -104,6 +108,10 @@ impl Plugin for TerrainPlugin {
                     .after(poll_tile_stream_jobs)
                     .after(update_clipmap_textures)
                     .after(update_terrain_view_state),
+            )
+            .add_systems(
+                Update,
+                sync_tile_colliders.after(apply_tiles_to_clipmap),
             )
             .add_systems(Update, sync_sun_direction)
             // Render sub-plugin

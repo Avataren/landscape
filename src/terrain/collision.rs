@@ -1,26 +1,35 @@
-#![allow(dead_code)]
 use bevy::prelude::*;
 use std::collections::HashMap;
 use crate::terrain::resources::{HeightTileCpu, TileKey};
 
 // ---------------------------------------------------------------------------
-// Collision hit result
-// ---------------------------------------------------------------------------
-
-pub struct TerrainHit {
-    pub point: Vec3,
-    pub normal: Vec3,
-    pub distance: f32,
-}
-
-// ---------------------------------------------------------------------------
 // CPU collision cache
 // ---------------------------------------------------------------------------
 
-/// A low-resolution CPU-side terrain height cache for gameplay queries.
+/// CPU-side terrain height cache.
 ///
-/// Populated from the same decoded tile data as the GPU path, but maintained
-/// independently so it never requires GPU readback.
+/// Responsibilities after Phase 3:
+/// - `sample_height`: point height queries on the CPU (spawn placement, coarse
+///   heightfield construction).  Answers at full tile resolution with no
+///   physics overhead.
+///
+/// Runtime physics queries (raycasts, shape overlaps, ground detection) should
+/// use Avian3d's `SpatialQuery` system parameter instead, which operates
+/// against the live tile heightfield colliders:
+///
+/// ```rust
+/// fn my_system(spatial: SpatialQuery) {
+///     if let Some(hit) = spatial.cast_ray(
+///         Vec3::new(x, 10_000.0, z),
+///         Dir3::NEG_Y,
+///         f32::MAX,
+///         true,
+///         &SpatialQueryFilter::default(),
+///     ) {
+///         // hit.time_of_impact is distance; origin + dir * toi = hit point
+///     }
+/// }
+/// ```
 #[derive(Resource, Default)]
 pub struct TerrainCollisionCache {
     /// Tile data keyed by `TileKey`.  One entry per loaded tile.
@@ -53,43 +62,6 @@ impl TerrainCollisionCache {
         let (key, local) = self.world_to_tile(world_xz)?;
         let tile = self.tiles.get(&key)?;
         Some(bilinear_sample(&tile.data, tile.tile_size, local) * self.height_scale)
-    }
-
-    /// Approximate terrain normal at a world-space XZ position via finite differences.
-    pub fn sample_normal(&self, world_xz: Vec2) -> Option<Vec3> {
-        let eps = self.world_scale;
-        let h0 = self.sample_height(world_xz)?;
-        let hx = self
-            .sample_height(world_xz + Vec2::new(eps, 0.0))
-            .unwrap_or(h0);
-        let hy = self
-            .sample_height(world_xz + Vec2::new(0.0, eps))
-            .unwrap_or(h0);
-        let n = Vec3::new(h0 - hx, eps, h0 - hy).normalize();
-        Some(n)
-    }
-
-    /// Step a ray through the terrain and return the first intersection.
-    pub fn raycast_terrain(&self, ray: Ray3d, max_dist: f32) -> Option<TerrainHit> {
-        let step = self.world_scale.max(0.5);
-        let mut t = 0.0_f32;
-
-        while t < max_dist {
-            let p = ray.origin + *ray.direction * t;
-            let xz = Vec2::new(p.x, p.z);
-            if let Some(h) = self.sample_height(xz) {
-                if p.y <= h {
-                    let normal = self.sample_normal(xz).unwrap_or(Vec3::Y);
-                    return Some(TerrainHit {
-                        point: Vec3::new(p.x, h, p.z),
-                        normal,
-                        distance: t,
-                    });
-                }
-            }
-            t += step;
-        }
-        None
     }
 
     // -----------------------------------------------------------------------

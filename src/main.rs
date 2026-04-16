@@ -40,6 +40,7 @@ fn main() {
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: WINDOW_TITLE.into(),
+                present_mode: bevy::window::PresentMode::Immediate,
                 resolution: (640u32, 480u32).into(),
                 ..default()
             }),

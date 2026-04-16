@@ -45,12 +45,6 @@ const EYE_OFFSET: f32 = 0.7;
 const WALK_SPEED: f32 = 8.0;
 const JUMP_SPEED: f32 = 6.0;
 const MOUSE_SENSITIVITY: f32 = 0.002;
-/// Heightfield grid side point count (cells = RESOLUTION − 1 = 128).
-const HF_RESOLUTION: u32 = 129;
-/// World-space size of the square heightfield (metres per side).
-const HF_SIZE: f32 = 256.0;
-/// Rebuild the heightfield when the player moves further than this.
-const HF_UPDATE_DIST: f32 = 64.0;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -79,13 +73,6 @@ struct PlayerLook {
     pitch: f32,
 }
 
-/// Tracks the current Static heightfield entity and its XZ centre.
-#[derive(Resource, Default)]
-struct HeightfieldState {
-    entity: Option<Entity>,
-    center: Option<Vec2>,
-}
-
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
@@ -98,18 +85,11 @@ impl Plugin for PlayerPlugin {
             .add_plugins(PhysicsPlugins::default())
             .insert_resource(CameraMode::default())
             .insert_resource(PlayerLook::default())
-            .insert_resource(HeightfieldState::default())
             .add_systems(Update, (
                 spawn_player_once,
                 toggle_mode,
                 player_look,
                 player_move.after(player_look),
-                // Must run after toggle_mode: when switching to Walking, toggle_mode
-                // sets Position (avian's source of truth) immediately but Transform
-                // is only synced in FixedPostUpdate writeback.  Reading Position here
-                // lets us detect the teleport and rebuild the heightfield in the same
-                // Update tick, before physics runs in FixedPostUpdate.
-                update_heightfield.after(toggle_mode),
             ))
             // PostUpdate runs after FixedPostUpdate (where Avian writeback lives),
             // so sync_camera_to_body always sees the settled physics Transform.
@@ -121,14 +101,15 @@ impl Plugin for PlayerPlugin {
 // Systems
 // ---------------------------------------------------------------------------
 
-/// Spawns the physics body and initial heightfield on the first Update frame
-/// where the terrain collision cache has been populated.
+/// Spawns the physics body on the first Update frame where the terrain
+/// collision cache has been populated.  Tile colliders (from `sync_tile_colliders`)
+/// and the coarse global heightfield (from `spawn_coarse_global_heightfield`) are
+/// managed by the terrain plugin; the player body simply falls onto whatever is present.
 fn spawn_player_once(
     mut done: Local<bool>,
     cache: Res<TerrainCollisionCache>,
     config: Res<TerrainConfig>,
     mut commands: Commands,
-    mut hf_state: ResMut<HeightfieldState>,
     mut cursor_q: Query<&mut CursorOptions, With<PrimaryWindow>>,
 ) {
     if *done { return; }
@@ -156,10 +137,6 @@ fn spawn_player_once(
         LinearVelocity::default(),
         Transform::from_xyz(spawn_xz.x, spawn_y, spawn_xz.y),
     ));
-
-    let hf = spawn_heightfield(&mut commands, &cache, spawn_xz);
-    hf_state.entity = Some(hf);
-    hf_state.center = Some(spawn_xz);
 }
 
 /// Handles F1 toggle between Walking and Freecam.
@@ -276,58 +253,3 @@ fn sync_camera_to_body(
     cam_t.rotation    = Quat::from_rotation_y(look.yaw) * Quat::from_rotation_x(look.pitch);
 }
 
-/// Rebuilds the heightfield when the player moves more than HF_UPDATE_DIST
-/// from the last centre (runs regardless of mode so it stays ready).
-///
-/// Reads avian3d `Position` rather than `Transform` so that a teleport
-/// performed in `toggle_mode` (same Update tick, same frame) is visible here
-/// before physics runs in FixedPostUpdate.
-fn update_heightfield(
-    body_q: Query<&Position, With<PlayerBody>>,
-    cache: Res<TerrainCollisionCache>,
-    mut commands: Commands,
-    mut hf_state: ResMut<HeightfieldState>,
-) {
-    let Ok(body_pos) = body_q.single() else { return };
-    let player_xz = Vec2::new(body_pos.x, body_pos.z);
-
-    let Some(last) = hf_state.center else { return };
-    if last.distance(player_xz) <= HF_UPDATE_DIST { return; }
-
-    if let Some(old) = hf_state.entity.take() {
-        commands.entity(old).despawn();
-    }
-    let new_entity = spawn_heightfield(&mut commands, &cache, player_xz);
-    hf_state.entity = Some(new_entity);
-    hf_state.center = Some(player_xz);
-}
-
-// ---------------------------------------------------------------------------
-// Heightfield helper
-// ---------------------------------------------------------------------------
-
-fn spawn_heightfield(commands: &mut Commands, cache: &TerrainCollisionCache, center: Vec2) -> Entity {
-    let step = HF_SIZE / (HF_RESOLUTION - 1) as f32;
-    let half = HF_SIZE * 0.5;
-
-    // heights[row][col]: row = X axis, col = Z axis (avian3d convention).
-    let heights: Vec<Vec<f32>> = (0..HF_RESOLUTION)
-        .map(|xi| {
-            let x = center.x - half + xi as f32 * step;
-            (0..HF_RESOLUTION)
-                .map(|zi| {
-                    let z = center.y - half + zi as f32 * step;
-                    cache.sample_height(Vec2::new(x, z)).unwrap_or(0.0)
-                })
-                .collect()
-        })
-        .collect();
-
-    commands
-        .spawn((
-            RigidBody::Static,
-            Collider::heightfield(heights, Vec3::new(HF_SIZE, 1.0, HF_SIZE)),
-            Transform::from_xyz(center.x, 0.0, center.y),
-        ))
-        .id()
-}
