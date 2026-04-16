@@ -52,6 +52,7 @@ struct TerrainVOut {
     @location(2)       macro_xz_ws:  vec2<f32>,
     @location(3)       patch_uv:     vec2<f32>,
     @location(4) @interpolate(flat) lod_level: u32,
+    @location(5)       morph_alpha:  f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -175,11 +176,20 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     // (stable, no high-frequency noise).  `n` is recomputed per-pixel from
     // the height clipmap — same formula as the vertex shader's normal_at(),
     // but evaluated at the exact fragment world position rather than at the
-    // nearest vertex, eliminating vertex-interpolation artefacts on curved
-    // slopes.  Requires the height texture (always populated) rather than the
-    // baked RG8Snorm normal array (which may be zeros).
-    let vertex_n = normalize(in.world_normal);
-    let n        = pixel_normal(in.lod_level, in.macro_xz_ws);
+    // nearest vertex, eliminating vertex-interpolation artefacts on curved slopes.
+    //
+    // Normal blending mirrors the vertex shader: at morph_alpha=0 the fine LOD
+    // normal is used exclusively; at alpha=1 (the seam boundary) only the coarse
+    // LOD normal is used.  This eliminates the lighting band that appears when
+    // adjacent LOD patches compute normals from different clipmap resolutions.
+    // Using world_pos.xz (the morphed position) ensures both sides of the seam
+    // sample the same clipmap point when alpha=1.
+    let vertex_n   = normalize(in.world_normal);
+    let coarse_lod = min(in.lod_level + 1u, u32(terrain.num_lod_levels) - 1u);
+    let frag_xz    = in.world_pos.xz;
+    let n_fine     = pixel_normal(in.lod_level, frag_xz);
+    let n_coarse   = pixel_normal(coarse_lod,   frag_xz);
+    let n          = normalize(mix(n_fine, n_coarse, in.morph_alpha));
 
     // --- Albedo ---
     let slope  = 1.0 - abs(dot(n, vec3<f32>(0.0, 1.0, 0.0)));

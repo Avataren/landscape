@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/bevy_landscape"]
+resolver = "2"
+
 [package]
 name = "landscape"
 version = "0.1.0"
@@ -5,6 +9,7 @@ edition = "2021"
 default-run = "landscape"
 
 [dependencies]
+bevy_landscape = { path = "crates/bevy_landscape" }
 bevy = { version = "0.18" }
 avian3d = "0.6"
 bytemuck = { version = "1", features = ["derive"] }

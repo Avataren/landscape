@@ -19,8 +19,11 @@ pub use debug::TerrainDebugPlugin;
 pub use world_desc::TerrainSourceDesc;
 
 use bevy::{
-    asset::RenderAssetUsages, camera::visibility::NoFrustumCulling, pbr::wireframe::NoWireframe,
-    prelude::*, render::storage::ShaderStorageBuffer,
+    asset::RenderAssetUsages,
+    camera::visibility::NoFrustumCulling,
+    pbr::wireframe::{NoWireframe, WireframePlugin},
+    prelude::*,
+    render::storage::ShaderStorageBuffer,
 };
 use clipmap::{build_patch_instances_for_view_in_bounds, PatchInstanceCpu};
 use clipmap_texture::{
@@ -67,16 +70,31 @@ pub struct PatchEntities {
 // Main terrain plugin
 // ---------------------------------------------------------------------------
 
-pub struct TerrainPlugin;
+pub struct TerrainPlugin {
+    pub config: TerrainConfig,
+    pub source: TerrainSourceDesc,
+}
+
+impl Default for TerrainPlugin {
+    fn default() -> Self {
+        Self {
+            config: TerrainConfig::default(),
+            source: TerrainSourceDesc::default(),
+        }
+    }
+}
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<WireframePlugin>() {
+            app.add_plugins(WireframePlugin::default());
+        }
         app
             // Custom terrain material
             .add_plugins(MaterialPlugin::<TerrainMaterial>::default())
             // Resources
-            .init_resource::<TerrainConfig>()
-            .init_resource::<TerrainSourceDesc>()
+            .insert_resource(self.config.clone())
+            .insert_resource(self.source.clone())
             .init_resource::<TerrainViewState>()
             .init_resource::<TerrainResidency>()
             .init_resource::<TerrainStreamQueue>()

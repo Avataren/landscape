@@ -17,7 +17,7 @@ use std::collections::HashMap;
 /// use Avian3d's `SpatialQuery` system parameter instead, which operates
 /// against the live tile heightfield colliders:
 ///
-/// ```rust
+/// ```rust,ignore
 /// fn my_system(spatial: SpatialQuery) {
 ///     if let Some(hit) = spatial.cast_ray(
 ///         Vec3::new(x, 10_000.0, z),

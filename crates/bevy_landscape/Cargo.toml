@@ -1,0 +1,14 @@
+[package]
+name = "bevy_landscape"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = { version = "0.18" }
+avian3d = "0.6"
+bytemuck = { version = "1", features = ["derive"] }
+exr = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(unix)'.dependencies]
+bevy = { version = "0.18", features = ["dynamic_linking"] }

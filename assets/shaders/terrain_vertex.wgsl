@@ -67,6 +67,10 @@ struct TerrainVOut {
     // Flat-interpolated patch LOD level; fragment shader uses it to select the
     // correct clipmap array layer when sampling per-pixel normals.
     @location(4) @interpolate(flat) lod_level: u32,
+    // Smooth morph alpha [0,1]: 0 = fine level only, 1 = fully morphed to coarse.
+    // Passed to the fragment stage so per-pixel normals can be blended across
+    // the morph zone, eliminating the lighting discontinuity at LOD seams.
+    @location(5)       morph_alpha:  f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -228,5 +232,6 @@ fn vertex(v: Vertex) -> TerrainVOut {
     out.macro_xz_ws  = world_xz_orig;
     out.patch_uv     = v.uv;
     out.lod_level    = lod_level;
+    out.morph_alpha  = morph_alpha;
     return out;
 }

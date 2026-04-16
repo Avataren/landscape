@@ -21,9 +21,7 @@
 // Switching Freecam → Walking: cursor locked; body teleported to camera XZ;
 //   yaw/pitch synced from camera rotation so the view is continuous.
 
-use crate::terrain::{
-    collision::TerrainCollisionCache, components::TerrainCamera, config::TerrainConfig,
-};
+use bevy_landscape::{TerrainCamera, TerrainCollisionCache, TerrainConfig};
 use avian3d::prelude::*;
 use bevy::{
     input::mouse::AccumulatedMouseMotion,

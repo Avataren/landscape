@@ -1,6 +1,5 @@
 mod app_config;
 mod player;
-mod terrain;
 
 use bevy::{
     camera::Exposure,
@@ -8,10 +7,7 @@ use bevy::{
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     input::mouse::AccumulatedMouseMotion,
     light::{light_consts::lux, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder},
-    pbr::{
-        wireframe::{WireframeConfig, WireframePlugin},
-        Atmosphere, AtmosphereSettings, ScatteringMedium,
-    },
+    pbr::{Atmosphere, AtmosphereSettings, ScatteringMedium},
     post_process::bloom::Bloom,
     prelude::*,
     render::{
@@ -21,11 +17,8 @@ use bevy::{
     },
     window::PrimaryWindow,
 };
+use bevy_landscape::{TerrainCamera, TerrainConfig, TerrainDebugPlugin, TerrainPlugin, TerrainSourceDesc};
 use player::{CameraMode, PlayerPlugin};
-use terrain::{
-    components::TerrainCamera, config::TerrainConfig, TerrainDebugPlugin, TerrainPlugin,
-    TerrainSourceDesc,
-};
 
 const WINDOW_TITLE: &str = "Landscape Renderer";
 
@@ -75,24 +68,20 @@ fn main() {
                     ..default()
                 }),
         )
-        .add_plugins(WireframePlugin::default())
-        .add_plugins(TerrainPlugin)
+        .add_plugins(TerrainPlugin {
+            config: terrain_config,
+            source: TerrainSourceDesc {
+                tile_root: cfg.source.tile_root,
+                normal_root: cfg.source.normal_root,
+                macro_color_root: cfg.source.macro_color_root,
+                world_min: cfg.source.world_min,
+                world_max: cfg.source.world_max,
+                max_mip_level: cfg.source.max_mip_level,
+                ..default()
+            },
+        })
         .add_plugins(TerrainDebugPlugin)
         .add_plugins(PlayerPlugin)
-        .insert_resource(WireframeConfig {
-            global: false,
-            default_color: Color::WHITE.into(),
-        })
-        .insert_resource(terrain_config)
-        .insert_resource(TerrainSourceDesc {
-            tile_root: cfg.source.tile_root,
-            normal_root: cfg.source.normal_root,
-            macro_color_root: cfg.source.macro_color_root,
-            world_min: cfg.source.world_min,
-            world_max: cfg.source.world_max,
-            max_mip_level: cfg.source.max_mip_level,
-            ..default()
-        })
         .add_systems(Startup, setup_scene)
         .add_systems(Update, (camera_move, camera_look).chain())
         .add_systems(Update, update_window_title)
