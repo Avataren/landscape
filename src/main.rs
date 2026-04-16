@@ -107,7 +107,10 @@ fn setup_scene(mut commands: Commands, mut scattering_mediums: ResMut<Assets<Sca
         Camera3d::default(),
         Projection::Perspective(PerspectiveProjection {
             near: 0.1,
-            far: 10_000_000.0,
+            // Terrain world is ~4 096 m across; 100 km gives comfortable margin
+            // without the 100 000 000:1 depth range that caused Z-fighting at
+            // any non-trivial distance.
+            far: 100_000.0,
             ..default()
         }),
         Atmosphere::earthlike(scattering_mediums.add(ScatteringMedium::default())),
@@ -139,7 +142,9 @@ fn setup_scene(mut commands: Commands, mut scattering_mediums: ResMut<Assets<Sca
             num_cascades: 4,
             minimum_distance: 1.0,
             first_cascade_far_bound: 500.0,
-            maximum_distance: 20_000.0,
+            // 8 km covers meaningful terrain shadow distance without the sparse
+            // texel coverage that made the 20 km last cascade useless.
+            maximum_distance: 8_000.0,
             overlap_proportion: 0.2,
         }
         .build(),

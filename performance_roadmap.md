@@ -174,77 +174,37 @@ shrinking the uniform buffer by 16 bytes.
 
 ---
 
-### P4 — Backface culling disabled on terrain mesh
+### ✅ P4 — Backface culling disabled on terrain mesh
 
-**Status: OPEN**
+**Status: FIXED**
 
-**Estimated impact: MEDIUM — up to 2× triangle throughput on steep terrain**
+**Original impact: MEDIUM — up to 2× triangle throughput on steep terrain**
 
-**Root cause**
+**What was done**
 
-```rust
-// material.rs
-descriptor.primitive.cull_mode = None;
-```
-
-Backface culling is disabled because steep cliff faces would be invisible if the
-winding order is inconsistent.  The flat mesh generates CCW winding when viewed
-from above, but a steep face (nearly vertical) can appear from below, making the
-winding appear CW to the camera — which backface culling would discard.
-
-**Fix: conditionally enable backface culling via shader discard on steep faces**
-
-Keep `cull_mode = Some(Face::Back)` and prevent the issue at the mesh level:
-
-1. Compute per-vertex normals in the vertex shader (already done via the
-   `normal_at` function).
-2. In the fragment shader, discard fragments where `dot(normal, view_dir) < 0`.
-   This avoids the cost of double-sided rasterization while still allowing steep
-   faces to be visible from adjacent lower geometry.
-
-Alternatively, keep `cull_mode = None` but split the geometry: use backface
-culling for LOD levels 3+ (coarse, low slope range), and only disable it for
-LOD 0–2 where steep geometry is densest.
+Enabled `cull_mode = Some(Face::Back)` in `TerrainMaterial::specialize`.
+The original concern (steep faces becoming invisible) does not apply to a
+heightfield: all mesh triangles have consistent CCW winding when viewed from
+above, regardless of steepness.  Backfaces are only visible from underground,
+which is the correct thing to cull.  The fragment-shader discard workaround
+was not needed.
 
 ---
 
-### P6 — Cascade shadow range and far clip plane
+### ✅ P6 — Cascade shadow range and far clip plane
 
-**Status: OPEN**
+**Status: FIXED**
 
-**Estimated impact: MEDIUM — GPU shadow map and depth buffer precision costs**
+**Original impact: MEDIUM — GPU shadow map and depth buffer precision costs**
 
-**Current values**
+**What was done**
 
-```rust
-// main.rs
-maximum_distance: 20_000.0,   // 20 km shadow range
-far: 10_000_000.0,            // 10 000 km far clip plane
-```
-
-A 20 km shadow range with 4 cascades covers a large area.  The last cascade's
-shadow map must cover a frustum slice from ~5 km to 20 km, at which point texels
-are extremely sparse and shadow quality collapses.  This also forces large shadow
-map texture allocations.
-
-The 10 million unit far clip plane combined with near=0.1 gives a 100 000 000:1
-depth range.  Even with a 32-bit depth buffer this causes Z-fighting at
-distances beyond a few hundred metres.
-
-**Fix**
-
-```rust
-// Reduce shadow range to what's visually meaningful:
-maximum_distance: 8_000.0,
-
-// Reduce far plane to something sane for the world size:
-far: 100_000.0,   // 100 km — covers the full terrain footprint with margin
-```
-
-For depth precision at large scales, consider a reversed-Z projection
-(`camera_near = f32::MAX, camera_far = 0`) combined with
-`DepthBiasState` tweaks in the terrain pipeline — reversed-Z distributes
-depth precision toward the near plane where it matters most.
+- Far clip reduced from 10 000 000 to **100 000** (100 km), cutting the
+  depth range from 100 000 000:1 to 1 000 000:1 and eliminating Z-fighting
+  at normal terrain viewing distances.
+- Shadow cascade `maximum_distance` reduced from 20 000 to **8 000** m.
+  The last cascade now covers 2–8 km instead of 5–20 km, giving meaningfully
+  denser shadow-map texels over the visible terrain range.
 
 ---
 
@@ -256,12 +216,11 @@ depth precision toward the near plane where it matters most.
 | P1 | Incremental tile stamping in `apply_tiles_to_clipmap` | ✅ Fixed (`352d2d1`, `16a5793`) |
 | P2 | Deduplicate `build_patch_instances_for_view` | ✅ Fixed (`b8a695a`) |
 | P3 | Storage buffer upload gated on clip-center change | ✅ Fixed (`b8a695a`) |
-| P4 | Backface culling on terrain mesh | Open |
+| P4 | Backface culling on terrain mesh | ✅ Fixed |
 | P5 | Remove `sync_sun_direction` | ✅ Fixed (`b8a695a`) |
-| P6 | Cascade shadow range and far clip plane | Open |
+| P6 | Cascade shadow range and far clip plane | ✅ Fixed |
 
-The two remaining open items (P4, P6) are independent and low-risk.  P6 in
-particular is a two-line config change with immediate GPU benefit.
+All seven items are now resolved.
 
 ---
 
@@ -271,8 +230,8 @@ particular is a two-line config change with immediate GPU benefit.
 |---|---|---|---|
 | P2 + P3 ✅ | −0.5 ms CPU | −0.5 ms CPU | −0.5 ms CPU |
 | P5 ✅ | −0.1 ms GPU | −0.1 ms GPU | −0.1 ms GPU |
-| P6 | −0.1 ms GPU | −0.1 ms GPU | −0.1 ms GPU |
-| P4 | — | −1–3 ms GPU | −1–3 ms GPU |
+| P6 ✅ | −0.1 ms GPU | −0.1 ms GPU | −0.1 ms GPU |
+| P4 ✅ | — | −1–3 ms GPU | −1–3 ms GPU |
 | P1 ✅ | — | −2–5 ms CPU | −5–15 ms CPU |
 | P0 ✅ | — | −2–8 ms GPU BW | −5–20 ms GPU BW |
 

@@ -5,7 +5,8 @@ use bevy::{
     prelude::*,
     render::{
         render_resource::{
-            AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+            AsBindGroup, Face, RenderPipelineDescriptor, ShaderType,
+            SpecializedMeshPipelineError,
         },
         storage::ShaderStorageBuffer,
     },
@@ -113,8 +114,10 @@ impl Material for TerrainMaterial {
         _layout: &MeshVertexBufferLayoutRef,
         _key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        // Disable backface culling so steep terrain faces remain visible.
-        descriptor.primitive.cull_mode = None;
+        // Terrain is a heightfield — all triangles have consistent CCW winding
+        // when viewed from above, so hardware backface culling is safe and halves
+        // the rasterization cost for steep slopes viewed from the correct side.
+        descriptor.primitive.cull_mode = Some(Face::Back);
         Ok(())
     }
 }
