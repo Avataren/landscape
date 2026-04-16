@@ -11,7 +11,15 @@ world_max       =  8192.0   # world-space X/Z maximum
 # Highest LOD index that has baked tiles. For a 4096px map / 256px tile_size,
 # the mip pyramid is: L0=16×16, L1=8×8, L2=4×4, L3=2×2 (coarsest).
 # Clipmap rings above this level resample height from L3 tiles.
-max_mip_level   = 3
+max_mip_level   = 5
+#3 for 4096, 5 for 16384
+
+# Mip level used to build the single global collision heightfield.
+# Level 2 = 4 m/cell (256 tile reads, ~128 MB) — matches original per-tile precision.
+# Level 3 = 8 m/cell (64 tile reads,  ~32 MB)  — good enough for most cases.
+# Lower values give finer collision at the cost of more RAM and startup time.
+# If the chosen level is not pre-baked, tiles are built from finer mip data.
+collision_mip_level = 2
 
 [terrain_config]
 # Clipmap LOD ring count. Each extra level doubles the view radius.

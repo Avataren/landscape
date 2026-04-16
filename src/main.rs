@@ -17,7 +17,9 @@ use bevy::{
     },
     window::PrimaryWindow,
 };
-use bevy_landscape::{TerrainCamera, TerrainConfig, TerrainDebugPlugin, TerrainPlugin, TerrainSourceDesc};
+use bevy_landscape::{
+    TerrainCamera, TerrainConfig, TerrainDebugPlugin, TerrainPlugin, TerrainSourceDesc,
+};
 use bevy_landscape_editor::LandscapeEditorPlugin;
 use player::{CameraMode, PlayerPlugin};
 
@@ -63,7 +65,7 @@ fn main() {
                     primary_window: Some(Window {
                         title: WINDOW_TITLE.into(),
                         present_mode: bevy::window::PresentMode::Immediate,
-                        resolution: (640u32, 480u32).into(),
+                        resolution: (1920u32, 1080u32).into(),
                         ..default()
                     }),
                     ..default()
@@ -78,6 +80,7 @@ fn main() {
                 world_min: cfg.source.world_min,
                 world_max: cfg.source.world_max,
                 max_mip_level: cfg.source.max_mip_level,
+                collision_mip_level: cfg.source.collision_mip_level,
                 ..default()
             },
         })
@@ -173,7 +176,7 @@ fn camera_move(
     let dt = time.delta_secs();
 
     let forward: Vec3 = t.forward().into();
-    let right: Vec3   = t.right().into();
+    let right: Vec3 = t.right().into();
 
     if keys.pressed(KeyCode::KeyW) {
         t.translation += forward * speed * dt;

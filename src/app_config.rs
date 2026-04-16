@@ -14,6 +14,8 @@ struct TerrainSourceToml {
     world_min: f32,
     world_max: f32,
     max_mip_level: u8,
+    /// Mip level for the collision heightfield (default 2 = 4 m/cell).
+    collision_mip_level: Option<u8>,
 }
 
 #[derive(Deserialize)]
@@ -30,6 +32,7 @@ pub struct TerrainSourceCfg {
     pub world_min: bevy::math::Vec2,
     pub world_max: bevy::math::Vec2,
     pub max_mip_level: u8,
+    pub collision_mip_level: u8,
 }
 
 pub struct TerrainRenderCfg {
@@ -66,6 +69,7 @@ pub fn load() -> AppConfig {
             world_min: bevy::math::Vec2::splat(t.world_min),
             world_max: bevy::math::Vec2::splat(t.world_max),
             max_mip_level: t.max_mip_level,
+            collision_mip_level: t.collision_mip_level.unwrap_or(2),
         },
         render: TerrainRenderCfg {
             clipmap_levels: rc.clipmap_levels,

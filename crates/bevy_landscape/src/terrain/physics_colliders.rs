@@ -37,20 +37,12 @@ pub fn spawn_global_heightfield(
         return;
     }
 
-    // Level 2 = 4 m/cell at world_scale = 1.0 — same precision as the old
-    // per-tile heightfields, but as one seamless mesh.
-    //
-    // If pre-baked L2 tiles are not on disk, load_tile_data automatically
-    // falls back to building L2-resolution data from whatever finer mip is
-    // available (build_resampled_tile).  Quality is identical; startup is
-    // slower because more source tiles must be read.
-    //
-    // Do NOT clamp with `.min(desc.max_mip_level)` here — that would change
-    // cell_size and produce an explosively large sample count when only L0 is
-    // available.  The load_tile_data fallback handles missing levels without
-    // altering the requested resolution.
-    const SOURCE_MIP_LEVEL: u8 = 2;
-    let source_level = SOURCE_MIP_LEVEL;
+    // Mip level for the collision heightfield — set via `collision_mip_level`
+    // in landscape.toml.  Level 2 = 4 m/cell at world_scale = 1.0 (same
+    // precision as the old per-tile heightfields).  Lower = finer collision
+    // but more RAM and a slower startup read; higher = coarser but cheaper.
+    // load_tile_data handles missing mip levels automatically.
+    let source_level = desc.collision_mip_level;
     let cell_size = config.world_scale * (1u32 << source_level as u32) as f32;
     let level_tile_world = config.tile_size as f32 * cell_size;
 
