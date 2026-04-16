@@ -38,6 +38,8 @@ struct TerrainParams {
     clip_levels: array<vec4<f32>, 16>,
 }
 
+@group(#{MATERIAL_BIND_GROUP}) @binding(0) var height_tex:  texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(1) var height_samp: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(3) var macro_color_tex:  texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(4) var macro_color_samp: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var<uniform> terrain: TerrainParams;
@@ -49,6 +51,7 @@ struct TerrainVOut {
     @location(1)       world_normal: vec3<f32>,
     @location(2)       macro_xz_ws:  vec2<f32>,
     @location(3)       patch_uv:     vec2<f32>,
+    @location(4) @interpolate(flat) lod_level: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +109,34 @@ fn hemisphere_ambient(world_normal: vec3<f32>, albedo: vec3<f32>) -> vec3<f32> {
 }
 
 // ---------------------------------------------------------------------------
+// Per-pixel normal from height finite differences
+//
+// Mirrors the vertex shader's normal_at() exactly, but runs in the fragment
+// stage so every pixel gets an independent normal sample — no vertex
+// interpolation artefacts.  Uses the height clipmap (always populated) rather
+// than the baked RG8Snorm normal array (which may be zero when
+// procedural_fallback is false and no baked normal tiles are loaded).
+// ---------------------------------------------------------------------------
+
+fn height_at_frag(lod: u32, xz: vec2<f32>) -> f32 {
+    let lvl        = terrain.clip_levels[lod];
+    let world_min  = terrain.world_bounds.xy;
+    let world_max  = terrain.world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
+    let sample_xz  = clamp(xz, world_min, world_max);
+    let uv         = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
+    return textureSample(height_tex, height_samp, uv, i32(lod)).r
+        * terrain.height_scale;
+}
+
+fn pixel_normal(lod: u32, xz: vec2<f32>) -> vec3<f32> {
+    let eps = terrain.clip_levels[lod].w; // texel world size at this LOD
+    let h   = height_at_frag(lod, xz);
+    let h_r = height_at_frag(lod, xz + vec2<f32>(eps, 0.0));
+    let h_u = height_at_frag(lod, xz + vec2<f32>(0.0, eps));
+    return normalize(vec3<f32>(h - h_r, eps, h - h_u));
+}
+
+// ---------------------------------------------------------------------------
 // Attenuation — same formula as pbr_lighting::getDistanceAttenuation
 // ---------------------------------------------------------------------------
 
@@ -139,16 +170,28 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
         discard;
     }
 
+    // --- Per-pixel normal from height finite differences ---
+    // `vertex_n` is the morph-blended vertex normal used for shadow bias
+    // (stable, no high-frequency noise).  `n` is recomputed per-pixel from
+    // the height clipmap — same formula as the vertex shader's normal_at(),
+    // but evaluated at the exact fragment world position rather than at the
+    // nearest vertex, eliminating vertex-interpolation artefacts on curved
+    // slopes.  Requires the height texture (always populated) rather than the
+    // baked RG8Snorm normal array (which may be zeros).
+    let vertex_n = normalize(in.world_normal);
+    let n        = pixel_normal(in.lod_level, in.macro_xz_ws);
+
     // --- Albedo ---
-    let n      = normalize(in.world_normal);
     let slope  = 1.0 - abs(dot(n, vec3<f32>(0.0, 1.0, 0.0)));
     let h_norm = clamp(in.world_pos.y / terrain.height_scale, 0.0, 1.0);
 
     var albedo = procedural_albedo(slope, h_norm);
     if terrain.bounds_fade.y > 0.5 {
-        albedo = textureSampleLevel(
+        // textureSample (not textureSampleLevel) lets the GPU pick the correct
+        // mip based on screen-space derivatives — better antialiasing at distance.
+        albedo = textureSample(
             macro_color_tex, macro_color_samp,
-            macro_color_uv(in.macro_xz_ws), 0.0,
+            macro_color_uv(in.macro_xz_ws),
         ).rgb;
     }
 
@@ -182,7 +225,8 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
 
         var shadow = 1.0;
         if (light.flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
-            shadow = fetch_directional_shadow(i, in.world_pos, in.world_normal, view_z);
+            // Shadow bias uses vertex_n (per-vertex, more stable for self-shadow).
+            shadow = fetch_directional_shadow(i, in.world_pos, vertex_n, view_z);
         }
 
         direct += diffuse * ndotl * shadow * light.color.rgb;
@@ -209,7 +253,7 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
 
         var shadow = 1.0;
         if ((*light).flags & POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
-            shadow = fetch_point_shadow(light_id, in.world_pos, in.world_normal);
+            shadow = fetch_point_shadow(light_id, in.world_pos, vertex_n);
         }
 
         direct += diffuse * ndotl * atten * shadow * (*light).color_inverse_square_range.rgb;
@@ -241,7 +285,7 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
         var shadow = 1.0;
         if ((*light).flags & POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
             shadow = fetch_spot_shadow(
-                light_id, in.world_pos, in.world_normal, (*light).shadow_map_near_z,
+                light_id, in.world_pos, vertex_n, (*light).shadow_map_near_z,
             );
         }
 

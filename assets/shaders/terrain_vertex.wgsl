@@ -64,6 +64,9 @@ struct TerrainVOut {
     @location(1)       world_normal: vec3<f32>,
     @location(2)       macro_xz_ws:  vec2<f32>,
     @location(3)       patch_uv:     vec2<f32>,
+    // Flat-interpolated patch LOD level; fragment shader uses it to select the
+    // correct clipmap array layer when sampling per-pixel normals.
+    @location(4) @interpolate(flat) lod_level: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -224,5 +227,6 @@ fn vertex(v: Vertex) -> TerrainVOut {
     out.world_normal = nrm;
     out.macro_xz_ws  = world_xz_orig;
     out.patch_uv     = v.uv;
+    out.lod_level    = lod_level;
     return out;
 }
