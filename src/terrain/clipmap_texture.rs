@@ -8,7 +8,10 @@ use bevy::{
     asset::RenderAssetUsages,
     image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     prelude::*,
-    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
+    render::{
+        extract_resource::ExtractResource,
+        render_resource::{Extent3d, Origin3d, TextureDimension, TextureFormat},
+    },
 };
 use std::f32::consts::TAU;
 
@@ -293,11 +296,75 @@ pub struct TerrainClipmapState {
     pub height_texture_handle: Handle<Image>,
     pub normal_texture_handle: Handle<Image>,
     pub material_handle: Handle<TerrainMaterial>,
+    pub height_cpu_data: Vec<u8>,
+    pub normal_cpu_data: Vec<u8>,
     /// Clip centres from the last procedural texture regeneration.
     pub last_clip_centers: Vec<IVec2>,
     /// Clip centres at which resident tiles were last written into the texture.
     /// Sentinel IVec2::MAX on startup forces a full tile re-apply on the first frame.
     pub tile_apply_centers: Vec<IVec2>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TerrainTextureUpload {
+    pub texture: Handle<Image>,
+    pub origin: Origin3d,
+    pub size: Extent3d,
+    pub bytes_per_row: u32,
+    pub rows_per_image: u32,
+    pub data: Vec<u8>,
+}
+
+#[derive(Resource, Clone, Default, ExtractResource)]
+pub struct TerrainClipmapUploads {
+    pub uploads: Vec<TerrainTextureUpload>,
+}
+
+pub fn begin_terrain_upload_frame(mut uploads: ResMut<TerrainClipmapUploads>) {
+    uploads.uploads.clear();
+}
+
+fn queue_full_layer_upload(
+    uploads: &mut TerrainClipmapUploads,
+    texture: &Handle<Image>,
+    layer: u32,
+    layer_bytes: &[u8],
+    res: u32,
+    bytes_per_texel: usize,
+) {
+    if let Some(existing) = uploads
+        .uploads
+        .iter_mut()
+        .find(|upload| upload.texture == *texture && upload.origin.z == layer)
+    {
+        existing.bytes_per_row = res * bytes_per_texel as u32;
+        existing.rows_per_image = res;
+        existing.size = Extent3d {
+            width: res,
+            height: res,
+            depth_or_array_layers: 1,
+        };
+        existing.data.clear();
+        existing.data.extend_from_slice(layer_bytes);
+        return;
+    }
+
+    uploads.uploads.push(TerrainTextureUpload {
+        texture: texture.clone(),
+        origin: Origin3d {
+            x: 0,
+            y: 0,
+            z: layer,
+        },
+        size: Extent3d {
+            width: res,
+            height: res,
+            depth_or_array_layers: 1,
+        },
+        bytes_per_row: res * bytes_per_texel as u32,
+        rows_per_image: res,
+        data: layer_bytes.to_vec(),
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -744,7 +811,7 @@ pub fn update_clipmap_textures(
     config: Res<TerrainConfig>,
     view: Res<TerrainViewState>,
     state: Option<ResMut<TerrainClipmapState>>,
-    mut images: ResMut<Assets<Image>>,
+    mut uploads: ResMut<TerrainClipmapUploads>,
     mut materials: ResMut<Assets<TerrainMaterial>>,
 ) {
     let Some(mut state) = state else { return };
@@ -770,100 +837,84 @@ pub fn update_clipmap_textures(
         return;
     }
 
-    {
-        let Some(image) = images.get_mut(&state.height_texture_handle) else {
-            return;
-        };
-
-        for lod in 0..levels {
-            let new_center = view.clip_centers.get(lod).copied().unwrap_or(IVec2::ZERO);
-            let old_center = state.last_clip_centers[lod];
-            if new_center == old_center {
-                continue;
-            }
-
-            let scale = view
-                .level_scales
-                .get(lod)
-                .copied()
-                .unwrap_or_else(|| level_scale(config.world_scale, lod as u32));
-
-            let layer_offset = lod * height_bpl;
-
-            if let Some(ref mut data) = image.data {
-                if old_center.x == i32::MAX {
-                    let full = generate_clipmap_layer(
-                        new_center,
-                        scale,
-                        0,
-                        0,
-                        res,
-                        config.procedural_fallback,
-                    );
-                    if let Some(slice) = data.get_mut(layer_offset..layer_offset + height_bpl) {
-                        slice.copy_from_slice(&full);
-                    }
-                } else {
-                    write_new_strip(
-                        data,
-                        layer_offset,
-                        res,
-                        new_center,
-                        old_center,
-                        scale,
-                        config.procedural_fallback,
-                    );
-                }
-            }
+    for lod in 0..levels {
+        let new_center = view.clip_centers.get(lod).copied().unwrap_or(IVec2::ZERO);
+        let old_center = state.last_clip_centers[lod];
+        if new_center == old_center {
+            continue;
         }
-    }
 
-    {
-        let Some(image) = images.get_mut(&state.normal_texture_handle) else {
-            return;
-        };
+        let scale = view
+            .level_scales
+            .get(lod)
+            .copied()
+            .unwrap_or_else(|| level_scale(config.world_scale, lod as u32));
 
-        for lod in 0..levels {
-            let new_center = view.clip_centers.get(lod).copied().unwrap_or(IVec2::ZERO);
-            let old_center = state.last_clip_centers[lod];
-            if new_center == old_center {
-                continue;
+        let height_layer_offset = lod * height_bpl;
+        if old_center.x == i32::MAX {
+            let full =
+                generate_clipmap_layer(new_center, scale, 0, 0, res, config.procedural_fallback);
+            if let Some(slice) = state
+                .height_cpu_data
+                .get_mut(height_layer_offset..height_layer_offset + height_bpl)
+            {
+                slice.copy_from_slice(&full);
             }
-
-            let scale = view
-                .level_scales
-                .get(lod)
-                .copied()
-                .unwrap_or_else(|| level_scale(config.world_scale, lod as u32));
-
-            let layer_offset = lod * normal_bpl;
-
-            if let Some(ref mut data) = image.data {
-                if old_center.x == i32::MAX {
-                    let full = generate_normal_clipmap_layer(
-                        new_center,
-                        scale,
-                        res,
-                        config.height_scale,
-                        config.procedural_fallback,
-                    );
-                    if let Some(slice) = data.get_mut(layer_offset..layer_offset + normal_bpl) {
-                        slice.copy_from_slice(&full);
-                    }
-                } else {
-                    write_new_normal_strip(
-                        data,
-                        layer_offset,
-                        res,
-                        new_center,
-                        old_center,
-                        scale,
-                        config.height_scale,
-                        config.procedural_fallback,
-                    );
-                }
-            }
+        } else {
+            write_new_strip(
+                &mut state.height_cpu_data,
+                height_layer_offset,
+                res,
+                new_center,
+                old_center,
+                scale,
+                config.procedural_fallback,
+            );
         }
+        queue_full_layer_upload(
+            &mut uploads,
+            &state.height_texture_handle,
+            lod as u32,
+            &state.height_cpu_data[height_layer_offset..height_layer_offset + height_bpl],
+            res,
+            HEIGHT_BYTES_PER_TEXEL,
+        );
+
+        let normal_layer_offset = lod * normal_bpl;
+        if old_center.x == i32::MAX {
+            let full = generate_normal_clipmap_layer(
+                new_center,
+                scale,
+                res,
+                config.height_scale,
+                config.procedural_fallback,
+            );
+            if let Some(slice) = state
+                .normal_cpu_data
+                .get_mut(normal_layer_offset..normal_layer_offset + normal_bpl)
+            {
+                slice.copy_from_slice(&full);
+            }
+        } else {
+            write_new_normal_strip(
+                &mut state.normal_cpu_data,
+                normal_layer_offset,
+                res,
+                new_center,
+                old_center,
+                scale,
+                config.height_scale,
+                config.procedural_fallback,
+            );
+        }
+        queue_full_layer_upload(
+            &mut uploads,
+            &state.normal_texture_handle,
+            lod as u32,
+            &state.normal_cpu_data[normal_layer_offset..normal_layer_offset + normal_bpl],
+            res,
+            NORMAL_BYTES_PER_TEXEL,
+        );
     }
 
     // Refresh the per-level origin uniforms.
@@ -896,7 +947,7 @@ pub fn apply_tiles_to_clipmap(
     config: Res<TerrainConfig>,
     view: Res<TerrainViewState>,
     mut state: Option<ResMut<TerrainClipmapState>>,
-    mut images: ResMut<Assets<Image>>,
+    mut uploads: ResMut<TerrainClipmapUploads>,
     mut residency: ResMut<TerrainResidency>,
 ) {
     if view.clip_centers.is_empty() {
@@ -938,60 +989,49 @@ pub fn apply_tiles_to_clipmap(
     let res = config.clipmap_resolution();
     let height_bpl = bytes_per_layer(res, HEIGHT_BYTES_PER_TEXEL);
     let normal_bpl = bytes_per_layer(res, NORMAL_BYTES_PER_TEXEL);
+    let mut dirty_levels = std::collections::HashSet::new();
     // If eviction removed cached tiles, stale texels can remain in the clipmap.
     // Rebuild each layer from fallback once, then re-apply resident tiles.
     if needs_rebuild {
-        if let Some(image) = images.get_mut(&state.height_texture_handle) {
-            if let Some(ref mut img_data) = image.data {
-                for lod in 0..levels {
-                    let center = view.clip_centers.get(lod).copied().unwrap_or(IVec2::ZERO);
-                    let scale = view
-                        .level_scales
-                        .get(lod)
-                        .copied()
-                        .unwrap_or_else(|| level_scale(config.world_scale, lod as u32));
-                    let layer_offset = lod * height_bpl;
-                    let full = generate_clipmap_layer(
-                        center,
-                        scale,
-                        config.ring_patches,
-                        config.patch_resolution,
-                        res,
-                        config.procedural_fallback,
-                    );
-                    if let Some(slice) = img_data.get_mut(layer_offset..layer_offset + height_bpl) {
-                        slice.copy_from_slice(&full);
-                    }
-                }
+        for lod in 0..levels {
+            let center = view.clip_centers.get(lod).copied().unwrap_or(IVec2::ZERO);
+            let scale = view
+                .level_scales
+                .get(lod)
+                .copied()
+                .unwrap_or_else(|| level_scale(config.world_scale, lod as u32));
+            let height_layer_offset = lod * height_bpl;
+            let full = generate_clipmap_layer(
+                center,
+                scale,
+                config.ring_patches,
+                config.patch_resolution,
+                res,
+                config.procedural_fallback,
+            );
+            if let Some(slice) = state
+                .height_cpu_data
+                .get_mut(height_layer_offset..height_layer_offset + height_bpl)
+            {
+                slice.copy_from_slice(&full);
             }
-        } else {
-            return;
-        }
 
-        if let Some(image) = images.get_mut(&state.normal_texture_handle) {
-            if let Some(ref mut img_data) = image.data {
-                for lod in 0..levels {
-                    let center = view.clip_centers.get(lod).copied().unwrap_or(IVec2::ZERO);
-                    let scale = view
-                        .level_scales
-                        .get(lod)
-                        .copied()
-                        .unwrap_or_else(|| level_scale(config.world_scale, lod as u32));
-                    let layer_offset = lod * normal_bpl;
-                    let full = generate_normal_clipmap_layer(
-                        center,
-                        scale,
-                        res,
-                        config.height_scale,
-                        config.procedural_fallback,
-                    );
-                    if let Some(slice) = img_data.get_mut(layer_offset..layer_offset + normal_bpl) {
-                        slice.copy_from_slice(&full);
-                    }
-                }
+            let normal_layer_offset = lod * normal_bpl;
+            let full = generate_normal_clipmap_layer(
+                center,
+                scale,
+                res,
+                config.height_scale,
+                config.procedural_fallback,
+            );
+            if let Some(slice) = state
+                .normal_cpu_data
+                .get_mut(normal_layer_offset..normal_layer_offset + normal_bpl)
+            {
+                slice.copy_from_slice(&full);
             }
-        } else {
-            return;
+
+            dirty_levels.insert(lod);
         }
         residency.clipmap_needs_rebuild = false;
     }
@@ -1009,13 +1049,6 @@ pub fn apply_tiles_to_clipmap(
     };
 
     {
-        let Some(image) = images.get_mut(&state.height_texture_handle) else {
-            return;
-        };
-        let Some(ref mut img_data) = image.data else {
-            return;
-        };
-
         for tile in &tile_snapshot {
             let key = tile.key;
             let level = key.level as usize;
@@ -1030,11 +1063,17 @@ pub fn apply_tiles_to_clipmap(
             let layer_base = level * height_bpl;
 
             if needs_rebuild || new_tile_keys.contains(&key) {
-                write_height_tile_window(img_data, layer_base, res, tile, clip_center);
+                write_height_tile_window(
+                    &mut state.height_cpu_data,
+                    layer_base,
+                    res,
+                    tile,
+                    clip_center,
+                );
             } else {
                 let old_center = state.tile_apply_centers[level];
                 write_height_tile_new_strips(
-                    img_data,
+                    &mut state.height_cpu_data,
                     layer_base,
                     res,
                     tile,
@@ -1042,17 +1081,11 @@ pub fn apply_tiles_to_clipmap(
                     old_center,
                 );
             }
+            dirty_levels.insert(level);
         }
     }
 
     {
-        let Some(image) = images.get_mut(&state.normal_texture_handle) else {
-            return;
-        };
-        let Some(ref mut img_data) = image.data else {
-            return;
-        };
-
         for tile in &tile_snapshot {
             let key = tile.key;
             let level = key.level as usize;
@@ -1067,11 +1100,17 @@ pub fn apply_tiles_to_clipmap(
             let layer_base = level * normal_bpl;
 
             if needs_rebuild || new_tile_keys.contains(&key) {
-                write_normal_tile_window(img_data, layer_base, res, tile, clip_center);
+                write_normal_tile_window(
+                    &mut state.normal_cpu_data,
+                    layer_base,
+                    res,
+                    tile,
+                    clip_center,
+                );
             } else {
                 let old_center = state.tile_apply_centers[level];
                 write_normal_tile_new_strips(
-                    img_data,
+                    &mut state.normal_cpu_data,
                     layer_base,
                     res,
                     tile,
@@ -1079,10 +1118,34 @@ pub fn apply_tiles_to_clipmap(
                     old_center,
                 );
             }
+            dirty_levels.insert(level);
         }
     }
 
     drop(tile_snapshot);
+
+    for &lod in &dirty_levels {
+        let height_layer_offset = lod * height_bpl;
+        queue_full_layer_upload(
+            &mut uploads,
+            &state.height_texture_handle,
+            lod as u32,
+            &state.height_cpu_data[height_layer_offset..height_layer_offset + height_bpl],
+            res,
+            HEIGHT_BYTES_PER_TEXEL,
+        );
+
+        let normal_layer_offset = lod * normal_bpl;
+        queue_full_layer_upload(
+            &mut uploads,
+            &state.normal_texture_handle,
+            lod as u32,
+            &state.normal_cpu_data[normal_layer_offset..normal_layer_offset + normal_bpl],
+            res,
+            NORMAL_BYTES_PER_TEXEL,
+        );
+    }
+
     state.tile_apply_centers = view.clip_centers.clone();
     residency.evict_to_budget(config.max_resident_tiles);
 }

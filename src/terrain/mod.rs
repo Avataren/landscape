@@ -24,9 +24,10 @@ use bevy::{
 };
 use clipmap::{build_patch_instances_for_view_in_bounds, PatchInstanceCpu};
 use clipmap_texture::{
-    apply_tiles_to_clipmap, compute_clip_levels, compute_initial_clip_levels,
-    create_initial_clipmap_texture, create_initial_normal_clipmap_texture, update_clipmap_textures,
-    TerrainClipmapState,
+    apply_tiles_to_clipmap, begin_terrain_upload_frame, compute_clip_levels,
+    compute_initial_clip_levels, create_initial_clipmap_texture,
+    create_initial_normal_clipmap_texture, update_clipmap_textures, TerrainClipmapState,
+    TerrainClipmapUploads,
 };
 use collision::{update_collision_tiles, TerrainCollisionCache};
 use components::TerrainCamera;
@@ -82,6 +83,7 @@ impl Plugin for TerrainPlugin {
             .init_resource::<TerrainCollisionCache>()
             .init_resource::<TileColliders>()
             .init_resource::<PatchEntities>()
+            .init_resource::<TerrainClipmapUploads>()
             // Startup
             .add_systems(Startup, (setup_tile_channel, setup_terrain).chain())
             .add_systems(PostStartup, preload_terrain_startup)
@@ -90,6 +92,7 @@ impl Plugin for TerrainPlugin {
                 spawn_coarse_global_heightfield.after(preload_terrain_startup),
             )
             // Update: ordered as per handoff spec
+            .add_systems(First, begin_terrain_upload_frame)
             .add_systems(Update, update_terrain_view_state)
             .add_systems(
                 Update,
@@ -306,6 +309,17 @@ fn preload_terrain_startup(
         }
     }
 
+    if let Some(image) = images.get(&state.height_texture_handle) {
+        if let Some(data) = &image.data {
+            state.height_cpu_data = data.clone();
+        }
+    }
+    if let Some(image) = images.get(&state.normal_texture_handle) {
+        if let Some(data) = &image.data {
+            state.normal_cpu_data = data.clone();
+        }
+    }
+
     // Initialise collision cache params before the tile loop so upload_tile
     // can use them immediately (same initialisation update_collision_tiles does
     // every frame, but we can't wait until the first Update tick).
@@ -370,8 +384,10 @@ fn setup_terrain(
     // One R8Unorm layer per LOD level, each 512×512 texels.
     // Layers are regenerated live by `update_clipmap_textures` as the camera moves.
     let height_image = create_initial_clipmap_texture(&config);
+    let height_cpu_data = height_image.data.clone().unwrap_or_default();
     let height_handle = images.add(height_image);
     let normal_image = create_initial_normal_clipmap_texture(&config);
+    let normal_cpu_data = normal_image.data.clone().unwrap_or_default();
     let normal_handle = images.add(normal_image);
     let macro_color = load_macro_color_texture(&config, &desc);
     let macro_color_handle = images.add(macro_color.image);
@@ -451,6 +467,8 @@ fn setup_terrain(
         height_texture_handle: height_handle,
         normal_texture_handle: normal_handle,
         material_handle: mat_handle.clone(),
+        height_cpu_data,
+        normal_cpu_data,
         last_clip_centers: vec![IVec2::ZERO; levels as usize],
         // Sentinel forces a full tile re-apply on the first frame.
         tile_apply_centers: vec![IVec2::new(i32::MAX, i32::MAX); levels as usize],
