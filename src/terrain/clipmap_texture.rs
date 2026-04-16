@@ -324,6 +324,35 @@ pub fn begin_terrain_upload_frame(mut uploads: ResMut<TerrainClipmapUploads>) {
     uploads.uploads.clear();
 }
 
+fn queue_texture_rect_upload(
+    uploads: &mut TerrainClipmapUploads,
+    texture: &Handle<Image>,
+    layer: u32,
+    origin_x: u32,
+    origin_y: u32,
+    width: u32,
+    height: u32,
+    bytes_per_row: u32,
+    data: Vec<u8>,
+) {
+    uploads.uploads.push(TerrainTextureUpload {
+        texture: texture.clone(),
+        origin: Origin3d {
+            x: origin_x,
+            y: origin_y,
+            z: layer,
+        },
+        size: Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        bytes_per_row,
+        rows_per_image: height,
+        data,
+    });
+}
+
 fn queue_full_layer_upload(
     uploads: &mut TerrainClipmapUploads,
     texture: &Handle<Image>,
@@ -332,39 +361,175 @@ fn queue_full_layer_upload(
     res: u32,
     bytes_per_texel: usize,
 ) {
-    if let Some(existing) = uploads
-        .uploads
-        .iter_mut()
-        .find(|upload| upload.texture == *texture && upload.origin.z == layer)
-    {
-        existing.bytes_per_row = res * bytes_per_texel as u32;
-        existing.rows_per_image = res;
-        existing.size = Extent3d {
-            width: res,
-            height: res,
-            depth_or_array_layers: 1,
-        };
-        existing.data.clear();
-        existing.data.extend_from_slice(layer_bytes);
+    queue_texture_rect_upload(
+        uploads,
+        texture,
+        layer,
+        0,
+        0,
+        res,
+        res,
+        res * bytes_per_texel as u32,
+        layer_bytes.to_vec(),
+    );
+}
+
+fn extract_layer_rect_bytes(
+    layer_bytes: &[u8],
+    res: u32,
+    bytes_per_texel: usize,
+    origin_x: u32,
+    origin_y: u32,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
+    let row_bytes = width as usize * bytes_per_texel;
+    let mut out = Vec::with_capacity(row_bytes * height as usize);
+
+    for row in 0..height as usize {
+        let src = ((origin_y as usize + row) * res as usize + origin_x as usize) * bytes_per_texel;
+        out.extend_from_slice(&layer_bytes[src..src + row_bytes]);
+    }
+
+    out
+}
+
+fn wrapped_segments(start_world: i32, end_world: i32, n: i32) -> [(u32, u32); 2] {
+    let len = (end_world - start_world).max(0);
+    if len == 0 {
+        return [(0, 0), (0, 0)];
+    }
+
+    let start = start_world.rem_euclid(n) as u32;
+    let first_len = len.min(n - start as i32) as u32;
+    let second_len = (len - first_len as i32).max(0) as u32;
+
+    [(start, first_len), (0, second_len)]
+}
+
+fn queue_world_rect_upload(
+    uploads: &mut TerrainClipmapUploads,
+    texture: &Handle<Image>,
+    layer: u32,
+    layer_bytes: &[u8],
+    res: u32,
+    bytes_per_texel: usize,
+    rect_min: IVec2,
+    rect_max: IVec2,
+) {
+    if rect_min.x >= rect_max.x || rect_min.y >= rect_max.y {
         return;
     }
 
-    uploads.uploads.push(TerrainTextureUpload {
-        texture: texture.clone(),
-        origin: Origin3d {
-            x: 0,
-            y: 0,
-            z: layer,
-        },
-        size: Extent3d {
-            width: res,
-            height: res,
-            depth_or_array_layers: 1,
-        },
-        bytes_per_row: res * bytes_per_texel as u32,
-        rows_per_image: res,
-        data: layer_bytes.to_vec(),
-    });
+    let n = res as i32;
+    let x_segments = wrapped_segments(rect_min.x, rect_max.x, n);
+    let y_segments = wrapped_segments(rect_min.y, rect_max.y, n);
+
+    for (origin_y, height) in y_segments {
+        if height == 0 {
+            continue;
+        }
+        for (origin_x, width) in x_segments {
+            if width == 0 {
+                continue;
+            }
+            let data = extract_layer_rect_bytes(
+                layer_bytes,
+                res,
+                bytes_per_texel,
+                origin_x,
+                origin_y,
+                width,
+                height,
+            );
+            queue_texture_rect_upload(
+                uploads,
+                texture,
+                layer,
+                origin_x,
+                origin_y,
+                width,
+                height,
+                width * bytes_per_texel as u32,
+                data,
+            );
+        }
+    }
+}
+
+fn queue_new_strip_uploads(
+    uploads: &mut TerrainClipmapUploads,
+    texture: &Handle<Image>,
+    layer: u32,
+    layer_bytes: &[u8],
+    res: u32,
+    bytes_per_texel: usize,
+    new_center: IVec2,
+    old_center: IVec2,
+) {
+    let n = res as i32;
+    let half = (res / 2) as i32;
+    let delta = new_center - old_center;
+
+    if delta == IVec2::ZERO {
+        return;
+    }
+
+    if old_center.x == i32::MAX || delta.x.abs() >= n || delta.y.abs() >= n {
+        queue_full_layer_upload(uploads, texture, layer, layer_bytes, res, bytes_per_texel);
+        return;
+    }
+
+    if delta.x != 0 {
+        let (x_lo, x_hi) = if delta.x > 0 {
+            (old_center.x + half, new_center.x + half)
+        } else {
+            (new_center.x - half, old_center.x - half)
+        };
+        queue_world_rect_upload(
+            uploads,
+            texture,
+            layer,
+            layer_bytes,
+            res,
+            bytes_per_texel,
+            IVec2::new(x_lo, new_center.y - half),
+            IVec2::new(x_hi, new_center.y + half),
+        );
+    }
+
+    if delta.y != 0 {
+        let (z_lo, z_hi) = if delta.y > 0 {
+            (old_center.y + half, new_center.y + half)
+        } else {
+            (new_center.y - half, old_center.y - half)
+        };
+        queue_world_rect_upload(
+            uploads,
+            texture,
+            layer,
+            layer_bytes,
+            res,
+            bytes_per_texel,
+            IVec2::new(new_center.x - half, z_lo),
+            IVec2::new(new_center.x + half, z_hi),
+        );
+    }
+}
+
+fn tile_window_intersection(
+    tile: &HeightTileCpu,
+    clip_center: IVec2,
+    res: u32,
+) -> Option<(IVec2, IVec2)> {
+    let ts = tile.tile_size as i32;
+    let half = (res / 2) as i32;
+    let tile_min = IVec2::new(tile.key.x * ts, tile.key.y * ts);
+    let tile_max = tile_min + IVec2::splat(ts);
+    let rect_min = tile_min.max(clip_center - IVec2::splat(half));
+    let rect_max = tile_max.min(clip_center + IVec2::splat(half));
+
+    (rect_min.x < rect_max.x && rect_min.y < rect_max.y).then_some((rect_min, rect_max))
 }
 
 // ---------------------------------------------------------------------------
@@ -871,13 +1036,15 @@ pub fn update_clipmap_textures(
                 config.procedural_fallback,
             );
         }
-        queue_full_layer_upload(
+        queue_new_strip_uploads(
             &mut uploads,
             &state.height_texture_handle,
             lod as u32,
             &state.height_cpu_data[height_layer_offset..height_layer_offset + height_bpl],
             res,
             HEIGHT_BYTES_PER_TEXEL,
+            new_center,
+            old_center,
         );
 
         let normal_layer_offset = lod * normal_bpl;
@@ -907,13 +1074,15 @@ pub fn update_clipmap_textures(
                 config.procedural_fallback,
             );
         }
-        queue_full_layer_upload(
+        queue_new_strip_uploads(
             &mut uploads,
             &state.normal_texture_handle,
             lod as u32,
             &state.normal_cpu_data[normal_layer_offset..normal_layer_offset + normal_bpl],
             res,
             NORMAL_BYTES_PER_TEXEL,
+            new_center,
+            old_center,
         );
     }
 
@@ -1124,25 +1293,94 @@ pub fn apply_tiles_to_clipmap(
 
     drop(tile_snapshot);
 
-    for &lod in &dirty_levels {
-        let height_layer_offset = lod * height_bpl;
-        queue_full_layer_upload(
+    if needs_rebuild {
+        for &lod in &dirty_levels {
+            let height_layer_offset = lod * height_bpl;
+            queue_full_layer_upload(
+                &mut uploads,
+                &state.height_texture_handle,
+                lod as u32,
+                &state.height_cpu_data[height_layer_offset..height_layer_offset + height_bpl],
+                res,
+                HEIGHT_BYTES_PER_TEXEL,
+            );
+
+            let normal_layer_offset = lod * normal_bpl;
+            queue_full_layer_upload(
+                &mut uploads,
+                &state.normal_texture_handle,
+                lod as u32,
+                &state.normal_cpu_data[normal_layer_offset..normal_layer_offset + normal_bpl],
+                res,
+                NORMAL_BYTES_PER_TEXEL,
+            );
+        }
+    } else if centers_changed {
+        for &lod in &dirty_levels {
+            let new_center = view.clip_centers.get(lod).copied().unwrap_or(IVec2::ZERO);
+            let old_center = state.tile_apply_centers[lod];
+            let height_layer_offset = lod * height_bpl;
+            queue_new_strip_uploads(
+                &mut uploads,
+                &state.height_texture_handle,
+                lod as u32,
+                &state.height_cpu_data[height_layer_offset..height_layer_offset + height_bpl],
+                res,
+                HEIGHT_BYTES_PER_TEXEL,
+                new_center,
+                old_center,
+            );
+
+            let normal_layer_offset = lod * normal_bpl;
+            queue_new_strip_uploads(
+                &mut uploads,
+                &state.normal_texture_handle,
+                lod as u32,
+                &state.normal_cpu_data[normal_layer_offset..normal_layer_offset + normal_bpl],
+                res,
+                NORMAL_BYTES_PER_TEXEL,
+                new_center,
+                old_center,
+            );
+        }
+    }
+
+    for key in &new_tile_keys {
+        let Some(tile) = residency.resident_cpu.get(key) else {
+            continue;
+        };
+        let level = tile.key.level as usize;
+        if level >= levels {
+            continue;
+        }
+        let Some(&clip_center) = view.clip_centers.get(level) else {
+            continue;
+        };
+        let Some((rect_min, rect_max)) = tile_window_intersection(tile, clip_center, res) else {
+            continue;
+        };
+        let height_layer_offset = level * height_bpl;
+        queue_world_rect_upload(
             &mut uploads,
             &state.height_texture_handle,
-            lod as u32,
+            level as u32,
             &state.height_cpu_data[height_layer_offset..height_layer_offset + height_bpl],
             res,
             HEIGHT_BYTES_PER_TEXEL,
+            rect_min,
+            rect_max,
         );
 
-        let normal_layer_offset = lod * normal_bpl;
-        queue_full_layer_upload(
+        let normal_layer_offset = level * normal_bpl;
+        queue_world_rect_upload(
             &mut uploads,
             &state.normal_texture_handle,
-            lod as u32,
+            level as u32,
             &state.normal_cpu_data[normal_layer_offset..normal_layer_offset + normal_bpl],
             res,
             NORMAL_BYTES_PER_TEXEL,
+            rect_min,
+            rect_max,
         );
     }
 
