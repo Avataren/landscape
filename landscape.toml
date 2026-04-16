@@ -20,7 +20,17 @@ max_mip_level   = 3
 # that map to flat zero-height resamples far outside the heightmap bounds.
 clipmap_levels  = 7
 
-# World-space height range. Must match --height-scale used with bake_tiles.
+# World-space height range: a fully-white height texel (R16Unorm = 1.0)
+# maps to this many world units on the Y axis.
+#
+# This value is the single source of truth for height_scale:
+#   - The renderer reads it here at runtime to convert stored [0,1] heights
+#     to world-space Y coordinates.
+#   - bake_tiles reads it here automatically when --height-scale is not
+#     provided on the command line, so baked normals always use the same
+#     scale as the renderer.
+#
+# If you change this value, re-bake your tiles so the normals remain correct.
 height_scale    = 1024.0
 
 # Set to true if the diffuse EXR colours appear V-flipped (e.g. snow at the

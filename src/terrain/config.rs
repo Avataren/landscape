@@ -16,7 +16,15 @@ pub struct TerrainConfig {
     pub tile_size: u32,
     /// World-space units per texel at LOD 0.
     pub world_scale: f32,
-    /// World-space units for maximum terrain height (maps [0,1] height -> [0, height_scale]).
+    /// World-space Y range: a fully-white height texel (R16Unorm = 1.0) maps
+    /// to this many world units.  This is set from `landscape.toml`
+    /// `[terrain_config] height_scale` at startup; the value here is only the
+    /// compile-time fallback used when the toml key is absent.
+    ///
+    /// **Must match the height_scale used during baking.**  bake_tiles reads
+    /// the same toml key automatically, so keeping it in one place is enough.
+    /// Baked normals are computed with this scale; a mismatch makes slopes
+    /// appear too flat or too steep in lighting.
     pub height_scale: f32,
     /// Distance ratio within a ring at which morphing begins (0..1).
     pub morph_start_ratio: f32,

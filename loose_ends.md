@@ -211,6 +211,20 @@ pass rather than resampling the procedural function.
 
 ## Configuration & Tools
 
+### ✅ `height_scale` is now a single source of truth in `landscape.toml`
+
+Previously `bake_tiles --height-scale` defaulted to 2048.0 while `landscape.toml`
+and `TerrainConfig::height_scale` defaulted to 1024.0, and the bake default was
+only in the CLI help text — easy to miss.  A mismatch makes baked normals appear
+too flat or too steep in lighting.
+
+Fixed: `bake_tiles` now reads `[terrain_config] height_scale` from `landscape.toml`
+automatically when `--height-scale` is not passed.  The CLI flag still overrides.
+The fallback default is 1024.0 (matching `config.rs`).  The `landscape.toml`
+comment and `TerrainConfig::height_scale` doc comment both explain the relationship.
+
+---
+
 ### `macro_color_resolution` has no LOD-based variant
 
 The macro colour texture is loaded at a single fixed resolution.  A 16 km world

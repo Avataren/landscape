@@ -13,7 +13,11 @@
 //!   --bump <path>         Bump map for normals (PNG or TIFF).
 //!                         If omitted, normals are derived from the height map.
 //!   --output <dir>        Output directory  [default: assets/tiles]
-//!   --height-scale <f32>  World-space height range in units  [default: 2048.0]
+//!   --height-scale <f32>  World-space height range in units.
+//!                         If omitted, read from landscape.toml
+//!                         [terrain_config] height_scale, then default 1024.0.
+//!                         MUST match the runtime height_scale used by the
+//!                         renderer — affects baked normal steepness.
 //!   --bump-scale <f32>    World-space scale for bump normal derivation
 //!                         [default: same as height-scale]
 //!   --world-scale <f32>   World-space units per texel at LOD 0  [default: 1.0]
@@ -21,9 +25,31 @@
 
 use exr::prelude::{read_first_flat_layer_from_file, FlatSamples};
 use image::ImageReader;
+use serde::Deserialize;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+
+// ---------------------------------------------------------------------------
+// landscape.toml reader (height_scale only)
+// ---------------------------------------------------------------------------
+
+/// Reads `landscape.toml` from the current working directory and returns the
+/// `[terrain_config] height_scale` value if present.
+fn height_scale_from_toml() -> Option<f32> {
+    #[derive(Deserialize)]
+    struct Root {
+        terrain_config: Option<TerrainCfg>,
+    }
+    #[derive(Deserialize)]
+    struct TerrainCfg {
+        height_scale: Option<f32>,
+    }
+
+    let text = std::fs::read_to_string("landscape.toml").ok()?;
+    let root: Root = toml::from_str(&text).ok()?;
+    root.terrain_config?.height_scale
+}
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -33,7 +59,8 @@ struct Config {
     height_path: PathBuf,
     bump_path: Option<PathBuf>,
     output_dir: PathBuf,
-    height_scale: f32,
+    /// None = not set via CLI; resolved in main() from landscape.toml or default.
+    height_scale: Option<f32>,
     bump_scale: Option<f32>,
     world_scale: f32,
     tile_size: usize,
@@ -49,7 +76,7 @@ impl Default for Config {
             height_path: PathBuf::new(),
             bump_path: None,
             output_dir: PathBuf::from("assets/tiles"),
-            height_scale: 2048.0,
+            height_scale: None,
             bump_scale: None,
             world_scale: 1.0,
             tile_size: 256,
@@ -93,7 +120,7 @@ fn parse_args() -> Result<Config, String> {
                 i += 2;
             }
             "--height-scale" => {
-                cfg.height_scale = next()?.parse::<f32>().map_err(|e| format!("{flag}: {e}"))?;
+                cfg.height_scale = Some(next()?.parse::<f32>().map_err(|e| format!("{flag}: {e}"))?);
                 i += 2;
             }
             "--bump-scale" => {
@@ -132,7 +159,7 @@ fn parse_args() -> Result<Config, String> {
 // ---------------------------------------------------------------------------
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cfg = parse_args().unwrap_or_else(|e| {
+    let mut cfg = parse_args().unwrap_or_else(|e| {
         eprintln!("Error: {e}");
         eprintln!();
         eprintln!("Usage: bake_tiles --height <path> [--bump <path>] [--output <dir>]");
@@ -140,6 +167,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("                  [--world-scale <f>] [--tile-size <n>]");
         std::process::exit(1);
     });
+
+    // Resolve height_scale: CLI flag → landscape.toml → hardcoded default.
+    // The default matches TerrainConfig::height_scale in config.rs so that
+    // baking without an explicit flag produces normals consistent with the
+    // renderer's default.
+    let height_scale: f32 = cfg.height_scale.unwrap_or_else(|| {
+        if let Some(v) = height_scale_from_toml() {
+            println!("height_scale: using {v} from landscape.toml");
+            v
+        } else {
+            let v = 1024.0_f32;
+            println!("height_scale: using default {v} (set via --height-scale or landscape.toml to override)");
+            v
+        }
+    });
+    cfg.height_scale = Some(height_scale);
 
     let t_start = Instant::now();
 
@@ -219,7 +262,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
     // bump_scale is only used for grayscale displacement bump maps.
-    let bump_scale = cfg.bump_scale.unwrap_or(cfg.height_scale);
+    let bump_scale = cfg.bump_scale.unwrap_or(height_scale);
 
     let tile_size = cfg.tile_size;
 
@@ -316,7 +359,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     px,
                                     py,
                                     lod_scale,
-                                    cfg.height_scale,
+                                    height_scale,
                                 ))
                             } else {
                                 // Grayscale displacement or height-derived normals.
@@ -325,7 +368,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let normal_scale = if current_bump_height.is_some() {
                                     bump_scale
                                 } else {
-                                    cfg.height_scale
+                                    height_scale
                                 };
                                 encode_normal_xz(compute_normal(
                                     normal_src,
