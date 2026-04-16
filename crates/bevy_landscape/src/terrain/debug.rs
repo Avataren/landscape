@@ -19,6 +19,10 @@ pub struct TerrainDebugConfig {
     pub show_lod_colors: bool,
     pub show_stats: bool,
     pub show_wireframe: bool,
+    /// Render the per-pixel surface normal as colour (`n * 0.5 + 0.5`) instead
+    /// of the full material — useful for inspecting normal-map staircasing or
+    /// LOD seam discontinuities without lighting noise getting in the way.
+    pub show_normals_only: bool,
 }
 
 impl Default for TerrainDebugConfig {
@@ -28,6 +32,7 @@ impl Default for TerrainDebugConfig {
             show_lod_colors: false,
             show_stats: false,
             show_wireframe: false,
+            show_normals_only: false,
         }
     }
 }
@@ -48,6 +53,7 @@ const LOD_COLORS: [Color; 8] = [
 ];
 
 /// Runtime debug hotkeys:
+/// - F8  = render terrain normals as colour (no lighting/material)
 /// - F9  = stats logging
 /// - F10 = patch bounds
 /// - F11 = LOD center markers
@@ -56,6 +62,18 @@ pub fn toggle_terrain_debug_hotkeys(
     keys: Res<ButtonInput<KeyCode>>,
     mut debug_cfg: ResMut<TerrainDebugConfig>,
 ) {
+    if keys.just_pressed(KeyCode::F8) {
+        debug_cfg.show_normals_only = !debug_cfg.show_normals_only;
+        info!(
+            "[Terrain] Normals-only debug {} (F8)",
+            if debug_cfg.show_normals_only {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+    }
+
     if keys.just_pressed(KeyCode::F9) {
         debug_cfg.show_stats = !debug_cfg.show_stats;
         info!(
@@ -123,6 +141,11 @@ pub fn sync_wireframe_modes(
     let desired = if debug_cfg.show_wireframe { 1.0 } else { 0.0 };
     if material.params.bounds_fade.w != desired {
         material.params.bounds_fade.w = desired;
+    }
+
+    let desired_normals = if debug_cfg.show_normals_only { 1.0 } else { 0.0 };
+    if material.params.debug_flags.x != desired_normals {
+        material.params.debug_flags.x = desired_normals;
     }
 }
 

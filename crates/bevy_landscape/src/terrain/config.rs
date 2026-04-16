@@ -63,7 +63,7 @@ impl Default for TerrainConfig {
             max_view_distance: 65536.0,
             procedural_fallback: false,
             use_macro_color_map: true,
-            macro_color_resolution: 4096,
+            macro_color_resolution: 16384,
             macro_color_flip_v: false,
         }
     }

@@ -150,7 +150,7 @@ impl Plugin for TerrainPlugin {
 fn preload_terrain_startup(
     config: Res<TerrainConfig>,
     desc: Res<TerrainSourceDesc>,
-    camera_q: Query<&Transform, With<TerrainCamera>>,
+    camera_q: Query<(&Transform, &TerrainCamera)>,
     mut state: ResMut<TerrainClipmapState>,
     mut images: ResMut<Assets<Image>>,
     mut materials: ResMut<Assets<TerrainMaterial>>,
@@ -160,16 +160,18 @@ fn preload_terrain_startup(
     let levels = config.active_clipmap_levels();
 
     // --- Compute clip centers from the starting camera position ---------------
-    let cam_pos = match camera_q.single() {
-        Ok(t) => t.translation,
+    let (cam_transform, terrain_cam) = match camera_q.single() {
+        Ok(pair) => pair,
         Err(_) => {
             warn!("[Terrain] preload: no camera found");
             return;
         }
     };
+    let cam_pos = cam_transform.translation;
 
     let scale_0 = level_scale(config.world_scale, 0);
-    let fine_center = snap_camera_to_level_grid(cam_pos.xz(), scale_0);
+    let bias_xz = forward_bias_xz(&config, cam_transform, terrain_cam.forward_bias_ratio);
+    let fine_center = snap_camera_to_level_grid(cam_pos.xz() + bias_xz, scale_0);
 
     let clip_centers: Vec<IVec2> = (0..levels)
         .map(|l| {
@@ -473,6 +475,7 @@ fn setup_terrain(
                 if config.macro_color_flip_v { 1.0 } else { 0.0 },
                 0.0,
             ),
+            debug_flags: Vec4::ZERO,
             clip_levels: compute_initial_clip_levels(&config),
         },
     });
@@ -513,10 +516,10 @@ fn setup_terrain(
 /// Runs first so all subsequent systems see fresh data.
 pub fn update_terrain_view_state(
     config: Res<TerrainConfig>,
-    camera_q: Query<&Transform, With<TerrainCamera>>,
+    camera_q: Query<(&Transform, &TerrainCamera)>,
     mut view: ResMut<TerrainViewState>,
 ) {
-    let Ok(cam) = camera_q.single() else {
+    let Ok((cam, terrain_cam)) = camera_q.single() else {
         return;
     };
 
@@ -534,8 +537,14 @@ pub fn update_terrain_view_state(
     //
     // This removes large multi-cell jumps on mid/far levels that create
     // temporal shimmer and visible instability when moving the camera.
+    //
+    // Optionally bias the finest center along the camera's forward XZ
+    // direction before snapping.  Since every coarser center is derived from
+    // the biased fine center via right shift, the entire ring stack moves
+    // coherently and inner-hole alignment is preserved.
     let scale_0 = level_scale(config.world_scale, 0);
-    let fine_center = snap_camera_to_level_grid(cam_pos.xz(), scale_0);
+    let bias_xz = forward_bias_xz(&config, cam, terrain_cam.forward_bias_ratio);
+    let fine_center = snap_camera_to_level_grid(cam_pos.xz() + bias_xz, scale_0);
 
     for level in 0..config.active_clipmap_levels() {
         let scale = level_scale(config.world_scale, level);
@@ -545,6 +554,30 @@ pub fn update_terrain_view_state(
         view.level_scales.push(scale);
         view.clip_centers.push(center);
     }
+}
+
+/// Offset the finest clipmap center along the camera's forward XZ direction.
+///
+/// Scaled by `ratio * half_ring_L0_ws`: at ratio = 0.5 the LOD-0 ring sits
+/// ~half its radius ahead of the camera, which is a good default for near-
+/// horizontal views where the visible ground is forward of the player rather
+/// than directly below.  Returns zero if the ratio or the projected forward
+/// vector is negligible.
+fn forward_bias_xz(config: &TerrainConfig, cam: &Transform, ratio: f32) -> Vec2 {
+    if ratio.abs() <= 1e-6 {
+        return Vec2::ZERO;
+    }
+    let forward: Vec3 = cam.forward().into();
+    let forward_xz = Vec2::new(forward.x, forward.z);
+    let len = forward_xz.length();
+    if len <= 1e-3 {
+        return Vec2::ZERO;
+    }
+    let half_ring_l0 = config.ring_patches as f32
+        * config.patch_resolution as f32
+        * level_scale(config.world_scale, 0)
+        * 0.5;
+    (forward_xz / len) * (half_ring_l0 * ratio)
 }
 
 /// Repositions patch entities and refreshes the patch storage buffer to match

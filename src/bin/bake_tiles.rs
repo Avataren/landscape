@@ -609,22 +609,19 @@ fn compute_normal_from_ts(
     let ts_y = if flip_green { -ts_y_raw } else { ts_y_raw };
     let ts_z = (1.0_f32 - ts_x * ts_x - ts_y * ts_y).max(0.0).sqrt();
 
-    // Compute the terrain surface TBN from height field finite differences.
-    let h = sample_height_clamped(height_src, size, px, py) * height_scale;
-    let h_r = sample_height_clamped(height_src, size, px.saturating_add(1), py) * height_scale;
-    let h_u = sample_height_clamped(height_src, size, px, py.saturating_add(1)) * height_scale;
+    // Compute the terrain surface TBN from a Sobel-smoothed height gradient
+    // rather than a raw one-sided forward difference — a noisy heightfield
+    // would otherwise jitter the TBN frame from texel to texel and poison the
+    // world-space normal it transforms into.
+    let (gx, gz) = sobel_height_gradient(height_src, size, px, py, height_scale);
 
     // Tangent T = ∂P/∂u = direction of increasing world X.
-    let tl = (lod_scale * lod_scale + (h_r - h) * (h_r - h))
-        .sqrt()
-        .max(1e-6);
-    let t = [lod_scale / tl, (h_r - h) / tl, 0.0_f32];
+    let tl = (lod_scale * lod_scale + gx * gx).sqrt().max(1e-6);
+    let t = [lod_scale / tl, gx / tl, 0.0_f32];
 
     // Bitangent B = ∂P/∂v = direction of increasing world Z.
-    let bl = (lod_scale * lod_scale + (h_u - h) * (h_u - h))
-        .sqrt()
-        .max(1e-6);
-    let b = [0.0_f32, (h_u - h) / bl, lod_scale / bl];
+    let bl = (lod_scale * lod_scale + gz * gz).sqrt().max(1e-6);
+    let b = [0.0_f32, gz / bl, lod_scale / bl];
 
     // Surface normal N = B × T (right-hand rule, Y-up: gives (0,1,0) for flat terrain).
     let nx = b[1] * t[2] - b[2] * t[1];
@@ -660,8 +657,54 @@ fn box_filter_2x(src: &[f32], w: usize, h: usize) -> Vec<f32> {
     dst
 }
 
-fn sample_height_clamped(src: &[f32], size: usize, x: usize, y: usize) -> f32 {
-    src[y.min(size - 1) * size + x.min(size - 1)]
+/// Sample one offset of a 3×3 stencil with edge clamping.
+#[inline]
+fn sample_offset(src: &[f32], size: usize, x: usize, y: usize, dx: i32, dy: i32) -> f32 {
+    let sx = (x as i32 + dx).clamp(0, size as i32 - 1) as usize;
+    let sy = (y as i32 + dy).clamp(0, size as i32 - 1) as usize;
+    src[sy * size + sx]
+}
+
+/// Sobel-weighted height gradient at (x, y).
+///
+/// Returns `(dh_dx, dh_dz)` in world-height units **per texel** (i.e. already
+/// multiplied by `height_scale` but not divided by `level_scale_ws`).  Caller
+/// builds the unnormalized normal as `(-dh_dx, level_scale_ws, -dh_dz)`.
+///
+/// The 1-2-1 perpendicular weighting averages out single-texel noise that a
+/// plain central difference (or a one-sided forward diff) would otherwise
+/// inject straight into the normal — eliminating the per-texel jaggies that
+/// noisy heightmaps produce on otherwise smooth slopes.
+fn sobel_height_gradient(
+    src: &[f32],
+    size: usize,
+    x: usize,
+    y: usize,
+    height_scale: f32,
+) -> (f32, f32) {
+    // Sobel X kernel (gradient along +X, i.e. across columns):
+    //   -1  0  +1
+    //   -2  0  +2
+    //   -1  0  +1
+    //
+    // Sobel Z kernel (gradient along +Z, i.e. across rows):
+    //   -1 -2 -1
+    //    0  0  0
+    //   +1 +2 +1
+    //
+    // Both kernels sum to 8 in absolute weight on each side, so we divide by 8
+    // to recover the per-texel gradient (matches a central difference on a
+    // ramp h(x,z) = a·x, which gives dh/dx = a per texel).
+    let h = |dx: i32, dy: i32| sample_offset(src, size, x, y, dx, dy);
+
+    let gx = (h(1, -1) + 2.0 * h(1, 0) + h(1, 1)
+        - h(-1, -1) - 2.0 * h(-1, 0) - h(-1, 1))
+        * (1.0 / 8.0);
+    let gz = (h(-1, 1) + 2.0 * h(0, 1) + h(1, 1)
+        - h(-1, -1) - 2.0 * h(0, -1) - h(1, -1))
+        * (1.0 / 8.0);
+
+    (gx * height_scale, gz * height_scale)
 }
 
 fn compute_normal(
@@ -672,11 +715,13 @@ fn compute_normal(
     level_scale_ws: f32,
     height_scale: f32,
 ) -> [f32; 3] {
-    let h = sample_height_clamped(src, size, x, y) * height_scale;
-    let h_r = sample_height_clamped(src, size, x.saturating_add(1), y) * height_scale;
-    let h_u = sample_height_clamped(src, size, x, y.saturating_add(1)) * height_scale;
-    let dx = h - h_r;
-    let dz = h - h_u;
+    // Unnormalized normal:  N = T_z × T_x = (-dh/dx, level_scale, -dh/dz),
+    // expressed with dh in world height units per texel and the spacing
+    // factored out so the X/Z components compare directly against
+    // `level_scale_ws` (1 texel of world spacing).
+    let (gx, gz) = sobel_height_gradient(src, size, x, y, height_scale);
+    let dx = -gx;
+    let dz = -gz;
     let len = (dx * dx + level_scale_ws * level_scale_ws + dz * dz)
         .sqrt()
         .max(1e-6);

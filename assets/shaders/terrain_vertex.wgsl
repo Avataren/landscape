@@ -27,6 +27,7 @@ struct TerrainParams {
     patch_resolution:   f32,   // quads per patch edge
     world_bounds:       vec4<f32>, // (min_x, min_z, max_x, max_z)
     bounds_fade:        vec4<f32>, // x = fade distance, y = use_macro_color, z = flip_v, w = show_wireframe
+    debug_flags:        vec4<f32>, // x = show_normals_only, yzw reserved
     clip_levels: array<vec4<f32>, 16>,
 }
 

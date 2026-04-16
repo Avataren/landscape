@@ -113,7 +113,11 @@ fn setup_scene(mut commands: Commands, mut scattering_mediums: ResMut<Assets<Sca
         // Position at a comfortable altitude and look at terrain centre so the
         // view is correct from the first frame in freecam mode.
         Transform::from_xyz(0.0, 800.0, 1200.0).looking_at(Vec3::ZERO, Vec3::Y),
-        TerrainCamera,
+        // TerrainCamera::default() turns on the forward-bias for clipmap
+        // centers — the LOD rings shift along the camera's view direction so
+        // fine geometry covers the visible foreground in both freecam and
+        // walking views.  See `TerrainCamera::forward_bias_ratio`.
+        TerrainCamera::default(),
     ));
 
     commands.spawn((

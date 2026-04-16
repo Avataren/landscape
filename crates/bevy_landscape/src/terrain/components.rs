@@ -2,8 +2,30 @@ use bevy::prelude::*;
 
 /// Marker component: the camera that drives terrain LOD and streaming.
 /// Exactly one entity should carry this in a scene.
-#[derive(Component, Default)]
-pub struct TerrainCamera;
+#[derive(Component)]
+pub struct TerrainCamera {
+    /// Fraction of the LOD-0 ring half-extent by which the clipmap centers are
+    /// pushed along the camera's forward XZ direction.
+    ///
+    /// 0.0 = classic camera-centered behaviour (rings stay directly under the
+    /// camera).  0.4–0.7 shifts the rings *in front of* the camera so the
+    /// fine LOD rings cover the visible foreground for near-horizontal views
+    /// rather than being wasted under the player's feet.
+    ///
+    /// The same bias is applied to every level, so strict ring nesting (and
+    /// thus inner-hole alignment) is preserved.
+    pub forward_bias_ratio: f32,
+}
+
+impl Default for TerrainCamera {
+    fn default() -> Self {
+        // Forward bias on by default — both first-person and freecam benefit
+        // because the visible ground sits ahead of the camera in either mode.
+        Self {
+            forward_bias_ratio: 0.5,
+        }
+    }
+}
 
 /// Per-patch instance data placed by the clipmap builder.
 /// In v1 this lives on ECS entities; in v2 it goes into a GPU storage buffer.

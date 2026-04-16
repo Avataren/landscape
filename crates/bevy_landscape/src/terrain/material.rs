@@ -14,7 +14,7 @@ use bevy::{
 };
 
 // ---------------------------------------------------------------------------
-// Uniform struct — must match TerrainParams in both WGSL shaders exactly.
+// Uniform struct — must match TerrainParams in all three WGSL shaders exactly.
 //
 // Memory layout (WGSL std140 rules):
 //   offset  0 – height_scale      f32
@@ -25,11 +25,12 @@ use bevy::{
 //   offset 20 – patch_resolution  f32
 //   offset 24 – world_bounds      vec4<f32>   (min_x, min_z, max_x, max_z)
 //   offset 40 – bounds_fade       vec4<f32>   (fade_distance, use_macro_color_map, flip_v, show_wireframe)
-//   offset 56 – clip_levels[0]    vec4<f32>
-//   offset 72 – clip_levels[1]    vec4<f32>
+//   offset 56 – debug_flags       vec4<f32>   (show_normals_only, _, _, _)
+//   offset 72 – clip_levels[0]    vec4<f32>
+//   offset 88 – clip_levels[1]    vec4<f32>
 //   …
-//   offset296 – clip_levels[15]   vec4<f32>
-//   Total: 312 bytes
+//   offset312 – clip_levels[15]   vec4<f32>
+//   Total: 328 bytes
 //
 // Each clip_levels entry: (origin_x, origin_z, inv_ring_span, texel_world_size)
 // Note: lighting data is NOT stored here — the fragment shader uses Bevy's
@@ -56,6 +57,10 @@ pub struct TerrainMaterialUniforms {
     /// Bounds/debug params:
     /// x = fade distance, y = use_macro_color, z = flip_v, w = show_wireframe.
     pub bounds_fade: Vec4,
+    /// Per-pixel debug toggles applied in the fragment shader.
+    /// x = show_normals_only (0 = normal shading, 1 = output `n*0.5+0.5` as colour).
+    /// y, z, w = reserved.
+    pub debug_flags: Vec4,
     /// Per-LOD clipmap data: (origin_x, origin_z, inv_ring_span, texel_world_size).
     /// Indexed by LOD level (0 = finest).  Unused entries are zero.
     pub clip_levels: [Vec4; MAX_SUPPORTED_CLIPMAP_LEVELS],

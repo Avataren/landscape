@@ -35,6 +35,7 @@ struct TerrainParams {
     patch_resolution:   f32,
     world_bounds:       vec4<f32>,
     bounds_fade:        vec4<f32>, // x = fade dist, y = use_macro_color, z = flip_v, w = show_wireframe
+    debug_flags:        vec4<f32>, // x = show_normals_only, yzw reserved
     clip_levels: array<vec4<f32>, 16>,
 }
 
@@ -190,6 +191,14 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     let n_fine     = pixel_normal(in.lod_level, frag_xz);
     let n_coarse   = pixel_normal(coarse_lod,   frag_xz);
     let n          = normalize(mix(n_fine, n_coarse, in.morph_alpha));
+
+    // --- Debug: render normals as colour and skip lighting/material ---
+    // X+ → red, Y+ → green (mostly green for upward-facing terrain),
+    // Z+ → blue.  Output is pre-tonemap so atmosphere/bloom may still tint
+    // it slightly, but the dominant channel mapping is preserved.
+    if terrain.debug_flags.x > 0.5 {
+        return vec4<f32>(n * 0.5 + vec3<f32>(0.5), 1.0);
+    }
 
     // --- Albedo ---
     let slope  = 1.0 - abs(dot(n, vec3<f32>(0.0, 1.0, 0.0)));
