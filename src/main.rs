@@ -168,10 +168,8 @@ fn camera_move(
     };
     let dt = time.delta_secs();
 
-    // Project camera forward/right onto XZ so WASD always moves horizontally.
-    let fwd3: Vec3 = t.forward().into();
-    let forward = Vec3::new(fwd3.x, 0.0, fwd3.z).normalize_or_zero();
-    let right = Vec3::new(-fwd3.z, 0.0, fwd3.x); // 90° CCW = right-hand cross(fwd, Y)
+    let forward: Vec3 = t.forward().into();
+    let right: Vec3   = t.right().into();
 
     if keys.pressed(KeyCode::KeyW) {
         t.translation += forward * speed * dt;
