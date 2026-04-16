@@ -13,6 +13,25 @@ use bevy::{
     shader::ShaderRef,
 };
 
+/// Maximum material slots exposed to the shader.  Matches the size of
+/// `TerrainParams.slots` in the WGSL shaders and the practical cap called out
+/// in material_system.md §1 ("8 slots = 2 splatmaps").
+pub const MAX_SHADER_MATERIAL_SLOTS: usize = 8;
+
+/// Per-slot data uploaded to the fragment shader for the procedural baseline
+/// blend.  No texture handles yet — that comes once the texture arrays are
+/// introduced (§12 step 1 "texture arrays" phase).
+///
+/// Layout (std140 uniform):
+///   offset  0 – tint_vis  vec4   (rgb = tint, a = visibility 0/1)
+///   offset 16 – ranges    vec4   (x = alt_min, y = alt_max, z = slope_min°, w = slope_max°)
+///   Total: 32 bytes, naturally 16-aligned.
+#[derive(Clone, Copy, Debug, Default, ShaderType)]
+pub struct MaterialSlotGpu {
+    pub tint_vis: Vec4,
+    pub ranges: Vec4,
+}
+
 // ---------------------------------------------------------------------------
 // Uniform struct — must match TerrainParams in all three WGSL shaders exactly.
 //
@@ -64,6 +83,14 @@ pub struct TerrainMaterialUniforms {
     /// Per-LOD clipmap data: (origin_x, origin_z, inv_ring_span, texel_world_size).
     /// Indexed by LOD level (0 = finest).  Unused entries are zero.
     pub clip_levels: [Vec4; MAX_SUPPORTED_CLIPMAP_LEVELS],
+    /// Material slot header: x = active slot count, yzw = reserved.
+    ///
+    /// Packed as a `Vec4` so the following `slots` array sits on a natural
+    /// 16-byte boundary — matches the WGSL std140 layout without manual
+    /// padding tricks.
+    pub slot_header: Vec4,
+    /// Per-slot procedural blend data.  Unused entries have `visibility = 0`.
+    pub slots: [MaterialSlotGpu; MAX_SHADER_MATERIAL_SLOTS],
 }
 
 // ---------------------------------------------------------------------------

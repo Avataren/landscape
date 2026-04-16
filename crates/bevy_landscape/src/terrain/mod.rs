@@ -6,6 +6,7 @@ pub mod config;
 pub mod debug;
 pub mod macro_color;
 pub mod material;
+pub mod material_slots;
 pub mod math;
 pub mod patch_mesh;
 pub mod physics_colliders;
@@ -37,6 +38,7 @@ use components::TerrainCamera;
 use config::TerrainConfig;
 use macro_color::load_macro_color_texture;
 use material::{TerrainMaterial, TerrainMaterialUniforms};
+use material_slots::{sync_material_library_to_terrain_material, MaterialLibrary};
 use math::{compute_needed_tiles_for_level, level_scale, snap_camera_to_level_grid};
 use physics_colliders::{spawn_coarse_global_heightfield, sync_tile_colliders, TileColliders};
 use render::{gpu_types::PatchDescriptorGpu, TerrainRenderPlugin};
@@ -102,6 +104,7 @@ impl Plugin for TerrainPlugin {
             .init_resource::<TileColliders>()
             .init_resource::<PatchEntities>()
             .init_resource::<TerrainClipmapUploads>()
+            .init_resource::<MaterialLibrary>()
             // Startup
             .add_systems(Startup, (setup_tile_channel, setup_terrain).chain())
             .add_systems(PostStartup, preload_terrain_startup)
@@ -132,6 +135,9 @@ impl Plugin for TerrainPlugin {
                     .after(update_terrain_view_state),
             )
             .add_systems(Update, sync_tile_colliders.after(apply_tiles_to_clipmap))
+            // Mirror the authoring-side MaterialLibrary into the GPU material.
+            // Runs after setup_terrain (Startup) so the material handle exists.
+            .add_systems(Update, sync_material_library_to_terrain_material)
             // Render sub-plugin
             .add_plugins(TerrainRenderPlugin);
     }
@@ -396,6 +402,7 @@ fn setup_terrain(
     mut images: ResMut<Assets<Image>>,
     mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     mut patch_entities: ResMut<PatchEntities>,
+    mut material_library: ResMut<MaterialLibrary>,
     mut commands: Commands,
 ) {
     let levels = config.active_clipmap_levels();
@@ -411,6 +418,9 @@ fn setup_terrain(
     let normal_handle = images.add(normal_image);
     let macro_color = load_macro_color_texture(&config, &desc);
     let macro_color_handle = images.add(macro_color.image);
+    // Record whether the macro color texture was actually loaded so the
+    // Materials panel can gate its "macro color override" toggle on it.
+    material_library.macro_color_loaded = macro_color.enabled;
 
     let base_patch_size = config.patch_resolution as f32 * config.world_scale;
     let bounds_fade_distance = config.tile_size as f32 * config.world_scale * 4.0;
@@ -471,12 +481,21 @@ fn setup_terrain(
             ),
             bounds_fade: Vec4::new(
                 bounds_fade_distance,
-                if macro_color.enabled { 1.0 } else { 0.0 },
+                // Macro color override starts off — the procedural library
+                // drives albedo by default.  The Materials panel toggles this
+                // via `MaterialLibrary::use_macro_color_override`; the sync
+                // system writes the final value each time the library changes.
+                0.0,
                 if config.macro_color_flip_v { 1.0 } else { 0.0 },
                 0.0,
             ),
             debug_flags: Vec4::ZERO,
             clip_levels: compute_initial_clip_levels(&config),
+            // Slot data is filled in on the first Update tick by
+            // sync_material_library_to_terrain_material.  Until then, the
+            // shader falls back to the built-in procedural palette (count == 0).
+            slot_header: Vec4::ZERO,
+            slots: [material::MaterialSlotGpu::default(); material::MAX_SHADER_MATERIAL_SLOTS],
         },
     });
     patch_entities.material_handle = mat_handle.clone();

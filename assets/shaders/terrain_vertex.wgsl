@@ -18,6 +18,11 @@
 // clip_levels[L] = (origin_x, origin_z, inv_ring_span, texel_world_size)
 // ---------------------------------------------------------------------------
 
+struct MaterialSlotGpu {
+    tint_vis: vec4<f32>,
+    ranges:   vec4<f32>,
+}
+
 struct TerrainParams {
     height_scale:       f32,
     base_patch_size:    f32,   // patch_resolution * world_scale (LOD-0 patch side)
@@ -29,6 +34,8 @@ struct TerrainParams {
     bounds_fade:        vec4<f32>, // x = fade distance, y = use_macro_color, z = flip_v, w = show_wireframe
     debug_flags:        vec4<f32>, // x = show_normals_only, yzw reserved
     clip_levels: array<vec4<f32>, 16>,
+    slot_header: vec4<f32>,
+    slots:       array<MaterialSlotGpu, 8>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var height_tex:  texture_2d_array<f32>;

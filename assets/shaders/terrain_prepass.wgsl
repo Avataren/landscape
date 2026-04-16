@@ -11,6 +11,11 @@
     prepass_io::{Vertex, VertexOutput},
 }
 
+struct MaterialSlotGpu {
+    tint_vis: vec4<f32>,
+    ranges:   vec4<f32>,
+}
+
 struct TerrainParams {
     height_scale:       f32,
     base_patch_size:    f32,
@@ -22,6 +27,8 @@ struct TerrainParams {
     bounds_fade:        vec4<f32>,
     debug_flags:        vec4<f32>,
     clip_levels: array<vec4<f32>, 16>,
+    slot_header: vec4<f32>,
+    slots:       array<MaterialSlotGpu, 8>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var height_tex:  texture_2d_array<f32>;

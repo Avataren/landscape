@@ -26,6 +26,11 @@
 }
 
 // Must match TerrainMaterialUniforms in material.rs exactly.
+struct MaterialSlotGpu {
+    tint_vis: vec4<f32>,   // rgb = tint, a = visibility (0/1)
+    ranges:   vec4<f32>,   // x = alt_min, y = alt_max, z = slope_min°, w = slope_max°
+}
+
 struct TerrainParams {
     height_scale:       f32,
     base_patch_size:    f32,
@@ -37,6 +42,8 @@ struct TerrainParams {
     bounds_fade:        vec4<f32>, // x = fade dist, y = use_macro_color, z = flip_v, w = show_wireframe
     debug_flags:        vec4<f32>, // x = show_normals_only, yzw reserved
     clip_levels: array<vec4<f32>, 16>,
+    slot_header: vec4<f32>,                     // x = slot count
+    slots:       array<MaterialSlotGpu, 8>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var height_tex:  texture_2d_array<f32>;
@@ -70,6 +77,55 @@ fn procedural_albedo(slope: f32, h_norm: f32) -> vec3<f32> {
     c     = mix(c,    rock,  smoothstep(0.30, 0.52, slope));
     c     = mix(c,    snow,  smoothstep(0.62, 0.82, h_norm));
     return c;
+}
+
+// Smooth band weight — 1 inside [lo, hi], falling off over `fade` on either side.
+// Used to drive altitude / slope masks without hard edges.
+fn band(v: f32, lo: f32, hi: f32, fade: f32) -> f32 {
+    let lo_w = smoothstep(lo - fade, lo + fade, v);
+    let hi_w = 1.0 - smoothstep(hi - fade, hi + fade, v);
+    return clamp(lo_w * hi_w, 0.0, 1.0);
+}
+
+// Blend the active material slots procedurally by altitude + slope.
+// Weights are `visibility × altitude_band × slope_band`, then normalised.
+// When the sum is negligible the caller's fallback colour is returned
+// unchanged so the terrain never goes black during the first-frame warmup
+// before the library sync system writes real data.
+fn material_library_albedo(
+    world_y:   f32,
+    slope_deg: f32,
+    fallback:  vec3<f32>,
+) -> vec3<f32> {
+    let count = u32(terrain.slot_header.x);
+    if count == 0u {
+        return fallback;
+    }
+
+    // Fade bands: ~5 % of terrain height-scale for altitude, 3° for slope.
+    let alt_fade   = max(terrain.height_scale * 0.05, 1.0);
+    let slope_fade = 3.0;
+
+    var sum_col    = vec3<f32>(0.0);
+    var sum_weight = 0.0;
+
+    for (var i: u32 = 0u; i < count; i = i + 1u) {
+        let slot = terrain.slots[i];
+        let vis  = slot.tint_vis.w;
+        if vis <= 0.0 {
+            continue;
+        }
+        let w_alt   = band(world_y,   slot.ranges.x, slot.ranges.y, alt_fade);
+        let w_slope = band(slope_deg, slot.ranges.z, slot.ranges.w, slope_fade);
+        let w       = vis * w_alt * w_slope;
+        sum_col     = sum_col + slot.tint_vis.rgb * w;
+        sum_weight  = sum_weight + w;
+    }
+
+    if sum_weight < 1e-4 {
+        return fallback;
+    }
+    return sum_col / sum_weight;
 }
 
 fn in_world_bounds(world_xz: vec2<f32>) -> bool {
@@ -201,10 +257,16 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     }
 
     // --- Albedo ---
-    let slope  = 1.0 - abs(dot(n, vec3<f32>(0.0, 1.0, 0.0)));
-    let h_norm = clamp(in.world_pos.y / terrain.height_scale, 0.0, 1.0);
+    // `slope` = sin(angle_from_horizontal) = 1 - |n·up|.  The material library
+    // uses the angle in degrees so rules like "rock above 28°" read naturally.
+    let slope     = 1.0 - abs(dot(n, vec3<f32>(0.0, 1.0, 0.0)));
+    let slope_deg = degrees(asin(clamp(slope, 0.0, 1.0)));
+    let h_norm    = clamp(in.world_pos.y / terrain.height_scale, 0.0, 1.0);
 
-    var albedo = procedural_albedo(slope, h_norm);
+    // Fallback used when the material library is empty (count == 0) or all
+    // slots have zero weight at this fragment.  Keeps the terrain visible.
+    let fallback = procedural_albedo(slope, h_norm);
+    var albedo   = material_library_albedo(in.world_pos.y, slope_deg, fallback);
     if terrain.bounds_fade.y > 0.5 {
         // textureSample (not textureSampleLevel) lets the GPU pick the correct
         // mip based on screen-space derivatives — better antialiasing at distance.
