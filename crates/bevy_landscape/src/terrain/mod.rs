@@ -40,7 +40,7 @@ use macro_color::load_macro_color_texture;
 use material::{TerrainMaterial, TerrainMaterialUniforms};
 use material_slots::{sync_material_library_to_terrain_material, MaterialLibrary};
 use math::{compute_needed_tiles_for_level, level_scale, snap_camera_to_level_grid};
-use physics_colliders::{spawn_coarse_global_heightfield, sync_tile_colliders, TileColliders};
+use physics_colliders::spawn_global_heightfield;
 use render::{gpu_types::PatchDescriptorGpu, TerrainRenderPlugin};
 use residency::update_required_tiles;
 use resources::{TerrainResidency, TerrainStreamQueue, TerrainViewState, TileKey, TileState};
@@ -101,7 +101,6 @@ impl Plugin for TerrainPlugin {
             .init_resource::<TerrainResidency>()
             .init_resource::<TerrainStreamQueue>()
             .init_resource::<TerrainCollisionCache>()
-            .init_resource::<TileColliders>()
             .init_resource::<PatchEntities>()
             .init_resource::<TerrainClipmapUploads>()
             .init_resource::<MaterialLibrary>()
@@ -110,7 +109,7 @@ impl Plugin for TerrainPlugin {
             .add_systems(PostStartup, preload_terrain_startup)
             .add_systems(
                 PostStartup,
-                spawn_coarse_global_heightfield.after(preload_terrain_startup),
+                spawn_global_heightfield.after(preload_terrain_startup),
             )
             // Update: ordered as per handoff spec
             .add_systems(First, begin_terrain_upload_frame)
@@ -134,9 +133,6 @@ impl Plugin for TerrainPlugin {
                     .after(update_clipmap_textures)
                     .after(update_terrain_view_state),
             )
-            .add_systems(Update, sync_tile_colliders.after(apply_tiles_to_clipmap))
-            // Mirror the authoring-side MaterialLibrary into the GPU material.
-            // Runs after setup_terrain (Startup) so the material handle exists.
             .add_systems(Update, sync_material_library_to_terrain_material)
             // Render sub-plugin
             .add_plugins(TerrainRenderPlugin);

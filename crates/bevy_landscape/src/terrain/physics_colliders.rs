@@ -3,174 +3,124 @@ use bevy::prelude::*;
 use std::collections::HashMap;
 
 use crate::terrain::{
-    collision::TerrainCollisionCache,
     config::TerrainConfig,
-    resources::{HeightTileCpu, TerrainResidency, TileKey},
+    resources::TileKey,
+    streamer::load_tile_data,
     world_desc::TerrainSourceDesc,
 };
 
 // ---------------------------------------------------------------------------
-// Resource
+// Single static world heightfield
 // ---------------------------------------------------------------------------
 
-/// Tracks the physics collider entity for each resident LOD-0 tile.
+/// Spawns one heightfield collider that covers the entire terrain footprint.
 ///
-/// Spawned and despawned in lockstep with `TerrainResidency::resident_cpu`.
-/// Wherever the game has LOD-0 terrain data, physics has matching collision.
+/// Reads LOD tiles directly from disk at startup (no streaming dependency),
+/// so the result is seamless — there are no per-tile boundaries for physics
+/// objects to get stuck on.  The collider is never rebuilt or despawned.
 ///
-/// Note on stability: tile collider lifetime is camera-driven.  Objects far
-/// from the camera will lose their fine tile collider when the tile evicts, but
-/// the coarse global heightfield (Phase 2) acts as a permanent floor of last
-/// resort so they won't fall into the void.
-#[derive(Resource, Default)]
-pub struct TileColliders {
-    entities: HashMap<TileKey, Entity>,
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/// Resamples a CPU tile into the height grid expected by `Collider::heightfield`.
-///
-/// Avian3d convention: `heights[xi][zi]` where xi = X axis, zi = Z axis.
-/// Tile data convention: `data[row * tile_size + col]` where row = Z, col = X.
-///
-/// `resolution` is the number of sample points per axis (e.g. 64 → 4 m/cell
-/// for a 256-texel tile at world_scale = 1.0).
-fn build_tile_heightfield(
-    tile: &HeightTileCpu,
-    height_scale: f32,
-    resolution: usize,
-) -> (Vec<Vec<f32>>, Vec3) {
-    let ts = tile.tile_size as usize;
-    let step = ts / resolution;
-
-    let heights: Vec<Vec<f32>> = (0..resolution)
-        .map(|xi| {
-            (0..resolution)
-                .map(|zi| tile.data[(zi * step) * ts + (xi * step)] * height_scale)
-                .collect()
-        })
-        .collect();
-
-    // scale.x/z = world-space extent; scale.y = 1.0 (heights already in metres).
-    let tile_world = tile.tile_size as f32; // world_scale = 1.0 m/texel
-    (heights, Vec3::new(tile_world, 1.0, tile_world))
-}
-
-// ---------------------------------------------------------------------------
-// Phase 1 — per-tile heightfield sync
-// ---------------------------------------------------------------------------
-
-/// Spawns heightfield colliders for newly-resident LOD-0 tiles and despawns
-/// colliders for evicted tiles.
-///
-/// Must run after `apply_tiles_to_clipmap` so that `resident_cpu` has been
-/// updated with any tiles that arrived from the background stream this frame.
-pub fn sync_tile_colliders(
-    residency: Res<TerrainResidency>,
-    config: Res<TerrainConfig>,
-    mut colliders: ResMut<TileColliders>,
-    mut commands: Commands,
-) {
-    // Spawn colliders for newly resident LOD-0 tiles.
-    for (key, tile) in &residency.resident_cpu {
-        if key.level != 0 {
-            continue;
-        }
-        if colliders.entities.contains_key(key) {
-            continue;
-        }
-
-        let (heights, scale) = build_tile_heightfield(tile, config.height_scale, 64);
-
-        // World-space centre of tile (key.x, key.y).
-        let tile_world = tile.tile_size as f32;
-        let cx = key.x as f32 * tile_world + tile_world * 0.5;
-        let cz = key.y as f32 * tile_world + tile_world * 0.5;
-
-        let entity = commands
-            .spawn((
-                RigidBody::Static,
-                Collider::heightfield(heights, scale),
-                Transform::from_xyz(cx, 0.0, cz),
-            ))
-            .id();
-
-        colliders.entities.insert(*key, entity);
-    }
-
-    // Despawn colliders whose tiles were evicted.
-    colliders.entities.retain(|key, entity| {
-        if residency.resident_cpu.contains_key(key) {
-            true
-        } else {
-            commands.entity(*entity).despawn();
-            false
-        }
-    });
-}
-
-// ---------------------------------------------------------------------------
-// Phase 2 — coarse full-world fallback
-// ---------------------------------------------------------------------------
-
-/// Spawns a single low-resolution heightfield that covers the entire terrain
-/// footprint.  Acts as a permanent floor of last resort while fine tile
-/// colliders stream in, and for physics objects whose tiles get evicted as the
-/// camera moves away.  Never despawned.
-///
-/// Runs once in PostStartup after `preload_terrain_startup` so the collision
-/// cache is already populated with the starting area's data.
-pub fn spawn_coarse_global_heightfield(
+/// Resolution: `SOURCE_MIP_LEVEL` controls which pre-baked mip is used.
+/// Level 3 = 8 m/cell for world_scale = 1.0.  For a 16 384 m world this
+/// produces a 2 049 × 2 049 heightfield from 64 tile reads (~8 MB), which
+/// is fast, seamless, and accurate enough for both characters and projectiles.
+/// Lower this value (e.g. 2 → 4 m/cell, 256 tile reads) for more precision.
+pub fn spawn_global_heightfield(
     desc: Res<TerrainSourceDesc>,
-    cache: Res<TerrainCollisionCache>,
+    config: Res<TerrainConfig>,
     mut commands: Commands,
 ) {
-    let world_min = desc.world_min;
-    let world_max = desc.world_max;
-    let world_size = world_max - world_min;
+    let world_size_x = desc.world_max.x - desc.world_min.x;
+    let world_size_z = desc.world_max.y - desc.world_min.y;
 
-    if world_size.x <= 0.0 || world_size.y <= 0.0 {
-        warn!("[Terrain] Coarse heightfield skipped: world bounds not set.");
+    if world_size_x <= 0.0 || world_size_z <= 0.0 {
+        warn!("[Terrain] Global heightfield skipped: world bounds not set.");
         return;
     }
 
-    // 32 m/cell — coarse enough to be cheap, fine enough to catch steep slopes.
-    const CELL_SIZE: f32 = 32.0;
+    // Pick a mip level.  Level 3 = 8 m/cell for world_scale = 1.0.
+    // Change to 2 for 4 m/cell (same as the old per-tile resolution).
+    const SOURCE_MIP_LEVEL: u8 = 3;
+    let source_level = SOURCE_MIP_LEVEL.min(desc.max_mip_level);
+    let cell_size = config.world_scale * (1u32 << source_level as u32) as f32;
+    let level_tile_world = config.tile_size as f32 * cell_size;
 
-    let nx = (world_size.x / CELL_SIZE).ceil() as usize + 1;
-    let nz = (world_size.y / CELL_SIZE).ceil() as usize + 1;
+    let nx = (world_size_x / cell_size).round() as usize + 1;
+    let nz = (world_size_z / cell_size).round() as usize + 1;
 
-    let actual_size_x = (nx - 1) as f32 * CELL_SIZE;
-    let actual_size_z = (nz - 1) as f32 * CELL_SIZE;
+    // Cache tile data indexed by (tile_x, tile_z) to avoid re-reading files.
+    let mut tile_cache: HashMap<(i32, i32), Vec<f32>> = HashMap::default();
 
-    // heights[xi][zi]: outer = X axis, inner = Z axis (Avian3d convention).
+    // heights[xi][zi] — Avian3d convention: outer = X axis, inner = Z axis.
     let heights: Vec<Vec<f32>> = (0..nx)
         .map(|xi| {
             (0..nz)
                 .map(|zi| {
-                    let wx = world_min.x + xi as f32 * CELL_SIZE;
-                    let wz = world_min.y + zi as f32 * CELL_SIZE;
-                    cache.sample_height(Vec2::new(wx, wz)).unwrap_or(0.0)
+                    // World position for this sample, clamped so we never
+                    // request a tile that lies exactly on the far boundary.
+                    let wx = (desc.world_min.x + xi as f32 * cell_size)
+                        .min(desc.world_max.x - cell_size * 0.5);
+                    let wz = (desc.world_min.y + zi as f32 * cell_size)
+                        .min(desc.world_max.y - cell_size * 0.5);
+
+                    let tx = (wx / level_tile_world).floor() as i32;
+                    let tz = (wz / level_tile_world).floor() as i32;
+
+                    let data = tile_cache.entry((tx, tz)).or_insert_with(|| {
+                        load_tile_data(
+                            TileKey {
+                                level: source_level,
+                                x: tx,
+                                y: tz,
+                            },
+                            config.tile_size,
+                            config.world_scale,
+                            1.0, // height_scale applied below; not used for disk tiles
+                            desc.max_mip_level,
+                            desc.tile_root.as_deref(),
+                            None, // normals not needed
+                            Some((desc.world_min, desc.world_max)),
+                            false, // no procedural fallback
+                        )
+                        .data
+                    });
+
+                    // Direct texel lookup — exact because sample spacing equals
+                    // texel spacing when cell_size == world_scale * (1 << level).
+                    let local_x = ((wx - tx as f32 * level_tile_world) / cell_size)
+                        .round()
+                        .clamp(0.0, (config.tile_size - 1) as f32)
+                        as usize;
+                    let local_z = ((wz - tz as f32 * level_tile_world) / cell_size)
+                        .round()
+                        .clamp(0.0, (config.tile_size - 1) as f32)
+                        as usize;
+
+                    data[local_z * config.tile_size as usize + local_x] * config.height_scale
                 })
                 .collect()
         })
         .collect();
 
-    let center_x = world_min.x + actual_size_x * 0.5;
-    let center_z = world_min.y + actual_size_z * 0.5;
+    let scale_x = (nx - 1) as f32 * cell_size;
+    let scale_z = (nz - 1) as f32 * cell_size;
+    // Centre the heightfield over the world.
+    let cx = desc.world_min.x + scale_x * 0.5;
+    let cz = desc.world_min.y + scale_z * 0.5;
 
     commands.spawn((
         RigidBody::Static,
-        Collider::heightfield(heights, Vec3::new(actual_size_x, 1.0, actual_size_z)),
-        Transform::from_xyz(center_x, 0.0, center_z),
+        Collider::heightfield(heights, Vec3::new(scale_x, 1.0, scale_z)),
+        Transform::from_xyz(cx, 0.0, cz),
     ));
 
     info!(
-        "[Terrain] Coarse global heightfield: {}×{} samples at {:.0}m/cell, \
-         {:.0}m×{:.0}m coverage.",
-        nx, nz, CELL_SIZE, actual_size_x, actual_size_z
+        "[Terrain] Global heightfield: {}×{} samples at {:.0} m/cell, \
+         {:.0}×{:.0} m coverage ({} tiles read).",
+        nx,
+        nz,
+        cell_size,
+        scale_x,
+        scale_z,
+        tile_cache.len(),
     );
 }
