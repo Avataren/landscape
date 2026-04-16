@@ -18,6 +18,7 @@ use bevy::{
     window::PrimaryWindow,
 };
 use bevy_landscape::{TerrainCamera, TerrainConfig, TerrainDebugPlugin, TerrainPlugin, TerrainSourceDesc};
+use bevy_landscape_editor::LandscapeEditorPlugin;
 use player::{CameraMode, PlayerPlugin};
 
 const WINDOW_TITLE: &str = "Landscape Renderer";
@@ -81,6 +82,7 @@ fn main() {
             },
         })
         .add_plugins(TerrainDebugPlugin)
+        .add_plugins(LandscapeEditorPlugin)
         .add_plugins(PlayerPlugin)
         .add_systems(Startup, setup_scene)
         .add_systems(Update, (camera_move, camera_look).chain())
