@@ -3,6 +3,7 @@ use crate::terrain::{
     material::TerrainMaterial,
     math::level_scale,
     resources::{HeightTileCpu, TerrainResidency, TerrainViewState, TileKey, TileState},
+    world_desc::TerrainSourceDesc,
 };
 use bevy::{
     asset::RenderAssetUsages,
@@ -152,11 +153,15 @@ fn bytes_per_layer(res: u32, bytes_per_texel: usize) -> usize {
 /// refines individual layers when clip centres change.
 pub fn create_initial_clipmap_texture(config: &TerrainConfig) -> Image {
     let res = config.clipmap_resolution();
-    let layers = config.active_clipmap_levels();
+    let active_levels = config.active_clipmap_levels();
+    // Always allocate the full maximum number of layers so the GPU texture array
+    // never needs to be recreated when hot-reloading terrains with different mip
+    // level counts.  Layers beyond active_levels stay zero-filled.
+    let max_layers = MAX_SUPPORTED_CLIPMAP_LEVELS as u32;
     let bpl = bytes_per_layer(res, HEIGHT_BYTES_PER_TEXEL);
-    let mut data = vec![0u8; bpl * layers as usize];
+    let mut data = vec![0u8; bpl * max_layers as usize];
 
-    for level in 0..layers {
+    for level in 0..active_levels {
         let scale = level_scale(config.world_scale, level);
         let layer_data = generate_clipmap_layer(
             IVec2::ZERO,
@@ -174,7 +179,7 @@ pub fn create_initial_clipmap_texture(config: &TerrainConfig) -> Image {
         Extent3d {
             width: res,
             height: res,
-            depth_or_array_layers: layers,
+            depth_or_array_layers: max_layers,
         },
         TextureDimension::D2,
         data,
@@ -198,11 +203,12 @@ pub fn create_initial_clipmap_texture(config: &TerrainConfig) -> Image {
 
 pub fn create_initial_normal_clipmap_texture(config: &TerrainConfig) -> Image {
     let res = config.clipmap_resolution();
-    let layers = config.active_clipmap_levels();
+    let active_levels = config.active_clipmap_levels();
+    let max_layers = MAX_SUPPORTED_CLIPMAP_LEVELS as u32;
     let bpl = bytes_per_layer(res, NORMAL_BYTES_PER_TEXEL);
-    let mut data = vec![0u8; bpl * layers as usize];
+    let mut data = vec![0u8; bpl * max_layers as usize];
 
-    for level in 0..layers {
+    for level in 0..active_levels {
         let scale = level_scale(config.world_scale, level);
         let layer_data = generate_normal_clipmap_layer(
             IVec2::ZERO,
@@ -219,7 +225,7 @@ pub fn create_initial_normal_clipmap_texture(config: &TerrainConfig) -> Image {
         Extent3d {
             width: res,
             height: res,
-            depth_or_array_layers: layers,
+            depth_or_array_layers: max_layers,
         },
         TextureDimension::D2,
         data,
@@ -530,6 +536,33 @@ fn tile_window_intersection(
     let rect_max = tile_max.min(clip_center + IVec2::splat(half));
 
     (rect_min.x < rect_max.x && rect_min.y < rect_max.y).then_some((rect_min, rect_max))
+}
+
+fn clip_window_touches_world_bounds(
+    clip_center: IVec2,
+    res: u32,
+    scale: f32,
+    world_min: Vec2,
+    world_max: Vec2,
+) -> bool {
+    if !world_max.cmpgt(world_min).all() {
+        return false;
+    }
+
+    let half = res as f32 * 0.5;
+    let min_sample = Vec2::new(
+        (clip_center.x as f32 - half + 0.5) * scale,
+        (clip_center.y as f32 - half + 0.5) * scale,
+    );
+    let max_sample = Vec2::new(
+        (clip_center.x as f32 + half - 0.5) * scale,
+        (clip_center.y as f32 + half - 0.5) * scale,
+    );
+
+    min_sample.x < world_min.x
+        || min_sample.y < world_min.y
+        || max_sample.x >= world_max.x
+        || max_sample.y >= world_max.y
 }
 
 // ---------------------------------------------------------------------------
@@ -1114,6 +1147,7 @@ pub fn update_clipmap_textures(
 ///   3. Update `tile_apply_centers` so we skip the work on unchanged frames.
 pub fn apply_tiles_to_clipmap(
     config: Res<TerrainConfig>,
+    desc: Res<TerrainSourceDesc>,
     view: Res<TerrainViewState>,
     mut state: Option<ResMut<TerrainClipmapState>>,
     mut uploads: ResMut<TerrainClipmapUploads>,
@@ -1158,6 +1192,26 @@ pub fn apply_tiles_to_clipmap(
     let res = config.clipmap_resolution();
     let height_bpl = bytes_per_layer(res, HEIGHT_BYTES_PER_TEXEL);
     let normal_bpl = bytes_per_layer(res, NORMAL_BYTES_PER_TEXEL);
+    // Incremental strip updates assume existing texels remain valid after a pure
+    // translation. That breaks once a clip window grazes terrain bounds: edge
+    // texels can legitimately hold out-of-bounds zeros, and after the toroidal
+    // window scrolls those stale zeros can drift into the interior. Rebuild any
+    // bound-touching level from resident tiles instead of strip-patching it.
+    let force_full_levels: std::collections::HashSet<usize> = if centers_changed {
+        (0..levels)
+            .filter(|&lod| {
+                let center = view.clip_centers.get(lod).copied().unwrap_or(IVec2::ZERO);
+                let scale = view
+                    .level_scales
+                    .get(lod)
+                    .copied()
+                    .unwrap_or_else(|| level_scale(config.world_scale, lod as u32));
+                clip_window_touches_world_bounds(center, res, scale, desc.world_min, desc.world_max)
+            })
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
     let mut dirty_levels = std::collections::HashSet::new();
     // If eviction removed cached tiles, stale texels can remain in the clipmap.
     // Rebuild each layer from fallback once, then re-apply resident tiles.
@@ -1231,7 +1285,7 @@ pub fn apply_tiles_to_clipmap(
             };
             let layer_base = level * height_bpl;
 
-            if needs_rebuild || new_tile_keys.contains(&key) {
+            if needs_rebuild || force_full_levels.contains(&level) || new_tile_keys.contains(&key) {
                 write_height_tile_window(
                     &mut state.height_cpu_data,
                     layer_base,
@@ -1268,7 +1322,7 @@ pub fn apply_tiles_to_clipmap(
             };
             let layer_base = level * normal_bpl;
 
-            if needs_rebuild || new_tile_keys.contains(&key) {
+            if needs_rebuild || force_full_levels.contains(&level) || new_tile_keys.contains(&key) {
                 write_normal_tile_window(
                     &mut state.normal_cpu_data,
                     layer_base,
@@ -1317,9 +1371,30 @@ pub fn apply_tiles_to_clipmap(
         }
     } else if centers_changed {
         for &lod in &dirty_levels {
+            let height_layer_offset = lod * height_bpl;
+            let normal_layer_offset = lod * normal_bpl;
+            if force_full_levels.contains(&lod) {
+                queue_full_layer_upload(
+                    &mut uploads,
+                    &state.height_texture_handle,
+                    lod as u32,
+                    &state.height_cpu_data[height_layer_offset..height_layer_offset + height_bpl],
+                    res,
+                    HEIGHT_BYTES_PER_TEXEL,
+                );
+                queue_full_layer_upload(
+                    &mut uploads,
+                    &state.normal_texture_handle,
+                    lod as u32,
+                    &state.normal_cpu_data[normal_layer_offset..normal_layer_offset + normal_bpl],
+                    res,
+                    NORMAL_BYTES_PER_TEXEL,
+                );
+                continue;
+            }
+
             let new_center = view.clip_centers.get(lod).copied().unwrap_or(IVec2::ZERO);
             let old_center = state.tile_apply_centers[lod];
-            let height_layer_offset = lod * height_bpl;
             queue_new_strip_uploads(
                 &mut uploads,
                 &state.height_texture_handle,
@@ -1330,8 +1405,6 @@ pub fn apply_tiles_to_clipmap(
                 new_center,
                 old_center,
             );
-
-            let normal_layer_offset = lod * normal_bpl;
             queue_new_strip_uploads(
                 &mut uploads,
                 &state.normal_texture_handle,
@@ -1351,6 +1424,9 @@ pub fn apply_tiles_to_clipmap(
         };
         let level = tile.key.level as usize;
         if level >= levels {
+            continue;
+        }
+        if needs_rebuild || force_full_levels.contains(&level) {
             continue;
         }
         let Some(&clip_center) = view.clip_centers.get(level) else {
@@ -1386,4 +1462,32 @@ pub fn apply_tiles_to_clipmap(
 
     state.tile_apply_centers = view.clip_centers.clone();
     residency.evict_to_budget(config.max_resident_tiles);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clip_window_touches_world_bounds;
+    use bevy::prelude::{IVec2, Vec2};
+
+    #[test]
+    fn clip_window_inside_bounds_does_not_force_full_reapply() {
+        assert!(!clip_window_touches_world_bounds(
+            IVec2::ZERO,
+            512,
+            1.0,
+            Vec2::splat(-2048.0),
+            Vec2::splat(2048.0),
+        ));
+    }
+
+    #[test]
+    fn clip_window_touching_edge_forces_full_reapply() {
+        assert!(clip_window_touches_world_bounds(
+            IVec2::new(1793, 0),
+            512,
+            1.0,
+            Vec2::splat(-2048.0),
+            Vec2::splat(2048.0),
+        ));
+    }
 }

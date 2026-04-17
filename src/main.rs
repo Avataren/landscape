@@ -1,4 +1,3 @@
-mod app_config;
 mod player;
 
 use bevy::{
@@ -18,39 +17,41 @@ use bevy::{
     window::PrimaryWindow,
 };
 use bevy_landscape::{
-    TerrainCamera, TerrainConfig, TerrainDebugPlugin, TerrainPlugin, TerrainSourceDesc,
+    level::load_level, TerrainCamera, TerrainConfig, TerrainDebugPlugin, TerrainPlugin,
+    TerrainSourceDesc,
 };
-use bevy_landscape_editor::LandscapeEditorPlugin;
+use bevy_landscape_editor::{AppPreferences, LandscapeEditorPlugin};
 use player::{CameraMode, PlayerPlugin};
 
 const WINDOW_TITLE: &str = "Landscape Renderer";
 
 fn main() {
-    let cfg = app_config::load();
-
-    let terrain_config = {
-        let mut tc = TerrainConfig::default();
-        if let Some(v) = cfg.render.clipmap_levels {
-            tc.clipmap_levels = v;
-        }
-        if let Some(v) = cfg.render.world_scale {
-            assert!(v > 0.0, "terrain_config.world_scale must be > 0");
-            tc.world_scale = v;
-        }
-        if let Some(v) = cfg.render.height_scale {
-            tc.height_scale = v;
-        }
-        if let Some(v) = cfg.render.macro_color_flip_v {
-            tc.macro_color_flip_v = v;
-        }
-        // `world_scale` is intended to be a uniform world multiplier, not an
-        // X/Z-only spacing tweak, so fold it into the runtime height scale too.
-        tc.height_scale *= tc.world_scale;
-        tc
+    // Priority: --level arg > preferences default > empty editor (no terrain)
+    let level_arg = {
+        let args: Vec<String> = std::env::args().collect();
+        let pos = args.iter().position(|a| a == "--level");
+        pos.and_then(|i| args.get(i + 1)).cloned()
     };
+    let level_arg = level_arg.or_else(|| AppPreferences::load().default_level);
 
-    let world_min = cfg.source.world_min;
-    let world_max = cfg.source.world_max;
+    let (terrain_config, terrain_source) = if let Some(ref path) = level_arg {
+        match load_level(path) {
+            Ok(desc) => {
+                let (mut config, source, _library, _wmin, _wmax) = desc.into_runtime();
+                config.height_scale *= 1.0; // into_runtime already multiplies
+                (config, source)
+            }
+            Err(e) => {
+                eprintln!("Failed to load level '{path}': {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        // No level configured — start the editor with an empty flat terrain.
+        // Use File → Import Heightmap to load data, then Save Landscape and
+        // set it as the default level in the preferences to auto-load on startup.
+        (TerrainConfig::default(), TerrainSourceDesc::default())
+    };
 
     App::new()
         .insert_resource(ClearColor(Color::BLACK))
@@ -83,16 +84,7 @@ fn main() {
         )
         .add_plugins(TerrainPlugin {
             config: terrain_config,
-            source: TerrainSourceDesc {
-                tile_root: cfg.source.tile_root,
-                normal_root: cfg.source.normal_root,
-                macro_color_root: cfg.source.macro_color_root,
-                world_min,
-                world_max,
-                max_mip_level: cfg.source.max_mip_level,
-                collision_mip_level: cfg.source.collision_mip_level,
-                ..default()
-            },
+            source: terrain_source,
         })
         .add_plugins(TerrainDebugPlugin)
         .add_plugins(LandscapeEditorPlugin)

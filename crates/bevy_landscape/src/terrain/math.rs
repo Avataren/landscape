@@ -19,6 +19,25 @@ pub fn snap_camera_to_level_grid(camera_xz: Vec2, level_scale: f32) -> IVec2 {
     IVec2::new(gx, gy)
 }
 
+/// Snap the finest clipmap center to a grid that preserves exact L0/L1 nesting.
+///
+/// Without this, the finest level can move by one texel while the next-coarser
+/// hole only moves every two texels, which shifts the center seam by one world
+/// unit on odd positions and can present as a moving "bad chunk" or wall near
+/// the innermost LOD transition.
+pub fn snap_camera_to_nested_clipmap_grid(
+    camera_xz: Vec2,
+    base_level_scale: f32,
+    active_levels: u32,
+) -> IVec2 {
+    let fine = snap_camera_to_level_grid(camera_xz, base_level_scale);
+    if active_levels <= 1 {
+        return fine;
+    }
+
+    IVec2::new(fine.x & !1, fine.y & !1)
+}
+
 // ---------------------------------------------------------------------------
 // Ring patch layout
 // ---------------------------------------------------------------------------
@@ -152,6 +171,19 @@ mod tests {
 
         let c3 = snap_camera_to_level_grid(Vec2::new(4.1, 4.1), scale);
         assert_ne!(c1, c3);
+    }
+
+    #[test]
+    fn nested_snap_preserves_l0_l1_alignment() {
+        let c0 = snap_camera_to_nested_clipmap_grid(Vec2::new(0.1, 0.1), 1.0, 4);
+        let c1 = snap_camera_to_nested_clipmap_grid(Vec2::new(1.9, 1.9), 1.0, 4);
+        let c2 = snap_camera_to_nested_clipmap_grid(Vec2::new(2.1, 2.1), 1.0, 4);
+
+        assert_eq!(c0, IVec2::ZERO);
+        assert_eq!(c1, IVec2::ZERO);
+        assert_eq!(c2, IVec2::splat(2));
+        assert_eq!(c2.x.rem_euclid(2), 0);
+        assert_eq!(c2.y.rem_euclid(2), 0);
     }
 
     #[test]

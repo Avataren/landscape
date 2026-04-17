@@ -18,9 +18,7 @@
 //! ```
 
 use crate::terrain::{
-    config::TerrainConfig,
-    material_slots::MaterialLibrary,
-    world_desc::TerrainSourceDesc,
+    config::TerrainConfig, material_slots::MaterialLibrary, world_desc::TerrainSourceDesc,
 };
 use bevy::prelude::Vec2;
 use serde::{Deserialize, Serialize};
@@ -111,13 +109,21 @@ impl LevelDesc {
     /// World bounds are computed by scanning the tile directory (same logic as
     /// the startup config path).  They are returned separately because the
     /// caller must apply them to `TerrainSourceDesc` after construction.
-    pub fn into_runtime(self) -> (TerrainConfig, TerrainSourceDesc, MaterialLibrary, Vec2, Vec2) {
+    pub fn into_runtime(
+        self,
+    ) -> (
+        TerrainConfig,
+        TerrainSourceDesc,
+        MaterialLibrary,
+        Vec2,
+        Vec2,
+    ) {
         const TILE_SIZE: u32 = 256;
 
         let mut config = TerrainConfig::default();
         config.world_scale = self.world_scale;
         config.height_scale = self.height_scale * self.world_scale;
-        config.clipmap_levels = self.clipmap_levels;
+        config.clipmap_levels = self.clipmap_levels.min(self.max_mip_level as u32 + 1);
 
         let tile_root = self.tile_root.as_deref().map(PathBuf::from);
         let (world_min, world_max) = tile_root

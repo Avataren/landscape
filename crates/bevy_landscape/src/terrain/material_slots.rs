@@ -14,8 +14,8 @@
 //! lets the editor crate depend on `bevy_landscape` without pulling in any
 //! rendering specifics.
 
-use crate::terrain::material::{MaterialSlotGpu, TerrainMaterial, MAX_SHADER_MATERIAL_SLOTS};
 use crate::terrain::config::TerrainConfig;
+use crate::terrain::material::{MaterialSlotGpu, TerrainMaterial, MAX_SHADER_MATERIAL_SLOTS};
 use crate::terrain::PatchEntities;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};

@@ -52,6 +52,10 @@ pub struct HeightTileCpu {
     /// Row-major RG8Snorm XZ normals, [tile_size * tile_size] elements.
     pub normal_data: Vec<[u8; 2]>,
     pub tile_size: u32,
+    /// Reload generation this tile was requested for.  Tiles with a stale
+    /// generation are discarded by `poll_tile_stream_jobs` after a hot-reload,
+    /// preventing old tile data from merging into the new terrain.
+    pub generation: u64,
 }
 
 /// Raw material mask data, one byte per channel per texel.
@@ -125,4 +129,8 @@ pub struct TerrainStreamQueue {
     /// Completed CPU payloads waiting to be consumed.
     #[allow(dead_code)]
     pub finished_heights: Vec<HeightTileCpu>,
+    /// Incremented on every hot-reload.  Background threads tag their result
+    /// with the generation that was current when they were spawned; results
+    /// with a stale generation are silently discarded by `poll_tile_stream_jobs`.
+    pub reload_generation: u64,
 }

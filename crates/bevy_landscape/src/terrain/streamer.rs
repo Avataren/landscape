@@ -113,6 +113,7 @@ pub(crate) fn load_tile_data(
         data: height_data,
         normal_data,
         tile_size,
+        generation: 0, // set by spawn_background_height_job before sending
     }
 }
 
@@ -127,10 +128,11 @@ pub fn spawn_background_height_job(
     normal_root: Option<std::path::PathBuf>,
     world_bounds: Option<(Vec2, Vec2)>,
     use_procedural: bool,
+    generation: u64,
     tx: Sender<HeightTileCpu>,
 ) {
     std::thread::spawn(move || {
-        let data = load_tile_data(
+        let mut data = load_tile_data(
             key,
             tile_size,
             world_scale,
@@ -141,6 +143,7 @@ pub fn spawn_background_height_job(
             world_bounds,
             use_procedural,
         );
+        data.generation = generation;
         let _ = tx.send(data);
     });
 }
@@ -426,6 +429,7 @@ pub fn request_tile_loads(
             desc.normal_root.as_ref().map(PathBuf::from),
             Some((desc.world_min, desc.world_max)),
             config.procedural_fallback,
+            queue.reload_generation,
             sender.0.clone(),
         );
     }
@@ -445,6 +449,10 @@ pub fn poll_tile_stream_jobs(
     while let Ok(tile) = rx.try_recv() {
         let key = tile.key;
         queue.pending_requests.remove(&key);
+        // Discard tiles that were requested before the last hot-reload.
+        if tile.generation != queue.reload_generation {
+            continue;
+        }
         residency.tiles.insert(key, TileState::LoadedCpu);
         residency.touch(key);
         residency.pending_upload.push(tile);

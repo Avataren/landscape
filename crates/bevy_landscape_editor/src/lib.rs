@@ -1,10 +1,19 @@
+mod import;
+mod level_io;
 mod material_panel;
+mod preferences;
 mod toolbar;
 
 use bevy::prelude::*;
 use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 
+use import::ImportPlugin;
+use level_io::LevelIoPlugin;
 use material_panel::MaterialPanelPlugin;
+use preferences::PreferencesPlugin;
+
+pub use level_io::LevelIoState;
+pub use preferences::AppPreferences;
 
 pub struct LandscapeEditorPlugin;
 
@@ -14,6 +23,9 @@ impl Plugin for LandscapeEditorPlugin {
             app.add_plugins(EguiPlugin::default());
         }
         app.add_plugins(MaterialPanelPlugin)
+            .add_plugins(ImportPlugin)
+            .add_plugins(LevelIoPlugin)
+            .add_plugins(PreferencesPlugin)
             .add_systems(EguiPrimaryContextPass, toolbar::toolbar_system);
     }
 }

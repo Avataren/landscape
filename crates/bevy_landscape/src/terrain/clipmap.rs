@@ -85,13 +85,20 @@ pub fn build_patch_instances_for_view(
 }
 
 /// Builds only the patch instances that overlap the terrain footprint.
+/// When bounds are degenerate (world_min == world_max, i.e. not yet set),
+/// all patches pass through so the ring geometry is always present.
 pub fn build_patch_instances_for_view_in_bounds(
     config: &TerrainConfig,
     view: &TerrainViewState,
     world_min: Vec2,
     world_max: Vec2,
 ) -> Vec<PatchInstanceCpu> {
-    build_patch_instances_for_view(config, view)
+    let patches = build_patch_instances_for_view(config, view);
+    // Skip bounds culling when no real terrain has been loaded yet.
+    if world_min == world_max {
+        return patches;
+    }
+    patches
         .into_iter()
         .filter(|patch| patch_intersects_world_bounds(patch, world_min, world_max))
         .collect()
