@@ -6,8 +6,6 @@
 tile_root       = "assets/tiles"
 normal_root     = "assets/tiles/normal"
 diffuse_exr     = "assets/height_maps/16k Rocky Terrain Heightmap/Diffuse 16k Rocky Terrain.exr"
-world_min       = -8192.0   # base X/Z minimum before terrain_config.world_scale
-world_max       =  8192.0   # base X/Z maximum before terrain_config.world_scale
 # Highest LOD index that has baked tiles. For a 4096px map / 256px tile_size,
 # the mip pyramid is: L0=16×16, L1=8×8, L2=4×4, L3=2×2 (coarsest).
 # Clipmap rings above this level resample height from L3 tiles.
@@ -26,7 +24,7 @@ collision_mip_level = 2
 # The app copies this into the runtime `TerrainConfig.world_scale` field, and
 # bake_tiles uses it automatically when --world-scale is not provided.
 # Set to 2.0 to make the same landscape twice as large in X, Y, and Z.
-world_scale     = 16.0
+world_scale     = 8.0
 
 # Clipmap LOD ring count. Each extra level doubles the view radius.
 # Outermost radius = 512 * 2^(clipmap_levels-1) world units.

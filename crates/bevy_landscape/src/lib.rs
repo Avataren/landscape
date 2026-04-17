@@ -1,5 +1,7 @@
 mod terrain;
+pub mod level;
 
+pub use level::{load_level, save_level, LevelDesc};
 pub use terrain::collision::TerrainCollisionCache;
 pub use terrain::components::TerrainCamera;
 pub use terrain::config::TerrainConfig;

@@ -19,6 +19,9 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 
+[dev-dependencies]
+tempfile = "3"
+
 # dynamic_linking speeds up dev iteration by splitting Bevy into a shared
 # library. It works on Linux/macOS but causes LNK2019 linker errors on Windows
 # in release mode (std symbols split across bevy_dylib.dll boundary), so it

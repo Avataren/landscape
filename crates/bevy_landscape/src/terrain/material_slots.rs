@@ -15,8 +15,10 @@
 //! rendering specifics.
 
 use crate::terrain::material::{MaterialSlotGpu, TerrainMaterial, MAX_SHADER_MATERIAL_SLOTS};
+use crate::terrain::config::TerrainConfig;
 use crate::terrain::PatchEntities;
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Practical initial cap on material slots (2 splatmaps × 4 channels).
@@ -28,7 +30,7 @@ pub const DEFAULT_MAX_MATERIAL_SLOTS: usize = 8;
 /// The editor mutates this resource directly; downstream systems (not yet
 /// implemented) will observe changes and upload texture-array contents and
 /// per-slot uniforms to the GPU.
-#[derive(Resource, Clone, Debug)]
+#[derive(Resource, Clone, Debug, Serialize, Deserialize)]
 pub struct MaterialLibrary {
     pub slots: Vec<MaterialSlot>,
     /// Upper bound on slot count enforced by the editor UI.
@@ -42,6 +44,8 @@ pub struct MaterialLibrary {
     /// EXR was successfully loaded.  When `false`, the macro color override
     /// toggle is a no-op (shader sampling falls back to a 1×1 white texture).
     /// Kept here so the Materials panel can grey out the toggle.
+    /// Not persisted to level files — resolved at load time.
+    #[serde(skip)]
     pub macro_color_loaded: bool,
 }
 
@@ -82,7 +86,7 @@ impl Default for MaterialLibrary {
 
 /// One physical surface type (rock, grass, …).  Mirrors the fields called out
 /// in the design doc's "Materials Panel" section (§11b).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MaterialSlot {
     pub name: String,
     /// Exclude from blend without deleting the slot.
@@ -132,7 +136,7 @@ impl MaterialSlot {
 
 /// Procedural placement rules used to compute the baseline splatmap weights
 /// before any painting is applied.  §4 of the design doc.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProceduralRules {
     /// World-space Y range in which this slot is active.
     pub altitude_range_m: Vec2,
@@ -170,6 +174,7 @@ impl Default for ProceduralRules {
 pub(crate) fn sync_material_library_to_terrain_material(
     library: Res<MaterialLibrary>,
     patch_entities: Res<PatchEntities>,
+    config: Res<TerrainConfig>,
     mut materials: ResMut<Assets<TerrainMaterial>>,
 ) {
     // Only write when the library changed — mutable access to the material
@@ -182,6 +187,10 @@ pub(crate) fn sync_material_library_to_terrain_material(
         return;
     };
 
+    // Altitude bands are authored in "base world units" (world_scale = 1.0).
+    // Scale them up so they map to the correct fraction of the scaled terrain.
+    let alt_scale = config.world_scale;
+
     let mut slots = [MaterialSlotGpu::default(); MAX_SHADER_MATERIAL_SLOTS];
     let n = library.slots.len().min(MAX_SHADER_MATERIAL_SLOTS);
     for (i, slot) in library.slots.iter().take(n).enumerate() {
@@ -193,8 +202,8 @@ pub(crate) fn sync_material_library_to_terrain_material(
                 if slot.visible { 1.0 } else { 0.0 },
             ),
             ranges: Vec4::new(
-                slot.procedural.altitude_range_m.x,
-                slot.procedural.altitude_range_m.y,
+                slot.procedural.altitude_range_m.x * alt_scale,
+                slot.procedural.altitude_range_m.y * alt_scale,
                 slot.procedural.slope_range_deg.x,
                 slot.procedural.slope_range_deg.y,
             ),

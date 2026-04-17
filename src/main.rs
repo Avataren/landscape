@@ -49,9 +49,8 @@ fn main() {
         tc
     };
 
-    let world_scale = terrain_config.world_scale;
-    let world_min = cfg.source.world_min * world_scale;
-    let world_max = cfg.source.world_max * world_scale;
+    let world_min = cfg.source.world_min;
+    let world_max = cfg.source.world_max;
 
     App::new()
         .insert_resource(ClearColor(Color::BLACK))
