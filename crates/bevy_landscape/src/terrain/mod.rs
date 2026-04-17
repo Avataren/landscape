@@ -41,6 +41,7 @@ use material::{TerrainMaterial, TerrainMaterialUniforms};
 use material_slots::{sync_material_library_to_terrain_material, MaterialLibrary};
 use math::{compute_needed_tiles_for_level, level_scale, snap_camera_to_nested_clipmap_grid};
 use physics_colliders::spawn_global_heightfield;
+use physics_colliders::{spawn_global_heightfield_for_desc, GlobalTerrainHeightfield};
 use render::{gpu_types::PatchDescriptorGpu, TerrainRenderPlugin};
 use residency::update_required_tiles;
 use resources::{
@@ -800,6 +801,7 @@ fn reload_terrain_system(
     mut commands: Commands,
     mut patch_entities: ResMut<PatchEntities>,
     camera_q: Query<(&Transform, &TerrainCamera)>,
+    global_heightfield_q: Query<Entity, With<GlobalTerrainHeightfield>>,
 ) {
     for req in reload_rx.read() {
         let new_config = req.config.clone();
@@ -824,6 +826,9 @@ fn reload_terrain_system(
         // This prevents stale geometry (wrong world_scale transforms) from
         // appearing in the render — especially important for shadow cascades.
         for entity in patch_entities.entities.drain(..) {
+            commands.entity(entity).despawn();
+        }
+        for entity in &global_heightfield_q {
             commands.entity(entity).despawn();
         }
         patch_entities.last_clip_centers.clear();
@@ -927,6 +932,8 @@ fn reload_terrain_system(
             &mut residency,
             &mut collision,
         );
+
+        spawn_global_heightfield_for_desc(&new_desc, &new_config, &mut commands);
     }
 }
 

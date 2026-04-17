@@ -7,6 +7,9 @@ use crate::terrain::{
     world_desc::TerrainSourceDesc,
 };
 
+#[derive(Component)]
+pub struct GlobalTerrainHeightfield;
+
 // ---------------------------------------------------------------------------
 // Single static world heightfield
 // ---------------------------------------------------------------------------
@@ -26,6 +29,14 @@ pub fn spawn_global_heightfield(
     desc: Res<TerrainSourceDesc>,
     config: Res<TerrainConfig>,
     mut commands: Commands,
+) {
+    spawn_global_heightfield_for_desc(&desc, &config, &mut commands);
+}
+
+pub fn spawn_global_heightfield_for_desc(
+    desc: &TerrainSourceDesc,
+    config: &TerrainConfig,
+    commands: &mut Commands,
 ) {
     let world_size_x = desc.world_max.x - desc.world_min.x;
     let world_size_z = desc.world_max.y - desc.world_min.y;
@@ -97,6 +108,7 @@ pub fn spawn_global_heightfield(
     let center_z = desc.world_min.y + scale_z * 0.5;
 
     commands.spawn((
+        GlobalTerrainHeightfield,
         RigidBody::Static,
         Collider::heightfield(heights, Vec3::new(scale_x, 1.0, scale_z)),
         Transform::from_xyz(center_x, 0.0, center_z),

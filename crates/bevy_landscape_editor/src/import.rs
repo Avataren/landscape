@@ -227,7 +227,7 @@ fn settings_to_config(s: &ImportSettings) -> BakeConfig {
 
 fn derive_import_clipmap_levels(requested: u32, max_mip: u8) -> u32 {
     requested
-        .min(max_mip as u32 + 1)
+        .max(max_mip as u32 + 1)
         .min(MAX_SUPPORTED_CLIPMAP_LEVELS as u32)
 }
 
@@ -671,8 +671,8 @@ mod tests {
     use super::derive_import_clipmap_levels;
 
     #[test]
-    fn import_caps_clipmap_levels_to_baked_mips() {
-        assert_eq!(derive_import_clipmap_levels(12, 3), 4);
+    fn import_preserves_large_view_distance_requests() {
+        assert_eq!(derive_import_clipmap_levels(12, 3), 12);
         assert_eq!(derive_import_clipmap_levels(4, 3), 4);
     }
 }
