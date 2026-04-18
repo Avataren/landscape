@@ -2,6 +2,7 @@ mod import;
 mod level_io;
 mod material_panel;
 mod preferences;
+mod sky_panel;
 mod toolbar;
 
 use bevy::prelude::*;
@@ -11,6 +12,7 @@ use import::ImportPlugin;
 use level_io::LevelIoPlugin;
 use material_panel::MaterialPanelPlugin;
 use preferences::PreferencesPlugin;
+use sky_panel::SkyPanelPlugin;
 
 pub use level_io::LevelIoState;
 pub use preferences::AppPreferences;
@@ -26,6 +28,7 @@ impl Plugin for LandscapeEditorPlugin {
             .add_plugins(ImportPlugin)
             .add_plugins(LevelIoPlugin)
             .add_plugins(PreferencesPlugin)
+            .add_plugins(SkyPanelPlugin)
             .add_systems(EguiPrimaryContextPass, toolbar::toolbar_system);
     }
 }

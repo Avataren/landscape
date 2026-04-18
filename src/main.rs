@@ -5,7 +5,7 @@ use bevy::{
     core_pipeline::tonemapping::Tonemapping,
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     input::mouse::AccumulatedMouseMotion,
-    light::{light_consts::lux, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder},
+    light::{light_consts::lux, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, FogVolume, VolumetricFog, VolumetricLight},
     pbr::{Atmosphere, AtmosphereSettings, ScatteringMedium},
     post_process::bloom::Bloom,
     prelude::*,
@@ -99,7 +99,12 @@ fn main() {
         .run();
 }
 
-fn setup_scene(mut commands: Commands, mut scattering_mediums: ResMut<Assets<ScatteringMedium>>) {
+fn setup_scene(
+    mut commands: Commands,
+    mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
+    config: Res<TerrainConfig>,
+    desc: Res<TerrainSourceDesc>,
+) {
     // Spawn camera above terrain centre, angled downward so terrain is visible
     // immediately in freecam mode.  preload_terrain_startup uses the XZ position
     // to decide which tiles to load first.
@@ -126,6 +131,10 @@ fn setup_scene(mut commands: Commands, mut scattering_mediums: ResMut<Assets<Sca
         // available via `forward_bias_ratio`, but the default keeps the finest
         // ring centered on the camera for reliable near-field coverage.
         TerrainCamera::default(),
+        VolumetricFog {
+            ambient_intensity: 0.6,
+            ..default()
+        },
     ));
 
     commands.spawn((
@@ -146,6 +155,31 @@ fn setup_scene(mut commands: Commands, mut scattering_mediums: ResMut<Assets<Sca
             overlap_proportion: 0.2,
         }
         .build(),
+        VolumetricLight,
+    ));
+
+    // Fog volume derived from terrain bounds so it covers any heightmap size.
+    // Falls back to a 10 km cube when no terrain is loaded.
+    let terrain_span = desc.world_max - desc.world_min;
+    let (fog_xz, fog_center_xz) = if terrain_span.length_squared() > 0.0 {
+        let pad = terrain_span.max_element() * 0.2;
+        (terrain_span + Vec2::splat(pad * 2.0),
+         (desc.world_min + desc.world_max) * 0.5)
+    } else {
+        (Vec2::splat(10_000.0), Vec2::ZERO)
+    };
+    let fog_height = config.height_scale * 1.5;
+    // density_factor drives scattering per unit length. The default (0.1) is
+    // designed for small test volumes; at terrain scale (kilometres) it produces
+    // a completely opaque black box. 0.0003 gives visible haze at >1 km while
+    // keeping nearby terrain clear.
+    commands.spawn((
+        FogVolume {
+            density_factor: 0.0003,
+            ..default()
+        },
+        Transform::from_xyz(fog_center_xz.x, config.height_scale * 0.5, fog_center_xz.y)
+            .with_scale(Vec3::new(fog_xz.x, fog_height, fog_xz.y)),
     ));
 }
 

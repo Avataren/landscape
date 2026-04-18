@@ -5,6 +5,7 @@ use crate::import::ImportWizard;
 use crate::level_io::LevelIoState;
 use crate::material_panel::MaterialPanelState;
 use crate::preferences::{AppPreferences, PreferencesDialog};
+use crate::sky_panel::SkyPanelState;
 
 pub(crate) fn toolbar_system(
     mut contexts: EguiContexts,
@@ -14,6 +15,7 @@ pub(crate) fn toolbar_system(
     mut level_io: ResMut<LevelIoState>,
     prefs: Res<AppPreferences>,
     mut prefs_dialog: ResMut<PreferencesDialog>,
+    mut sky_panel: ResMut<SkyPanelState>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
@@ -45,6 +47,9 @@ pub(crate) fn toolbar_system(
             });
             ui.menu_button("Tools", |ui| {
                 if ui.checkbox(&mut material_panel.open, "Materials").clicked() {
+                    ui.close();
+                }
+                if ui.checkbox(&mut sky_panel.open, "Sky / Time of Day").clicked() {
                     ui.close();
                 }
             });

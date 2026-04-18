@@ -94,10 +94,10 @@ impl Default for MaterialLibrary {
         snow.coarse_scale_mul = 5.0;
         snow.procedural.altitude_range_m = Vec2::new(600.0, 10_000.0);
         snow.procedural.slope_range_deg = Vec2::new(0.0, 50.0);
-        snow.albedo_path = Some("textures/forrest_ground_01_4k.blend/textures/forrest_ground_01_diff_4k.jpg".into());
-        snow.normal_path = Some("textures/forrest_ground_01_4k.blend/textures/forrest_ground_01_nor_gl_4k.exr".into());
-        snow.orm_path    = Some("textures/forrest_ground_01_4k.blend/textures/forrest_ground_01_rough_4k.jpg".into());
-        snow.height_path = Some("textures/forrest_ground_01_4k.blend/textures/forrest_ground_01_disp_4k.png".into());
+        snow.albedo_path = Some("textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_diff_4k.jpg".into());
+        snow.normal_path = Some("textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_nor_gl_4k.exr".into());
+        snow.orm_path    = Some("textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_rough_4k.exr".into());
+        snow.height_path = Some("textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_disp_4k.png".into());
 
         Self {
             slots: vec![ground, mid_rock, cliff, snow],

@@ -8,6 +8,7 @@
 // LOD L+1 always agree on height for the same world XZ position.
 
 #import bevy_pbr::{
+    mesh_functions::get_world_from_local,
     view_transformations::position_world_to_clip,
     forward_io::Vertex,
 }
@@ -45,24 +46,6 @@ struct TerrainParams {
 @group(#{MATERIAL_BIND_GROUP}) @binding(6) var normal_samp: sampler;
 
 // ---------------------------------------------------------------------------
-// Patch storage buffer — one entry per draw instance, indexed by instance_index.
-// Matches PatchDescriptorGpu in src/terrain/render/gpu_types.rs exactly.
-// ---------------------------------------------------------------------------
-
-struct PatchDescriptor {
-    origin_ws:     vec2<f32>,
-    patch_size_ws: f32,
-    lod_level:     u32,
-    morph_start:   f32,
-    morph_end:     f32,
-    patch_kind:    u32,
-    _pad0:         u32,
-}
-
-@group(#{MATERIAL_BIND_GROUP}) @binding(7)
-var<storage, read> patch_descriptors: array<PatchDescriptor>;
-
-// ---------------------------------------------------------------------------
 // Vertex → fragment interface
 // ---------------------------------------------------------------------------
 
@@ -93,7 +76,10 @@ fn bounds_fade_at(xz: vec2<f32>) -> f32 {
         min(xz.x - world_min.x, world_max.x - xz.x),
         min(xz.y - world_min.y, world_max.y - xz.y),
     );
-    return smoothstep(0.0, fade_dist, edge_dist);
+    // Inside terrain (edge_dist >= 0): full height. Only fade vertices that
+    // land outside the terrain boundary (edge_dist < 0) due to patches
+    // slightly overshooting the bounds.
+    return smoothstep(-fade_dist, 0.0, edge_dist);
 }
 
 /// Sample height from the given LOD level's clipmap layer and fade it out once
@@ -152,10 +138,14 @@ fn blended_height(lod: u32, coarse_lod: u32, alpha: f32, xz: vec2<f32>) -> f32 {
 
 @vertex
 fn vertex(v: Vertex) -> TerrainVOut {
-    // --- Read patch descriptor from storage buffer. ---
-    let pd = patch_descriptors[v.instance_index];
-    let patch_size_ws = pd.patch_size_ws;
-    let lod_level     = pd.lod_level;
+    // Derive patch placement from the per-instance transform, matching the
+    // prepass/shadow path. This avoids coupling visible terrain geometry to a
+    // separate storage buffer indexed by instance_index, which can become
+    // unstable if Bevy splits terrain draws into multiple batches.
+    let model = get_world_from_local(v.instance_index);
+    let patch_size_ws = length(model[0].xyz);
+    let lod_f = round(log2(patch_size_ws / terrain.base_patch_size));
+    let lod_level = u32(clamp(lod_f, 0.0, 15.0));
 
     // Coarse LOD index for height blending: clamped so we never read layer N.
     let max_lod_idx = u32(terrain.num_lod_levels) - 1u;
@@ -164,7 +154,7 @@ fn vertex(v: Vertex) -> TerrainVOut {
     // --- World XZ before morphing. ---
     // Mesh vertices are in [0,1] local XZ; scale by patch_size_ws and offset
     // by origin to get world space.
-    let world_xz_orig = pd.origin_ws + v.position.xz * patch_size_ws;
+    let world_xz_orig = (model * vec4<f32>(v.position, 1.0)).xz;
 
     // --- Geomorphing ---
     // Blend vertices toward the 2× coarser grid near the outer ring edge so
