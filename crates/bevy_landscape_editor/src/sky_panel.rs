@@ -76,8 +76,11 @@ fn update_sun_from_time(
     //   0h  → solar_angle = -π/2     → elevation = sin(-π/2) = -1 (midnight)
     let solar_angle = (tod.hours - 6.0) / 24.0 * std::f32::consts::TAU;
 
-    // 60° max elevation — realistic for a mid-latitude summer sky.
-    let max_elevation = 60.0_f32.to_radians();
+    // 30° max elevation keeps the sun at a low-to-mid angle throughout the
+    // day: directional shadows remain visible, and the Atmosphere always
+    // scatters some warm colour.  60° produced harsh overhead noon lighting
+    // that washed out terrain colours even at the same RAW_SUNLIGHT value.
+    let max_elevation = 30.0_f32.to_radians();
     let elevation_rad = solar_angle.sin() * max_elevation;
 
     // Negative X pitch tilts light downward; 0 = on horizon, -max_elev = noon.
