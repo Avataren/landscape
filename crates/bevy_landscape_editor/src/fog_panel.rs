@@ -6,9 +6,13 @@ use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 pub struct FogPanelState {
     pub open: bool,
     pub enabled: bool,
-    /// Saved values restored when re-enabling fog.
-    saved_density: f32,
-    saved_ambient_intensity: f32,
+    // FogVolume (entity always present; density zeroed when disabled)
+    pub density: f32,
+    // VolumetricFog (camera component removed entirely when disabled to stop ray-marching)
+    pub ambient_intensity: f32,
+    pub ambient_color: [f32; 3],
+    pub step_count: u32,
+    pub jitter: f32,
 }
 
 impl Default for FogPanelState {
@@ -16,8 +20,11 @@ impl Default for FogPanelState {
         Self {
             open: false,
             enabled: false,
-            saved_density: 0.0003,
-            saved_ambient_intensity: 0.6,
+            density: 0.0003,
+            ambient_intensity: 0.6,
+            ambient_color: [0.0, 0.0, 0.0],
+            step_count: 64,
+            jitter: 0.5,
         }
     }
 }
@@ -28,7 +35,7 @@ impl Plugin for FogPanelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FogPanelState>()
             .add_systems(EguiPrimaryContextPass, fog_panel_system)
-            .add_systems(Update, apply_fog_enabled);
+            .add_systems(Update, apply_fog_state);
     }
 }
 
@@ -45,7 +52,6 @@ pub(crate) fn fog_panel_system(
     mut contexts: EguiContexts,
     mut state: ResMut<FogPanelState>,
     mut fog_volumes: Query<&mut FogVolume>,
-    mut volumetric_fogs: Query<&mut VolumetricFog>,
 ) -> Result {
     if !state.open {
         return Ok(());
@@ -57,7 +63,6 @@ pub(crate) fn fog_panel_system(
         .resizable(true)
         .min_width(320.0)
         .show(ctx, |ui| {
-            // --- Enable toggle ---
             let mut enabled = state.enabled;
             if ui.checkbox(&mut enabled, "Enabled").changed() {
                 state.enabled = enabled;
@@ -65,8 +70,7 @@ pub(crate) fn fog_panel_system(
 
             ui.separator();
 
-            let fog_ok = fog_volumes.single_mut();
-            if let Ok(mut fog) = fog_ok {
+            if let Ok(mut fog) = fog_volumes.single_mut() {
                 ui.heading("Fog Volume");
                 egui::Grid::new("fog_volume_grid")
                     .num_columns(2)
@@ -74,11 +78,11 @@ pub(crate) fn fog_panel_system(
                     .show(ui, |ui| {
                         ui.label("Density");
                         if ui.add(
-                            egui::Slider::new(&mut state.saved_density, 0.0..=0.002)
+                            egui::Slider::new(&mut state.density, 0.0..=0.002)
                                 .logarithmic(true)
                                 .fixed_decimals(6),
                         ).changed() && state.enabled {
-                            fog.density_factor = state.saved_density;
+                            fog.density_factor = state.density;
                         }
                         ui.end_row();
 
@@ -115,60 +119,67 @@ pub(crate) fn fog_panel_system(
 
             ui.separator();
 
-            if let Ok(mut vfog) = volumetric_fogs.single_mut() {
-                ui.heading("Volumetric (camera)");
+            // VolumetricFog settings are stored in state regardless of enabled/disabled
+            // so values are preserved across toggles.
+            ui.heading("Volumetric (camera)");
+            ui.add_enabled_ui(state.enabled, |ui| {
                 egui::Grid::new("vfog_grid")
                     .num_columns(2)
                     .spacing([8.0, 4.0])
                     .show(ui, |ui| {
                         ui.label("Ambient intensity");
-                        if ui.add(
-                            egui::Slider::new(&mut state.saved_ambient_intensity, 0.0..=1.0)
+                        ui.add(
+                            egui::Slider::new(&mut state.ambient_intensity, 0.0..=1.0)
                                 .fixed_decimals(3),
-                        ).changed() && state.enabled {
-                            vfog.ambient_intensity = state.saved_ambient_intensity;
-                        }
+                        );
                         ui.end_row();
 
                         ui.label("Ambient color");
-                        let mut rgb = color_to_rgb(vfog.ambient_color);
-                        if ui.color_edit_button_rgb(&mut rgb).changed() {
-                            vfog.ambient_color = rgb_to_color(rgb);
-                        }
+                        ui.color_edit_button_rgb(&mut state.ambient_color);
                         ui.end_row();
 
                         ui.label("Step count");
-                        let mut steps = vfog.step_count;
-                        if ui.add(egui::Slider::new(&mut steps, 16..=256)).changed() {
-                            vfog.step_count = steps;
-                        }
+                        ui.add(egui::Slider::new(&mut state.step_count, 16..=256));
                         ui.end_row();
 
                         ui.label("Jitter");
-                        ui.add(egui::Slider::new(&mut vfog.jitter, 0.0..=1.0).fixed_decimals(3));
+                        ui.add(egui::Slider::new(&mut state.jitter, 0.0..=1.0).fixed_decimals(3));
                         ui.end_row();
                     });
-            }
+            });
         });
     state.open = open;
     Ok(())
 }
 
-fn apply_fog_enabled(
+/// Applies fog panel state to the scene.
+///
+/// When enabled: ensures the camera has a `VolumetricFog` component with the
+/// panel's current settings, and sets the FogVolume density.
+/// When disabled: removes `VolumetricFog` from the camera entirely so Bevy
+/// does not dispatch a volumetric render pass at all.
+fn apply_fog_state(
+    mut commands: Commands,
     state: Res<FogPanelState>,
     mut fog_volumes: Query<&mut FogVolume>,
-    mut volumetric_fogs: Query<&mut VolumetricFog>,
+    cameras: Query<Entity, With<Camera3d>>,
 ) {
     if !state.is_changed() {
         return;
     }
     if let Ok(mut fog) = fog_volumes.single_mut() {
-        fog.density_factor = if state.enabled { state.saved_density } else { 0.0 };
+        fog.density_factor = if state.enabled { state.density } else { 0.0 };
     }
-    // Zero ambient_intensity when disabled — the volumetric renderer accumulates
-    // ambient on every ray-march step inside the FogVolume AABB, so even with
-    // density=0 a non-zero ambient_intensity creates a visible seam at the slab top.
-    if let Ok(mut vfog) = volumetric_fogs.single_mut() {
-        vfog.ambient_intensity = if state.enabled { state.saved_ambient_intensity } else { 0.0 };
+    let Ok(camera) = cameras.single() else { return };
+    if state.enabled {
+        commands.entity(camera).insert(VolumetricFog {
+            ambient_intensity: state.ambient_intensity,
+            ambient_color: rgb_to_color(state.ambient_color),
+            step_count: state.step_count,
+            jitter: state.jitter,
+            ..default()
+        });
+    } else {
+        commands.entity(camera).remove::<VolumetricFog>();
     }
 }

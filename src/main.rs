@@ -5,7 +5,7 @@ use bevy::{
     core_pipeline::tonemapping::Tonemapping,
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     input::mouse::AccumulatedMouseMotion,
-    light::{light_consts::lux, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, FogVolume, VolumetricFog, VolumetricLight},
+    light::{light_consts::lux, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, FogVolume, VolumetricLight},
     pbr::{Atmosphere, AtmosphereSettings, ScatteringMedium},
     post_process::bloom::Bloom,
     prelude::*,
@@ -131,10 +131,8 @@ fn setup_scene(
         // available via `forward_bias_ratio`, but the default keeps the finest
         // ring centered on the camera for reliable near-field coverage.
         TerrainCamera::default(),
-        VolumetricFog {
-            ambient_intensity: 0.6,
-            ..default()
-        },
+        // VolumetricFog is added/removed by FogPanelPlugin when the user enables fog.
+        // Starting without it avoids any volumetric render pass overhead while fog is off.
     ));
 
     commands.spawn((
