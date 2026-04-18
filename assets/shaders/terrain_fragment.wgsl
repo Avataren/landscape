@@ -100,6 +100,73 @@ fn band(v: f32, lo: f32, hi: f32, fade: f32) -> f32 {
     return clamp(lo_w * hi_w, 0.0, 1.0);
 }
 
+// ---------------------------------------------------------------------------
+// Hash / noise / sampling utilities
+// ---------------------------------------------------------------------------
+
+fn hash1(p: vec2<f32>) -> f32 {
+    return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
+}
+
+fn hash2(p: vec2<f32>) -> vec2<f32> {
+    let q = vec2<f32>(dot(p, vec2<f32>(127.1, 311.7)), dot(p, vec2<f32>(269.5, 183.3)));
+    return fract(sin(q) * 43758.5453);
+}
+
+fn value_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(hash1(i), hash1(i + vec2<f32>(1.0, 0.0)), u.x),
+        mix(hash1(i + vec2<f32>(0.0, 1.0)), hash1(i + vec2<f32>(1.0, 1.0)), u.x),
+        u.y,
+    );
+}
+
+// Stochastic (no-tile) texture sample — blends 4 hash-offset copies per grid
+// cell to break up visible tiling without any extra assets.
+fn sample_no_tile(
+    tex:   texture_2d_array<f32>,
+    samp:  sampler,
+    uv:    vec2<f32>,
+    layer: i32,
+) -> vec4<f32> {
+    let i  = floor(uv);
+    let f  = fract(uv);
+    let bl = f * f * (3.0 - 2.0 * f);
+    let c00 = textureSample(tex, samp, uv + hash2(i),                       layer);
+    let c10 = textureSample(tex, samp, uv + hash2(i + vec2<f32>(1.0, 0.0)), layer);
+    let c01 = textureSample(tex, samp, uv + hash2(i + vec2<f32>(0.0, 1.0)), layer);
+    let c11 = textureSample(tex, samp, uv + hash2(i + vec2<f32>(1.0, 1.0)), layer);
+    return mix(mix(c00, c10, bl.x), mix(c01, c11, bl.x), bl.y);
+}
+
+// Triplanar albedo sample — no UV stretching on vertical cliff faces.
+// Blend sharpness controlled by the exponent on abs(n).
+fn sample_triplanar(
+    tex:   texture_2d_array<f32>,
+    samp:  sampler,
+    wpos:  vec3<f32>,
+    n:     vec3<f32>,
+    layer: i32,
+    scale: f32,
+) -> vec4<f32> {
+    var w = pow(abs(n), vec3<f32>(4.0));
+    w /= w.x + w.y + w.z + 1e-6;
+    let cy = textureSample(tex, samp, wpos.xz / scale, layer);
+    let cx = textureSample(tex, samp, wpos.zy / scale, layer);
+    let cz = textureSample(tex, samp, wpos.xy / scale, layer);
+    return cy * w.y + cx * w.x + cz * w.z;
+}
+
+// Two-octave noise offset in [-1, 1] used to perturb altitude/slope values
+// before band evaluation — makes zone edges irregular instead of sharp rings.
+fn zone_noise(world_xz: vec2<f32>) -> f32 {
+    return (value_noise(world_xz / 150.0) * 0.7
+          + value_noise(world_xz /  40.0) * 0.3) * 2.0 - 1.0;
+}
+
 // Sample PBR albedo textures blended by altitude + slope weights.
 // When a slot has a real texture (uv_scale.z > 0.5) the array layer is
 // sampled using world-space tiling; otherwise the slot tint is used.
@@ -122,9 +189,10 @@ fn apply_normal_detail(
     let alt_fade   = max(terrain.height_scale * 0.05, 1.0);
     let slope_fade = 3.0;
 
-    // Build TBN from the macro normal so detail normal perturbation is
-    // consistent regardless of terrain slope.
-    // For near-vertical normals, fall back to a safe up-axis.
+    let znoise      = zone_noise(world_xz);
+    let noisy_slope = slope_deg + znoise * 6.0;
+    let noisy_alt   = world_y   + znoise * terrain.height_scale * 0.015;
+
     let ref_up = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0),
                         abs(base_n.y) < 0.99);
     let tangent   = normalize(cross(ref_up, base_n));
@@ -139,15 +207,15 @@ fn apply_normal_detail(
         if vis <= 0.0 {
             continue;
         }
-        let w_alt   = band(world_y,   slot.ranges.x, slot.ranges.y, alt_fade);
-        let w_slope = band(slope_deg, slot.ranges.z, slot.ranges.w, slope_fade);
+        let w_alt   = band(noisy_alt,   slot.ranges.x, slot.ranges.y, alt_fade);
+        let w_slope = band(noisy_slope, slot.ranges.z, slot.ranges.w, slope_fade);
         let w       = vis * w_alt * w_slope;
 
         var perturbed: vec3<f32>;
         if slot.uv_scale.z > 0.5 {
             let fine_scale = max(slot.uv_scale.x, 0.01);
             let uv  = world_xz / fine_scale;
-            let smp = textureSample(pbr_normal_arr, pbr_normal_samp, uv, i32(i)).rgb;
+            let smp = sample_no_tile(pbr_normal_arr, pbr_normal_samp, uv, i32(i)).rgb;
             // Decode: stored as (v*0.5+0.5), recover signed [-1,1] tangent-space XY.
             let ts_xy = smp.rg * 2.0 - 1.0;
             let ts_z  = sqrt(max(0.0, 1.0 - dot(ts_xy, ts_xy)));
@@ -182,6 +250,10 @@ fn sample_roughness(
     let alt_fade   = max(terrain.height_scale * 0.05, 1.0);
     let slope_fade = 3.0;
 
+    let znoise      = zone_noise(world_xz);
+    let noisy_slope = slope_deg + znoise * 6.0;
+    let noisy_alt   = world_y   + znoise * terrain.height_scale * 0.015;
+
     var sum_r      = 0.0;
     var sum_weight = 0.0;
 
@@ -191,15 +263,15 @@ fn sample_roughness(
         if vis <= 0.0 {
             continue;
         }
-        let w_alt   = band(world_y,   slot.ranges.x, slot.ranges.y, alt_fade);
-        let w_slope = band(slope_deg, slot.ranges.z, slot.ranges.w, slope_fade);
+        let w_alt   = band(noisy_alt,   slot.ranges.x, slot.ranges.y, alt_fade);
+        let w_slope = band(noisy_slope, slot.ranges.z, slot.ranges.w, slope_fade);
         let w       = vis * w_alt * w_slope;
 
         var r: f32;
         if slot.uv_scale.z > 0.5 {
             let fine_scale = max(slot.uv_scale.x, 0.01);
             let uv = world_xz / fine_scale;
-            r = textureSample(pbr_orm_arr, pbr_orm_samp, uv, i32(i)).g;
+            r = sample_no_tile(pbr_orm_arr, pbr_orm_samp, uv, i32(i)).g;
         } else {
             r = 0.5;
         }
@@ -218,6 +290,7 @@ fn sample_pbr_albedo(
     world_xz:  vec2<f32>,
     world_y:   f32,
     slope_deg: f32,
+    n_macro:   vec3<f32>,
     fallback:  vec3<f32>,
 ) -> vec3<f32> {
     let count = u32(terrain.slot_header.x);
@@ -228,6 +301,14 @@ fn sample_pbr_albedo(
     let alt_fade   = max(terrain.height_scale * 0.05, 1.0);
     let slope_fade = 3.0;
 
+    let znoise      = zone_noise(world_xz);
+    let noisy_slope = slope_deg + znoise * 6.0;
+    let noisy_alt   = world_y   + znoise * terrain.height_scale * 0.015;
+
+    let wpos  = vec3<f32>(world_xz.x, world_y, world_xz.y);
+    // Triplanar blends in on steep slopes to eliminate UV stretching on cliffs.
+    let tri_t = smoothstep(50.0, 70.0, slope_deg);
+
     var sum_col    = vec3<f32>(0.0);
     var sum_weight = 0.0;
 
@@ -237,8 +318,8 @@ fn sample_pbr_albedo(
         if vis <= 0.0 {
             continue;
         }
-        let w_alt   = band(world_y,   slot.ranges.x, slot.ranges.y, alt_fade);
-        let w_slope = band(slope_deg, slot.ranges.z, slot.ranges.w, slope_fade);
+        let w_alt   = band(noisy_alt,   slot.ranges.x, slot.ranges.y, alt_fade);
+        let w_slope = band(noisy_slope, slot.ranges.z, slot.ranges.w, slope_fade);
         let w       = vis * w_alt * w_slope;
 
         var col: vec3<f32>;
@@ -247,10 +328,18 @@ fn sample_pbr_albedo(
             let coarse_scale = fine_scale * max(slot.uv_scale.y, 2.0);
             let uv_fine   = world_xz / fine_scale;
             let uv_coarse = world_xz / coarse_scale;
-            let c_fine   = textureSample(pbr_albedo_arr, pbr_albedo_samp, uv_fine,   i32(i)).rgb;
+            // Fine scale: stochastic sampling eliminates visible repetition.
+            let c_fine   = sample_no_tile(pbr_albedo_arr, pbr_albedo_samp, uv_fine, i32(i)).rgb;
             let c_coarse = textureSample(pbr_albedo_arr, pbr_albedo_samp, uv_coarse, i32(i)).rgb;
-            // Dual-scale blend: coarse breaks up tiling, fine preserves detail.
-            col = c_fine * 0.7 + c_coarse * 0.3;
+            let col_uv   = c_fine * 0.7 + c_coarse * 0.3;
+            // On steep slopes blend in triplanar to avoid UV stretch on cliffs.
+            if tri_t > 0.001 {
+                let c_tri = sample_triplanar(pbr_albedo_arr, pbr_albedo_samp,
+                                             wpos, n_macro, i32(i), fine_scale).rgb;
+                col = mix(col_uv, c_tri, tri_t);
+            } else {
+                col = col_uv;
+            }
         } else {
             col = slot.tint_vis.rgb;
         }
@@ -440,7 +529,7 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     // Fallback used when the material library is empty (count == 0) or all
     // slots have zero weight at this fragment.  Keeps the terrain visible.
     let fallback = procedural_albedo(slope, h_norm);
-    var albedo   = sample_pbr_albedo(in.world_pos.xz, in.world_pos.y, slope_deg, fallback);
+    var albedo   = sample_pbr_albedo(in.world_pos.xz, in.world_pos.y, slope_deg, n_macro, fallback);
     if terrain.bounds_fade.y > 0.5 {
         // textureSample (not textureSampleLevel) lets the GPU pick the correct
         // mip based on screen-space derivatives — better antialiasing at distance.
