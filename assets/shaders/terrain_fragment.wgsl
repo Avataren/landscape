@@ -217,10 +217,10 @@ fn apply_normal_detail(
             let uv  = world_xz / fine_scale;
             let smp = sample_no_tile(pbr_normal_arr, pbr_normal_samp, uv, i32(i)).rgb;
             // Decode: stored as (v*0.5+0.5), recover signed [-1,1] tangent-space XY.
-            let ts_xy = smp.rg * 2.0 - 1.0;
+            let ts_xy = (smp.rg * 2.0 - 1.0) * 2.0; // ×2 strength — Polyhaven normals
             let ts_z  = sqrt(max(0.0, 1.0 - dot(ts_xy, ts_xy)));
-            // Reorient into world space using the macro surface TBN.
-            perturbed = normalize(tangent * ts_xy.x + bitangent * ts_xy.y + base_n * (ts_z + 1.0));
+            // Standard tangent-to-world reorientation (no +1 dampening).
+            perturbed = normalize(tangent * ts_xy.x + bitangent * ts_xy.y + base_n * ts_z);
         } else {
             perturbed = base_n;
         }
