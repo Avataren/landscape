@@ -20,11 +20,10 @@ pub use debug::TerrainDebugPlugin;
 pub use world_desc::TerrainSourceDesc;
 
 use bevy::{
-    asset::RenderAssetUsages,
-    camera::visibility::NoFrustumCulling,
+    camera::primitives::Aabb,
     pbr::wireframe::{NoWireframe, WireframePlugin},
     prelude::*,
-    render::storage::ShaderStorageBuffer,
+    camera::visibility::NoFrustumCulling,
 };
 use clipmap::{build_patch_instances_for_view_in_bounds, PatchInstanceCpu};
 use clipmap_texture::{
@@ -42,7 +41,7 @@ use material_slots::{sync_material_library_to_terrain_material, MaterialLibrary}
 use math::{compute_needed_tiles_for_level, level_scale, snap_camera_to_nested_clipmap_grid};
 use physics_colliders::spawn_global_heightfield;
 use physics_colliders::{spawn_global_heightfield_for_desc, GlobalTerrainHeightfield};
-use render::{gpu_types::PatchDescriptorGpu, TerrainRenderPlugin};
+use render::TerrainRenderPlugin;
 use residency::update_required_tiles;
 use resources::{
     HeightTileCpu, TerrainResidency, TerrainStreamQueue, TerrainViewState, TileKey, TileState,
@@ -76,10 +75,6 @@ pub struct PatchEntities {
     pub entities: Vec<Entity>,
     /// Cached clip centers from last update (used to skip no-op frames).
     pub last_clip_centers: Vec<IVec2>,
-    /// Handle to the `ShaderStorageBuffer` containing one `PatchDescriptorGpu`
-    /// per patch, in the same order as `entities`.  Kept in sync whenever the
-    /// clip centers change (same condition that triggers Transform updates).
-    pub patch_buffer_handle: Handle<ShaderStorageBuffer>,
     /// Shared mesh handle used by all terrain patches.
     pub mesh_handle: Handle<Mesh>,
     /// Shared material handle used by all terrain patches.
@@ -478,7 +473,6 @@ fn setup_terrain(
     mut meshes: ResMut<Assets<Mesh>>,
     mut terrain_materials: ResMut<Assets<TerrainMaterial>>,
     mut images: ResMut<Assets<Image>>,
-    mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     mut patch_entities: ResMut<PatchEntities>,
     mut material_library: ResMut<MaterialLibrary>,
     mut commands: Commands,
@@ -512,48 +506,18 @@ fn setup_terrain(
     let patch_mesh = patch_mesh::build_patch_mesh(config.patch_resolution);
     let mesh_handle = meshes.add(patch_mesh);
 
-    // --- Build initial patch list before creating the material so we can pass
-    //     the real storage-buffer handle into the material from the start ---
+    // --- Build initial patch list before creating the material ---
     let view = TerrainViewState::default();
     let patches: Vec<PatchInstanceCpu> =
         build_patch_instances_for_view_in_bounds(&config, &view, desc.world_min, desc.world_max);
 
-    // Build the initial patch storage buffer so the vertex shader can read
-    // per-patch data (origin, size, lod) without decoding the Transform matrix.
-    // Always allocate at least one dummy element — wgpu rejects zero-size
-    // storage buffer bindings.
-    let patch_buffer_handle = {
-        let mut descs: Vec<PatchDescriptorGpu> = patches
-            .iter()
-            .map(|p| PatchDescriptorGpu {
-                origin_ws: [p.origin_ws.x, p.origin_ws.y],
-                patch_size_ws: p.patch_size_ws,
-                lod_level: p.lod_level,
-                morph_start: p.morph_start,
-                morph_end: p.morph_end,
-                patch_kind: p.patch_kind,
-                _pad0: 0,
-            })
-            .collect();
-        if descs.is_empty() {
-            descs.push(bytemuck::Zeroable::zeroed());
-        }
-        let ssb = ShaderStorageBuffer::new(
-            bytemuck::cast_slice(&descs),
-            RenderAssetUsages::RENDER_WORLD,
-        );
-        storage_buffers.add(ssb)
-    };
-
     patch_entities.entities.clear();
-    patch_entities.patch_buffer_handle = patch_buffer_handle.clone();
     patch_entities.mesh_handle = mesh_handle.clone();
 
     let mat_handle = terrain_materials.add(TerrainMaterial {
         height_texture: height_handle.clone(),
         macro_color_texture: macro_color_handle,
         normal_texture: normal_handle.clone(),
-        patch_buffer: patch_buffer_handle,
         params: TerrainMaterialUniforms {
             height_scale: config.height_scale,
             base_patch_size,
@@ -615,7 +579,13 @@ fn setup_terrain(
         tile_apply_centers: vec![IVec2::new(i32::MAX, i32::MAX); levels as usize],
     });
 
-    respawn_patch_entities(&mut commands, &mut patch_entities, &patches);
+    respawn_patch_entities(
+        &mut commands,
+        &mut patch_entities,
+        &patches,
+        config.height_scale,
+        config.patch_resolution,
+    );
 
     info!(
         "[Terrain] Setup complete: {} patches across {} LOD levels. \
@@ -713,7 +683,6 @@ fn update_patch_transforms(
     view: Res<TerrainViewState>,
     mut patch_entities: ResMut<PatchEntities>,
     mut query: Query<(&mut Transform, &mut components::TerrainPatchInstance)>,
-    mut storage_buffers: ResMut<Assets<ShaderStorageBuffer>>,
     mut commands: Commands,
 ) {
     if view.clip_centers.is_empty() {
@@ -722,11 +691,9 @@ fn update_patch_transforms(
 
     let positions_changed = view.clip_centers != patch_entities.last_clip_centers;
 
-    // Only rebuild the patch list and upload the storage buffer when the clip
-    // grid changes.  Entities carry NoFrustumCulling so Bevy never hides them;
-    // the GPU rasteriser discards out-of-view triangles at near-zero cost, so
-    // storage-buffer frustum culling (which had incorrect results for non-ground-
-    // level cameras in Bevy 0.18) is not needed.
+    // Only rebuild the patch list when the clip grid changes. Patch entities
+    // carry a conservative local-space AABB covering the displaced terrain, so
+    // Bevy can frustum-cull them and feed the built-in GPU preprocessing path.
     if !positions_changed {
         return;
     }
@@ -736,24 +703,14 @@ fn update_patch_transforms(
 
     let mut respawned = false;
     if patches.len() != patch_entities.entities.len() {
-        respawn_patch_entities(&mut commands, &mut patch_entities, &patches);
+        respawn_patch_entities(
+            &mut commands,
+            &mut patch_entities,
+            &patches,
+            config.height_scale,
+            config.patch_resolution,
+        );
         respawned = true;
-    }
-
-    if let Some(ssb) = storage_buffers.get_mut(&patch_entities.patch_buffer_handle) {
-        let descs: Vec<PatchDescriptorGpu> = patches
-            .iter()
-            .map(|p| PatchDescriptorGpu {
-                origin_ws: [p.origin_ws.x, p.origin_ws.y],
-                patch_size_ws: p.patch_size_ws,
-                lod_level: p.lod_level,
-                morph_start: p.morph_start,
-                morph_end: p.morph_end,
-                patch_kind: p.patch_kind,
-                _pad0: 0,
-            })
-            .collect();
-        ssb.data = Some(bytemuck::cast_slice(&descs).to_vec());
     }
 
     if respawned {
@@ -941,7 +898,11 @@ fn respawn_patch_entities(
     commands: &mut Commands,
     patch_entities: &mut PatchEntities,
     patches: &[PatchInstanceCpu],
+    height_scale: f32,
+    patch_resolution: u32,
 ) {
+    let local_aabb = terrain_patch_local_aabb(height_scale, patch_resolution);
+
     for entity in patch_entities.entities.drain(..) {
         commands.entity(entity).despawn();
     }
@@ -962,11 +923,27 @@ fn respawn_patch_entities(
                     patch_origin_ws: patch.origin_ws,
                     patch_scale_ws: patch.patch_size_ws,
                 },
-                NoWireframe,
+                local_aabb,
+                // Prevent Bevy's calculate_bounds system from overwriting the
+                // manual AABB with the flat mesh bounds (all vertices at Y=0).
+                // The clipmap ring builder already manages patch visibility.
                 NoFrustumCulling,
+                NoWireframe,
             ))
             .id();
 
         patch_entities.entities.push(entity);
     }
+}
+
+fn terrain_patch_local_aabb(height_scale: f32, patch_resolution: u32) -> Aabb {
+    // Geomorphing can snap vertices onto the next coarser lattice, which moves
+    // seam vertices up to one coarse texel (2 / patch_resolution in local X/Z)
+    // outside the nominal [0, 1] patch footprint. Pad the local bounds so
+    // Bevy's frustum culler stays conservative for near seam patches.
+    let morph_pad = 2.0 / patch_resolution.max(1) as f32;
+    Aabb::from_min_max(
+        Vec3::new(-morph_pad, 0.0, -morph_pad),
+        Vec3::new(1.0 + morph_pad, height_scale.max(1.0), 1.0 + morph_pad),
+    )
 }

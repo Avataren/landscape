@@ -19,10 +19,12 @@ pub struct TerrainCamera {
 
 impl Default for TerrainCamera {
     fn default() -> Self {
-        // Forward bias on by default — both first-person and freecam benefit
-        // because the visible ground sits ahead of the camera in either mode.
+        // Keep the finest clipmap centered on the camera by default. Forward
+        // projection can improve foreground detail in some views, but it can
+        // also make near visible terrain appear to "drop out" when the finest
+        // coverage is pushed too far ahead of the player.
         Self {
-            forward_bias_ratio: 0.5,
+            forward_bias_ratio: 0.0,
         }
     }
 }

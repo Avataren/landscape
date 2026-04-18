@@ -1,5 +1,4 @@
 pub mod extract;
-pub mod gpu_types;
 pub mod pipelines;
 pub mod prepare;
 pub mod queue;

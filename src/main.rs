@@ -25,6 +25,9 @@ use player::{CameraMode, PlayerPlugin};
 
 const WINDOW_TITLE: &str = "Landscape Renderer";
 
+#[derive(Resource)]
+struct ShadowsEnabled(bool);
+
 fn main() {
     // Priority: --level arg > preferences default > empty editor (no terrain)
     let level_arg = {
@@ -55,13 +58,13 @@ fn main() {
 
     App::new()
         .insert_resource(ClearColor(Color::BLACK))
-        // The terrain shader adds its own hemisphere ambient (sky/ground bounce),
-        // so this is only a flat fill for non-terrain objects.  Keep it small.
+        // Terrain uses the atmosphere cubemap for ambient IBL; non-terrain PBR
+        // objects also receive IBL from AtmosphereEnvironmentMapLight on the camera.
         .insert_resource(GlobalAmbientLight {
-            color: Color::WHITE,
-            brightness: 500.0,
+            brightness: 0.0,
             ..default()
         })
+        .insert_resource(ShadowsEnabled(true))
         .add_plugins(FrameTimeDiagnosticsPlugin::default())
         .add_plugins(
             DefaultPlugins
@@ -91,6 +94,7 @@ fn main() {
         .add_plugins(PlayerPlugin)
         .add_systems(Startup, setup_scene)
         .add_systems(Update, (camera_move, camera_look).chain())
+        .add_systems(Update, toggle_shadows)
         .add_systems(Update, update_window_title)
         .run();
 }
@@ -118,10 +122,9 @@ fn setup_scene(mut commands: Commands, mut scattering_mediums: ResMut<Assets<Sca
         // Position at a comfortable altitude and look at terrain centre so the
         // view is correct from the first frame in freecam mode.
         Transform::from_xyz(0.0, 800.0, 1200.0).looking_at(Vec3::ZERO, Vec3::Y),
-        // TerrainCamera::default() turns on the forward-bias for clipmap
-        // centers — the LOD rings shift along the camera's view direction so
-        // fine geometry covers the visible foreground in both freecam and
-        // walking views.  See `TerrainCamera::forward_bias_ratio`.
+        // TerrainCamera drives terrain LOD/streaming. The forward-bias remains
+        // available via `forward_bias_ratio`, but the default keeps the finest
+        // ring centered on the camera for reliable near-field coverage.
         TerrainCamera::default(),
     ));
 
@@ -135,15 +138,10 @@ fn setup_scene(mut commands: Commands, mut scattering_mediums: ResMut<Assets<Sca
         // Low-angle sun (~14° elevation) casts long shadows across terrain features.
         // X rotates the light down from horizontal; Y sets the azimuth.
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.25, 0.8, 0.0)),
-        // Cascade shadow bounds tuned to the terrain scale (world ±2048, camera
-        // starts ~8 000 wu out).  Four cascades cover close detail through the
-        // full visible range.
         CascadeShadowConfigBuilder {
             num_cascades: 4,
             minimum_distance: 1.0,
             first_cascade_far_bound: 500.0,
-            // 8 km covers meaningful terrain shadow distance without the sparse
-            // texel coverage that made the 20 km last cascade useless.
             maximum_distance: 8_000.0,
             overlap_proportion: 0.2,
         }
@@ -234,6 +232,21 @@ fn camera_look(
     let pitch_rot = Quat::from_axis_angle(right, pitch);
 
     t.rotation = (yaw_rot * pitch_rot * t.rotation).normalize();
+}
+
+fn toggle_shadows(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut enabled: ResMut<ShadowsEnabled>,
+    mut lights: Query<&mut DirectionalLight>,
+) {
+    if !keys.just_pressed(KeyCode::F7) {
+        return;
+    }
+    enabled.0 = !enabled.0;
+    for mut light in &mut lights {
+        light.shadows_enabled = enabled.0;
+    }
+    info!("Shadows {}", if enabled.0 { "ON (F7)" } else { "OFF (F7)" });
 }
 
 fn update_window_title(

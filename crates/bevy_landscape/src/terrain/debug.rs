@@ -1,12 +1,13 @@
 use crate::terrain::{
     clipmap::build_patch_instances_for_view_in_bounds,
     clipmap_texture::TerrainClipmapState,
+    components::TerrainPatchInstance,
     config::TerrainConfig,
     material::TerrainMaterial,
     resources::{TerrainResidency, TerrainViewState},
     world_desc::TerrainSourceDesc,
 };
-use bevy::{pbr::wireframe::WireframeConfig, prelude::*};
+use bevy::{camera::primitives::Aabb, pbr::wireframe::WireframeConfig, prelude::*};
 
 // ---------------------------------------------------------------------------
 // Debug config resource
@@ -215,6 +216,7 @@ pub fn log_terrain_stats(
     residency: Res<TerrainResidency>,
     debug_cfg: Res<TerrainDebugConfig>,
     time: Res<Time>,
+    patch_query: Query<(&Aabb, &TerrainPatchInstance)>,
 ) {
     if !debug_cfg.show_stats {
         return;
@@ -238,6 +240,17 @@ pub fn log_terrain_stats(
         residency.pending_upload.len(),
         residency.required_now.len(),
     );
+
+    // Print the AABB of the first terrain patch to diagnose culling issues.
+    // If Y half_extents ≈ 0, Bevy's calculate_bounds overwrote the manual AABB.
+    if let Some((aabb, patch)) = patch_query.iter().next() {
+        let min = Vec3::from(aabb.center) - Vec3::from(aabb.half_extents);
+        let max = Vec3::from(aabb.center) + Vec3::from(aabb.half_extents);
+        info!(
+            "[Terrain] L{} patch AABB local: min=({:.2},{:.2},{:.2}) max=({:.2},{:.2},{:.2})",
+            patch.lod_level, min.x, min.y, min.z, max.x, max.y, max.z,
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -19,6 +19,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 
+[features]
+trace_tracy = ["bevy/trace_tracy"]
+trace_chrome = ["bevy/trace_chrome"]
+
 [dev-dependencies]
 tempfile = "3"
 

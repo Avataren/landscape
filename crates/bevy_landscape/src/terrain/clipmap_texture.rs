@@ -1262,8 +1262,29 @@ pub fn apply_tiles_to_clipmap(
     // Avoid rewriting every resident tile when only a clip-center strip moved.
     // Existing texels stay valid in the toroidal layout; only newly exposed
     // texels need resident tile data stamped back in.
-    let tile_snapshot: Vec<&HeightTileCpu> = if needs_rebuild || centers_changed {
+    //
+    // When centers moved but no rebuild is needed, pre-filter resident tiles to
+    // only those whose LOD level actually had a center change — avoids iterating
+    // all 256 tiles when only coarse levels scrolled.
+    let changed_levels: std::collections::HashSet<usize> = if centers_changed && !needs_rebuild {
+        (0..levels)
+            .filter(|&i| {
+                view.clip_centers.get(i).copied().unwrap_or(IVec2::ZERO)
+                    != state.tile_apply_centers[i]
+            })
+            .collect()
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    let tile_snapshot: Vec<&HeightTileCpu> = if needs_rebuild {
         residency.resident_cpu.values().collect()
+    } else if centers_changed {
+        residency
+            .resident_cpu
+            .values()
+            .filter(|t| changed_levels.contains(&(t.key.level as usize)))
+            .collect()
     } else {
         new_tile_keys
             .iter()

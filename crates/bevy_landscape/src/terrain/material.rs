@@ -3,11 +3,8 @@ use bevy::{
     mesh::MeshVertexBufferLayoutRef,
     pbr::{MaterialPipeline, MaterialPipelineKey},
     prelude::*,
-    render::{
-        render_resource::{
-            AsBindGroup, Face, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
-        },
-        storage::ShaderStorageBuffer,
+    render::render_resource::{
+        AsBindGroup, Face, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
     },
     shader::ShaderRef,
 };
@@ -126,12 +123,6 @@ pub struct TerrainMaterial {
     #[texture(5, visibility(vertex, fragment), dimension = "2d_array")]
     #[sampler(6, visibility(vertex, fragment))]
     pub normal_texture: Handle<Image>,
-
-    /// One `PatchDescriptorGpu` per patch instance, indexed by `instance_index`
-    /// in the vertex shader.  Replaces the Transform-matrix decode and provides
-    /// the explicit `lod_level` needed by the storage-buffer path.
-    #[storage(7, read_only, visibility(vertex))]
-    pub patch_buffer: Handle<ShaderStorageBuffer>,
 }
 
 impl Material for TerrainMaterial {
