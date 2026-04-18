@@ -100,46 +100,6 @@ fn band(v: f32, lo: f32, hi: f32, fade: f32) -> f32 {
     return clamp(lo_w * hi_w, 0.0, 1.0);
 }
 
-// Blend the active material slots procedurally by altitude + slope.
-// Weights are `visibility × altitude_band × slope_band`, then normalised.
-// When the sum is negligible the caller's fallback colour is returned
-// unchanged so the terrain never goes black during the first-frame warmup
-// before the library sync system writes real data.
-fn material_library_albedo(
-    world_y:   f32,
-    slope_deg: f32,
-    fallback:  vec3<f32>,
-) -> vec3<f32> {
-    let count = u32(terrain.slot_header.x);
-    if count == 0u {
-        return fallback;
-    }
-
-    let alt_fade   = max(terrain.height_scale * 0.05, 1.0);
-    let slope_fade = 3.0;
-
-    var sum_col    = vec3<f32>(0.0);
-    var sum_weight = 0.0;
-
-    for (var i: u32 = 0u; i < count; i = i + 1u) {
-        let slot = terrain.slots[i];
-        let vis  = slot.tint_vis.w;
-        if vis <= 0.0 {
-            continue;
-        }
-        let w_alt   = band(world_y,   slot.ranges.x, slot.ranges.y, alt_fade);
-        let w_slope = band(slope_deg, slot.ranges.z, slot.ranges.w, slope_fade);
-        let w       = vis * w_alt * w_slope;
-        sum_col     = sum_col + slot.tint_vis.rgb * w;
-        sum_weight  = sum_weight + w;
-    }
-
-    if sum_weight < 1e-4 {
-        return fallback;
-    }
-    return sum_col / sum_weight;
-}
-
 // Sample PBR albedo textures blended by altitude + slope weights.
 // When a slot has a real texture (uv_scale.z > 0.5) the array layer is
 // sampled using world-space tiling; otherwise the slot tint is used.
@@ -283,9 +243,14 @@ fn sample_pbr_albedo(
 
         var col: vec3<f32>;
         if slot.uv_scale.z > 0.5 {
-            let fine_scale = max(slot.uv_scale.x, 0.01);
-            let uv = world_xz / fine_scale;
-            col = textureSample(pbr_albedo_arr, pbr_albedo_samp, uv, i32(i)).rgb;
+            let fine_scale   = max(slot.uv_scale.x, 0.01);
+            let coarse_scale = fine_scale * max(slot.uv_scale.y, 2.0);
+            let uv_fine   = world_xz / fine_scale;
+            let uv_coarse = world_xz / coarse_scale;
+            let c_fine   = textureSample(pbr_albedo_arr, pbr_albedo_samp, uv_fine,   i32(i)).rgb;
+            let c_coarse = textureSample(pbr_albedo_arr, pbr_albedo_samp, uv_coarse, i32(i)).rgb;
+            // Dual-scale blend: coarse breaks up tiling, fine preserves detail.
+            col = c_fine * 0.7 + c_coarse * 0.3;
         } else {
             col = slot.tint_vis.rgb;
         }
@@ -453,8 +418,9 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
 
     // Slope from the macro normal drives zone selection (albedo/normal blending),
     // so both functions see the same weights regardless of detail perturbation.
-    let macro_slope     = 1.0 - abs(dot(n_macro, vec3<f32>(0.0, 1.0, 0.0)));
-    let slope_deg       = degrees(asin(clamp(macro_slope, 0.0, 1.0)));
+    // acos(N·up) gives the true angle from horizontal (0° flat, 90° vertical).
+    let macro_ndotu = abs(dot(n_macro, vec3<f32>(0.0, 1.0, 0.0)));
+    let slope_deg   = degrees(acos(clamp(macro_ndotu, 0.0, 1.0)));
 
     // Apply per-slot normal map detail on top of the macro normal.
     let n = apply_normal_detail(n_macro, in.world_pos.xz, in.world_pos.y, slope_deg);

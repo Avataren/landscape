@@ -21,13 +21,10 @@ pub use debug::TerrainDebugPlugin;
 pub use world_desc::TerrainSourceDesc;
 
 use bevy::{
-    asset::RenderAssetUsages,
     camera::primitives::Aabb,
     camera::visibility::NoFrustumCulling,
-    image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     pbr::wireframe::{NoWireframe, WireframePlugin},
     prelude::*,
-    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 use clipmap::{build_patch_instances_for_view_in_bounds, PatchInstanceCpu};
 use clipmap_texture::{
@@ -468,31 +465,6 @@ fn sync_preload_tiles(
         "[Terrain] Preload: {} tiles loaded synchronously.",
         results.len()
     );
-}
-
-/// 1×1 texture_2d_array with `MAX_SHADER_MATERIAL_SLOTS` layers, all filled
-/// with `fill` (RGBA u8).  Used as a neutral placeholder for the three PBR
-/// texture arrays before real textures are loaded from disk.
-fn placeholder_pbr_array(fill: [u8; 4]) -> Image {
-    use material::MAX_SHADER_MATERIAL_SLOTS;
-    let layers = MAX_SHADER_MATERIAL_SLOTS as u32;
-    let data = fill.repeat(layers as usize);
-    let mut image = Image::new(
-        Extent3d { width: 1, height: 1, depth_or_array_layers: layers },
-        TextureDimension::D2,
-        data,
-        TextureFormat::Rgba8Unorm,
-        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-    );
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-        address_mode_u: ImageAddressMode::Repeat,
-        address_mode_v: ImageAddressMode::Repeat,
-        address_mode_w: ImageAddressMode::Repeat,
-        mag_filter: ImageFilterMode::Linear,
-        min_filter: ImageFilterMode::Linear,
-        ..default()
-    });
-    image
 }
 
 /// Spawns patch entities and creates the initial clipmap texture array.

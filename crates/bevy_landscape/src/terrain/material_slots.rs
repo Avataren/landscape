@@ -51,44 +51,56 @@ pub struct MaterialLibrary {
 
 impl Default for MaterialLibrary {
     fn default() -> Self {
-        let mut grass = MaterialSlot::new("Grass");
-        grass.tint = [0.28, 0.52, 0.18];
-        grass.procedural.altitude_range_m = Vec2::new(-10_000.0, 10_000.0);
-        grass.procedural.slope_range_deg = Vec2::new(0.0, 18.0);
-        grass.albedo_path = Some("textures/forrest_ground_01_4k.blend/textures/forrest_ground_01_diff_4k.jpg".into());
-        grass.normal_path = Some("textures/forrest_ground_01_4k.blend/textures/forrest_ground_01_nor_gl_4k.exr".into());
-        grass.orm_path    = Some("textures/forrest_ground_01_4k.blend/textures/forrest_ground_01_rough_4k.jpg".into());
-        grass.height_path = Some("textures/forrest_ground_01_4k.blend/textures/forrest_ground_01_disp_4k.png".into());
+        // Flat ground: rocky terrain texture — looks better than forest floor for
+        // open mountain landscapes.  Wide tiles (6 m) keep it readable at distance.
+        let mut ground = MaterialSlot::new("Ground");
+        ground.tint = [0.42, 0.38, 0.32];
+        ground.fine_scale_m = 6.0;
+        ground.coarse_scale_mul = 6.0;
+        ground.procedural.altitude_range_m = Vec2::new(-10_000.0, 10_000.0);
+        ground.procedural.slope_range_deg = Vec2::new(0.0, 25.0);
+        ground.albedo_path = Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_diff_4k.jpg".into());
+        ground.normal_path = Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_nor_gl_4k.exr".into());
+        ground.orm_path    = Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_rough_4k.exr".into());
+        ground.height_path = Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_disp_4k.png".into());
 
-        let mut soil = MaterialSlot::new("Sand / Soil");
-        soil.tint = [0.50, 0.40, 0.28];
-        soil.procedural.altitude_range_m = Vec2::new(-10_000.0, 10_000.0);
-        soil.procedural.slope_range_deg = Vec2::new(12.0, 30.0);
-        soil.albedo_path = Some("textures/coast_sand_03_4k.blend/textures/coast_sand_03_diff_4k.jpg".into());
-        soil.normal_path = Some("textures/coast_sand_03_4k.blend/textures/coast_sand_03_nor_gl_4k.exr".into());
-        soil.orm_path    = Some("textures/coast_sand_03_4k.blend/textures/coast_sand_03_rough_4k.exr".into());
-        soil.height_path = Some("textures/coast_sand_03_4k.blend/textures/coast_sand_03_disp_4k.png".into());
+        // Mid-slope: mossy/pitted rock transition zone.
+        let mut mid_rock = MaterialSlot::new("Mid Rock");
+        mid_rock.tint = [0.38, 0.36, 0.30];
+        mid_rock.fine_scale_m = 4.0;
+        mid_rock.coarse_scale_mul = 6.0;
+        mid_rock.procedural.altitude_range_m = Vec2::new(-10_000.0, 10_000.0);
+        mid_rock.procedural.slope_range_deg = Vec2::new(18.0, 45.0);
+        mid_rock.albedo_path = Some("textures/rock_boulder_cracked_4k.blend/textures/rock_boulder_cracked_diff_4k.jpg".into());
+        mid_rock.normal_path = Some("textures/rock_boulder_cracked_4k.blend/textures/rock_boulder_cracked_nor_gl_4k.exr".into());
+        mid_rock.orm_path    = Some("textures/rock_boulder_cracked_4k.blend/textures/rock_boulder_cracked_rough_4k.exr".into());
+        mid_rock.height_path = Some("textures/rock_boulder_cracked_4k.blend/textures/rock_boulder_cracked_disp_4k.png".into());
 
-        let mut rock = MaterialSlot::new("Rock");
-        rock.tint = [0.44, 0.38, 0.32];
-        rock.procedural.altitude_range_m = Vec2::new(-10_000.0, 10_000.0);
-        rock.procedural.slope_range_deg = Vec2::new(28.0, 90.0);
-        rock.albedo_path = Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_diff_4k.jpg".into());
-        rock.normal_path = Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_nor_gl_4k.exr".into());
-        rock.orm_path    = Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_rough_4k.exr".into());
-        rock.height_path = Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_disp_4k.png".into());
+        // Steep cliff faces.
+        let mut cliff = MaterialSlot::new("Cliff");
+        cliff.tint = [0.40, 0.36, 0.32];
+        cliff.fine_scale_m = 3.0;
+        cliff.coarse_scale_mul = 6.0;
+        cliff.procedural.altitude_range_m = Vec2::new(-10_000.0, 10_000.0);
+        cliff.procedural.slope_range_deg = Vec2::new(38.0, 90.0);
+        cliff.albedo_path = Some("textures/rock_wall_02_4k.blend/textures/rock_wall_02_diff_4k.jpg".into());
+        cliff.normal_path = Some("textures/rock_wall_02_4k.blend/textures/rock_wall_02_nor_gl_4k.exr".into());
+        cliff.orm_path    = Some("textures/rock_wall_02_4k.blend/textures/rock_wall_02_rough_4k.jpg".into());
+        cliff.height_path = Some("textures/rock_wall_02_4k.blend/textures/rock_wall_02_disp_4k.png".into());
 
         let mut snow = MaterialSlot::new("Snow");
         snow.tint = [0.90, 0.93, 0.98];
+        snow.fine_scale_m = 8.0;
+        snow.coarse_scale_mul = 5.0;
         snow.procedural.altitude_range_m = Vec2::new(600.0, 10_000.0);
-        snow.procedural.slope_range_deg = Vec2::new(0.0, 55.0);
-        snow.albedo_path = Some("textures/snow_02_4k.blend/textures/snow_02_diff_4k.jpg".into());
-        snow.normal_path = Some("textures/snow_02_4k.blend/textures/snow_02_nor_gl_4k.exr".into());
-        snow.orm_path    = Some("textures/snow_02_4k.blend/textures/snow_02_rough_4k.jpg".into());
-        snow.height_path = Some("textures/snow_02_4k.blend/textures/snow_02_disp_4k.png".into());
+        snow.procedural.slope_range_deg = Vec2::new(0.0, 50.0);
+        snow.albedo_path = Some("textures/forrest_ground_01_4k.blend/textures/forrest_ground_01_diff_4k.jpg".into());
+        snow.normal_path = Some("textures/forrest_ground_01_4k.blend/textures/forrest_ground_01_nor_gl_4k.exr".into());
+        snow.orm_path    = Some("textures/forrest_ground_01_4k.blend/textures/forrest_ground_01_rough_4k.jpg".into());
+        snow.height_path = Some("textures/forrest_ground_01_4k.blend/textures/forrest_ground_01_disp_4k.png".into());
 
         Self {
-            slots: vec![grass, soil, rock, snow],
+            slots: vec![ground, mid_rock, cliff, snow],
             max_slots: DEFAULT_MAX_MATERIAL_SLOTS,
             use_macro_color_override: false,
             macro_color_loaded: false,
