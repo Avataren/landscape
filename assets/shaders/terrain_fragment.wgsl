@@ -10,8 +10,12 @@
 // slope/altitude blend (fallback).  Lambertian diffuse BRDF; no specular
 // (terrain reads best with diffuse-only shading).
 
+// Module alias lets us access conditional bindings (e.g. diffuse_environment_map
+// vs diffuse_environment_maps) without name-importing symbols that may not exist
+// depending on MULTIPLE_LIGHT_PROBES_IN_ARRAY / ENVIRONMENT_MAP defines.
+#import bevy_pbr::mesh_view_bindings as view_bindings
 #import bevy_pbr::{
-    mesh_view_bindings::{lights, view, clusterable_objects},
+    mesh_view_bindings::{lights, view, clusterable_objects, light_probes},
     mesh_view_types::{
         DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
         POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
@@ -29,6 +33,7 @@
 struct MaterialSlotGpu {
     tint_vis: vec4<f32>,   // rgb = tint, a = visibility (0/1)
     ranges:   vec4<f32>,   // x = alt_min, y = alt_max, z = slope_min°, w = slope_max°
+    uv_scale: vec4<f32>,   // x = fine_scale_m, y = coarse_scale_mul, z = has_tex (0/1), w = reserved
 }
 
 struct TerrainParams {
@@ -46,13 +51,19 @@ struct TerrainParams {
     slots:       array<MaterialSlotGpu, 8>,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var height_tex:  texture_2d_array<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var height_samp: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(3) var macro_color_tex:  texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(4) var macro_color_samp: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(2) var<uniform> terrain: TerrainParams;
-@group(#{MATERIAL_BIND_GROUP}) @binding(5) var normal_tex:  texture_2d_array<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(6) var normal_samp: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(0)  var height_tex:       texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(1)  var height_samp:      sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(2)  var<uniform> terrain: TerrainParams;
+@group(#{MATERIAL_BIND_GROUP}) @binding(3)  var macro_color_tex:  texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(4)  var macro_color_samp: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(5)  var normal_tex:       texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(6)  var normal_samp:      sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(7)  var pbr_albedo_arr:   texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(8)  var pbr_albedo_samp:  sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(9)  var pbr_normal_arr:   texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(10) var pbr_normal_samp:  sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(11) var pbr_orm_arr:      texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(12) var pbr_orm_samp:     sampler;
 
 // Must match TerrainVOut in terrain_vertex.wgsl.
 struct TerrainVOut {
@@ -104,7 +115,6 @@ fn material_library_albedo(
         return fallback;
     }
 
-    // Fade bands: ~5 % of terrain height-scale for altitude, 3° for slope.
     let alt_fade   = max(terrain.height_scale * 0.05, 1.0);
     let slope_fade = 3.0;
 
@@ -122,6 +132,166 @@ fn material_library_albedo(
         let w       = vis * w_alt * w_slope;
         sum_col     = sum_col + slot.tint_vis.rgb * w;
         sum_weight  = sum_weight + w;
+    }
+
+    if sum_weight < 1e-4 {
+        return fallback;
+    }
+    return sum_col / sum_weight;
+}
+
+// Sample PBR albedo textures blended by altitude + slope weights.
+// When a slot has a real texture (uv_scale.z > 0.5) the array layer is
+// sampled using world-space tiling; otherwise the slot tint is used.
+// Perturb the macro terrain normal with per-slot PBR normal maps.
+// Each slot's tangent-space detail normal is decoded from Rgba8Unorm
+// (stored as nx*0.5+0.5, ny*0.5+0.5, nz*0.5+0.5) and blended by the same
+// altitude+slope weights used for albedo.  Returns `base_n` unchanged when
+// no slots are active or none have texture data.
+fn apply_normal_detail(
+    base_n:    vec3<f32>,
+    world_xz:  vec2<f32>,
+    world_y:   f32,
+    slope_deg: f32,
+) -> vec3<f32> {
+    let count = u32(terrain.slot_header.x);
+    if count == 0u {
+        return base_n;
+    }
+
+    let alt_fade   = max(terrain.height_scale * 0.05, 1.0);
+    let slope_fade = 3.0;
+
+    // Build TBN from the macro normal so detail normal perturbation is
+    // consistent regardless of terrain slope.
+    // For near-vertical normals, fall back to a safe up-axis.
+    let ref_up = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0),
+                        abs(base_n.y) < 0.99);
+    let tangent   = normalize(cross(ref_up, base_n));
+    let bitangent = cross(base_n, tangent);
+
+    var sum_n      = vec3<f32>(0.0);
+    var sum_weight = 0.0;
+
+    for (var i: u32 = 0u; i < count; i = i + 1u) {
+        let slot = terrain.slots[i];
+        let vis  = slot.tint_vis.w;
+        if vis <= 0.0 {
+            continue;
+        }
+        let w_alt   = band(world_y,   slot.ranges.x, slot.ranges.y, alt_fade);
+        let w_slope = band(slope_deg, slot.ranges.z, slot.ranges.w, slope_fade);
+        let w       = vis * w_alt * w_slope;
+
+        var perturbed: vec3<f32>;
+        if slot.uv_scale.z > 0.5 {
+            let fine_scale = max(slot.uv_scale.x, 0.01);
+            let uv  = world_xz / fine_scale;
+            let smp = textureSample(pbr_normal_arr, pbr_normal_samp, uv, i32(i)).rgb;
+            // Decode: stored as (v*0.5+0.5), recover signed [-1,1] tangent-space XY.
+            let ts_xy = smp.rg * 2.0 - 1.0;
+            let ts_z  = sqrt(max(0.0, 1.0 - dot(ts_xy, ts_xy)));
+            // Reorient into world space using the macro surface TBN.
+            perturbed = normalize(tangent * ts_xy.x + bitangent * ts_xy.y + base_n * (ts_z + 1.0));
+        } else {
+            perturbed = base_n;
+        }
+
+        sum_n      = sum_n + perturbed * w;
+        sum_weight = sum_weight + w;
+    }
+
+    if sum_weight < 1e-4 {
+        return base_n;
+    }
+    return normalize(sum_n / sum_weight);
+}
+
+// Weighted-average roughness from per-slot ORM maps (G channel).
+// Returns 0.5 (neutral) when no slots are active or no ORM textures are loaded.
+fn sample_roughness(
+    world_xz:  vec2<f32>,
+    world_y:   f32,
+    slope_deg: f32,
+) -> f32 {
+    let count = u32(terrain.slot_header.x);
+    if count == 0u {
+        return 0.5;
+    }
+
+    let alt_fade   = max(terrain.height_scale * 0.05, 1.0);
+    let slope_fade = 3.0;
+
+    var sum_r      = 0.0;
+    var sum_weight = 0.0;
+
+    for (var i: u32 = 0u; i < count; i = i + 1u) {
+        let slot = terrain.slots[i];
+        let vis  = slot.tint_vis.w;
+        if vis <= 0.0 {
+            continue;
+        }
+        let w_alt   = band(world_y,   slot.ranges.x, slot.ranges.y, alt_fade);
+        let w_slope = band(slope_deg, slot.ranges.z, slot.ranges.w, slope_fade);
+        let w       = vis * w_alt * w_slope;
+
+        var r: f32;
+        if slot.uv_scale.z > 0.5 {
+            let fine_scale = max(slot.uv_scale.x, 0.01);
+            let uv = world_xz / fine_scale;
+            r = textureSample(pbr_orm_arr, pbr_orm_samp, uv, i32(i)).g;
+        } else {
+            r = 0.5;
+        }
+
+        sum_r      = sum_r + r * w;
+        sum_weight = sum_weight + w;
+    }
+
+    if sum_weight < 1e-4 {
+        return 0.5;
+    }
+    return sum_r / sum_weight;
+}
+
+fn sample_pbr_albedo(
+    world_xz:  vec2<f32>,
+    world_y:   f32,
+    slope_deg: f32,
+    fallback:  vec3<f32>,
+) -> vec3<f32> {
+    let count = u32(terrain.slot_header.x);
+    if count == 0u {
+        return fallback;
+    }
+
+    let alt_fade   = max(terrain.height_scale * 0.05, 1.0);
+    let slope_fade = 3.0;
+
+    var sum_col    = vec3<f32>(0.0);
+    var sum_weight = 0.0;
+
+    for (var i: u32 = 0u; i < count; i = i + 1u) {
+        let slot = terrain.slots[i];
+        let vis  = slot.tint_vis.w;
+        if vis <= 0.0 {
+            continue;
+        }
+        let w_alt   = band(world_y,   slot.ranges.x, slot.ranges.y, alt_fade);
+        let w_slope = band(slope_deg, slot.ranges.z, slot.ranges.w, slope_fade);
+        let w       = vis * w_alt * w_slope;
+
+        var col: vec3<f32>;
+        if slot.uv_scale.z > 0.5 {
+            let fine_scale = max(slot.uv_scale.x, 0.01);
+            let uv = world_xz / fine_scale;
+            col = textureSample(pbr_albedo_arr, pbr_albedo_samp, uv, i32(i)).rgb;
+        } else {
+            col = slot.tint_vis.rgb;
+        }
+
+        sum_col    = sum_col + col * w;
+        sum_weight = sum_weight + w;
     }
 
     if sum_weight < 1e-4 {
@@ -279,7 +449,15 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     let frag_xz    = in.world_pos.xz;
     let n_fine     = shading_normal(in.lod_level, frag_xz);
     let n_coarse   = shading_normal(coarse_lod,   frag_xz);
-    let n          = normalize(mix(n_fine, n_coarse, in.morph_alpha));
+    let n_macro    = normalize(mix(n_fine, n_coarse, in.morph_alpha));
+
+    // Slope from the macro normal drives zone selection (albedo/normal blending),
+    // so both functions see the same weights regardless of detail perturbation.
+    let macro_slope     = 1.0 - abs(dot(n_macro, vec3<f32>(0.0, 1.0, 0.0)));
+    let slope_deg       = degrees(asin(clamp(macro_slope, 0.0, 1.0)));
+
+    // Apply per-slot normal map detail on top of the macro normal.
+    let n = apply_normal_detail(n_macro, in.world_pos.xz, in.world_pos.y, slope_deg);
 
     // --- Debug: render normals as colour and skip lighting/material ---
     // X+ → red, Y+ → green (mostly green for upward-facing terrain),
@@ -290,16 +468,13 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     }
 
     // --- Albedo ---
-    // `slope` = sin(angle_from_horizontal) = 1 - |n·up|.  The material library
-    // uses the angle in degrees so rules like "rock above 28°" read naturally.
-    let slope     = 1.0 - abs(dot(n, vec3<f32>(0.0, 1.0, 0.0)));
-    let slope_deg = degrees(asin(clamp(slope, 0.0, 1.0)));
-    let h_norm    = clamp(in.world_pos.y / terrain.height_scale, 0.0, 1.0);
+    let slope  = 1.0 - abs(dot(n, vec3<f32>(0.0, 1.0, 0.0)));
+    let h_norm = clamp(in.world_pos.y / terrain.height_scale, 0.0, 1.0);
 
     // Fallback used when the material library is empty (count == 0) or all
     // slots have zero weight at this fragment.  Keeps the terrain visible.
     let fallback = procedural_albedo(slope, h_norm);
-    var albedo   = material_library_albedo(in.world_pos.y, slope_deg, fallback);
+    var albedo   = sample_pbr_albedo(in.world_pos.xz, in.world_pos.y, slope_deg, fallback);
     if terrain.bounds_fade.y > 0.5 {
         // textureSample (not textureSampleLevel) lets the GPU pick the correct
         // mip based on screen-space derivatives — better antialiasing at distance.
@@ -321,11 +496,12 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     );
     let is_orthographic = view.clip_from_view[3].w == 1.0;
 
-    // Lambertian BRDF numerator: albedo / π (denominator is cancelled by
-    // the π in the irradiance-to-radiance conversion already baked into
-    // light.color.rgb for directional lights, and absent for point/spot
-    // which pass colour × intensity directly).
-    let diffuse = albedo / 3.14159;
+    // Sample roughness and apply an Oren-Nayar A term to the diffuse.
+    // Rough surfaces (rock) appear more matte; smooth surfaces (sand) brighter.
+    let roughness = sample_roughness(in.world_pos.xz, in.world_pos.y, slope_deg);
+    let sigma2    = roughness * roughness;
+    let on_a      = 1.0 - sigma2 / (2.0 * (sigma2 + 0.33));
+    let diffuse   = albedo / 3.14159 * on_a;
 
     var direct = vec3<f32>(0.0);
 
@@ -408,12 +584,32 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     }
 
     // --- Ambient ---
-    // Hemisphere ambient (sky/ground bounce) gives physically motivated diffuse
-    // sky light without requiring cubemap sampling.  The result is in display
-    // space; dividing by view.exposure puts it in the same physical-unit scale
-    // as `direct` so the final `* view.exposure` restores the display fraction.
-    // lights.ambient_color is the GlobalAmbientLight flat term (may be zero).
+    // Sample diffuse irradiance from the atmosphere-generated cubemap when available.
+    // Uses the view probe (atmosphere covers the whole world, no local probe needed).
+    // Handles both bindless (MULTIPLE_LIGHT_PROBES_IN_ARRAY) and single-texture paths.
+    // Falls back to the hemisphere approximation when no environment map is present.
+#ifdef ENVIRONMENT_MAP
+    var irradiance = vec3<f32>(0.0);
+    let view_probe_idx = light_probes.view_cubemap_index;
+    if view_probe_idx >= 0 {
+#ifdef MULTIPLE_LIGHT_PROBES_IN_ARRAY
+        irradiance = textureSampleLevel(
+            view_bindings::diffuse_environment_maps[view_probe_idx],
+            view_bindings::environment_map_sampler,
+            n, 0.0,
+        ).rgb * light_probes.intensity_for_view;
+#else
+        irradiance = textureSampleLevel(
+            view_bindings::diffuse_environment_map,
+            view_bindings::environment_map_sampler,
+            n, 0.0,
+        ).rgb * light_probes.intensity_for_view;
+#endif
+    }
+    let sky_ambient_physical = albedo * irradiance;
+#else
     let sky_ambient_physical = hemisphere_ambient(n, albedo) / max(view.exposure, 1e-10);
+#endif
     let flat_ambient         = albedo * lights.ambient_color.rgb;
     let ambient              = sky_ambient_physical + flat_ambient;
 

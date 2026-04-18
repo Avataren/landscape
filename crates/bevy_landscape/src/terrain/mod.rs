@@ -9,6 +9,7 @@ pub mod material;
 pub mod material_slots;
 pub mod math;
 pub mod patch_mesh;
+pub mod pbr_textures;
 pub mod physics_colliders;
 pub mod render;
 pub mod residency;
@@ -20,10 +21,13 @@ pub use debug::TerrainDebugPlugin;
 pub use world_desc::TerrainSourceDesc;
 
 use bevy::{
+    asset::RenderAssetUsages,
     camera::primitives::Aabb,
+    camera::visibility::NoFrustumCulling,
+    image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     pbr::wireframe::{NoWireframe, WireframePlugin},
     prelude::*,
-    camera::visibility::NoFrustumCulling,
+    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
 use clipmap::{build_patch_instances_for_view_in_bounds, PatchInstanceCpu};
 use clipmap_texture::{
@@ -466,6 +470,31 @@ fn sync_preload_tiles(
     );
 }
 
+/// 1×1 texture_2d_array with `MAX_SHADER_MATERIAL_SLOTS` layers, all filled
+/// with `fill` (RGBA u8).  Used as a neutral placeholder for the three PBR
+/// texture arrays before real textures are loaded from disk.
+fn placeholder_pbr_array(fill: [u8; 4]) -> Image {
+    use material::MAX_SHADER_MATERIAL_SLOTS;
+    let layers = MAX_SHADER_MATERIAL_SLOTS as u32;
+    let data = fill.repeat(layers as usize);
+    let mut image = Image::new(
+        Extent3d { width: 1, height: 1, depth_or_array_layers: layers },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        address_mode_w: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        ..default()
+    });
+    image
+}
+
 /// Spawns patch entities and creates the initial clipmap texture array.
 fn setup_terrain(
     config: Res<TerrainConfig>,
@@ -514,10 +543,24 @@ fn setup_terrain(
     patch_entities.entities.clear();
     patch_entities.mesh_handle = mesh_handle.clone();
 
+    let assets_dir = std::path::Path::new("assets");
+    let pbr_albedo_handle = images.add(
+        pbr_textures::build_albedo_array(&material_library.slots, assets_dir),
+    );
+    let pbr_normal_handle = images.add(
+        pbr_textures::build_normal_array(&material_library.slots, assets_dir),
+    );
+    let pbr_orm_handle = images.add(
+        pbr_textures::build_orm_array(&material_library.slots, assets_dir),
+    );
+
     let mat_handle = terrain_materials.add(TerrainMaterial {
         height_texture: height_handle.clone(),
         macro_color_texture: macro_color_handle,
         normal_texture: normal_handle.clone(),
+        pbr_albedo_array: pbr_albedo_handle,
+        pbr_normal_array: pbr_normal_handle,
+        pbr_orm_array:    pbr_orm_handle,
         params: TerrainMaterialUniforms {
             height_scale: config.height_scale,
             base_patch_size,

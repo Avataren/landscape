@@ -15,17 +15,18 @@ use bevy::{
 pub const MAX_SHADER_MATERIAL_SLOTS: usize = 8;
 
 /// Per-slot data uploaded to the fragment shader for the procedural baseline
-/// blend.  No texture handles yet — that comes once the texture arrays are
-/// introduced (§12 step 1 "texture arrays" phase).
+/// blend.
 ///
 /// Layout (std140 uniform):
 ///   offset  0 – tint_vis  vec4   (rgb = tint, a = visibility 0/1)
 ///   offset 16 – ranges    vec4   (x = alt_min, y = alt_max, z = slope_min°, w = slope_max°)
-///   Total: 32 bytes, naturally 16-aligned.
+///   offset 32 – uv_scale  vec4   (x = fine_scale_m, y = coarse_scale_mul, z = has_tex 0/1, w = reserved)
+///   Total: 48 bytes, naturally 16-aligned.
 #[derive(Clone, Copy, Debug, Default, ShaderType)]
 pub struct MaterialSlotGpu {
     pub tint_vis: Vec4,
     pub ranges: Vec4,
+    pub uv_scale: Vec4,
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +124,21 @@ pub struct TerrainMaterial {
     #[texture(5, visibility(vertex, fragment), dimension = "2d_array")]
     #[sampler(6, visibility(vertex, fragment))]
     pub normal_texture: Handle<Image>,
+
+    /// Rgba8Unorm array — one layer per material slot, albedo colour maps.
+    #[texture(7, visibility(fragment), dimension = "2d_array")]
+    #[sampler(8, visibility(fragment))]
+    pub pbr_albedo_array: Handle<Image>,
+
+    /// Rgba8Unorm array — one layer per material slot, tangent-space normal maps.
+    #[texture(9, visibility(fragment), dimension = "2d_array")]
+    #[sampler(10, visibility(fragment))]
+    pub pbr_normal_array: Handle<Image>,
+
+    /// Rgba8Unorm array — one layer per material slot, ORM maps (G = roughness).
+    #[texture(11, visibility(fragment), dimension = "2d_array")]
+    #[sampler(12, visibility(fragment))]
+    pub pbr_orm_array: Handle<Image>,
 }
 
 impl Material for TerrainMaterial {
