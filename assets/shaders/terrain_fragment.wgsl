@@ -143,7 +143,7 @@ fn sample_no_tile(
 }
 
 // Triplanar albedo sample — no UV stretching on vertical cliff faces.
-// Blend sharpness controlled by the exponent on abs(n).
+// Each face is stochastically sampled to also eliminate repetition on cliffs.
 fn sample_triplanar(
     tex:   texture_2d_array<f32>,
     samp:  sampler,
@@ -154,9 +154,9 @@ fn sample_triplanar(
 ) -> vec4<f32> {
     var w = pow(abs(n), vec3<f32>(4.0));
     w /= w.x + w.y + w.z + 1e-6;
-    let cy = textureSample(tex, samp, wpos.xz / scale, layer);
-    let cx = textureSample(tex, samp, wpos.zy / scale, layer);
-    let cz = textureSample(tex, samp, wpos.xy / scale, layer);
+    let cy = sample_no_tile(tex, samp, wpos.xz / scale, layer);
+    let cx = sample_no_tile(tex, samp, wpos.zy / scale, layer);
+    let cz = sample_no_tile(tex, samp, wpos.xy / scale, layer);
     return cy * w.y + cx * w.x + cz * w.z;
 }
 
