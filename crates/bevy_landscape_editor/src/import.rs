@@ -97,7 +97,7 @@ impl Default for ImportSettings {
             output_dir: "assets/tiles".into(),
             world_scale: 1.0,
             height_scale: 2048.0,
-            smooth_sigma: 0.0,
+            smooth_sigma: 1.0,
             flip_green: false,
             clipmap_levels: bevy_landscape::TerrainConfig::default().clipmap_levels,
         }

@@ -24,6 +24,9 @@ pub struct TerrainDebugConfig {
     /// of the full material — useful for inspecting normal-map staircasing or
     /// LOD seam discontinuities without lighting noise getting in the way.
     pub show_normals_only: bool,
+    /// Draw a world-space ruler grid: 100 m (blue) and 1 km (amber) lines at Y=0,
+    /// with vertical tick markers at every 1 km intersection.
+    pub show_ruler: bool,
 }
 
 impl Default for TerrainDebugConfig {
@@ -34,6 +37,7 @@ impl Default for TerrainDebugConfig {
             show_stats: false,
             show_wireframe: false,
             show_normals_only: false,
+            show_ruler: false,
         }
     }
 }
@@ -63,6 +67,14 @@ pub fn toggle_terrain_debug_hotkeys(
     keys: Res<ButtonInput<KeyCode>>,
     mut debug_cfg: ResMut<TerrainDebugConfig>,
 ) {
+    if keys.just_pressed(KeyCode::F6) {
+        debug_cfg.show_ruler = !debug_cfg.show_ruler;
+        info!(
+            "[Terrain] Ruler grid {} (F6)",
+            if debug_cfg.show_ruler { "enabled" } else { "disabled" }
+        );
+    }
+
     if keys.just_pressed(KeyCode::F8) {
         debug_cfg.show_normals_only = !debug_cfg.show_normals_only;
         info!(
@@ -254,6 +266,81 @@ pub fn log_terrain_stats(
 }
 
 // ---------------------------------------------------------------------------
+// Ruler gizmo
+// ---------------------------------------------------------------------------
+
+/// Draws a world-space scale ruler at Y=0:
+///   - Sky-blue lines every 100 m within ±500 m of the camera
+///   - Amber lines every 1 000 m within ±6 km of the camera
+///   - White vertical tick markers at every 1 km intersection,
+///     scaled to half the camera altitude so they stay readable
+pub fn draw_ruler(
+    view: Res<TerrainViewState>,
+    debug_cfg: Res<TerrainDebugConfig>,
+    mut gizmos: Gizmos,
+) {
+    if !debug_cfg.show_ruler {
+        return;
+    }
+
+    let cam = view.camera_pos_ws;
+    let y = 0.0_f32; // draw at sea-level / terrain base
+
+    let color_100m = Color::srgba(0.3, 0.75, 1.0, 0.55);
+    let color_1km  = Color::srgba(1.0, 0.75, 0.1, 0.90);
+    let color_tick = Color::srgba(1.0, 1.0,  1.0, 0.85);
+
+    // ---- 100 m grid  (±500 m, skip multiples of 1 000 m — drawn by 1km pass) ----
+    let cx100 = (cam.x / 100.0).floor() as i32;
+    let cz100 = (cam.z / 100.0).floor() as i32;
+    let r100  = 5_i32;
+    let xlo100 = (cx100 - r100) as f32 * 100.0;
+    let xhi100 = (cx100 + r100) as f32 * 100.0;
+    let zlo100 = (cz100 - r100) as f32 * 100.0;
+    let zhi100 = (cz100 + r100) as f32 * 100.0;
+
+    for i in (cx100 - r100)..=(cx100 + r100) {
+        if i % 10 == 0 { continue; } // 1 km line — skip
+        let x = i as f32 * 100.0;
+        gizmos.line(Vec3::new(x, y, zlo100), Vec3::new(x, y, zhi100), color_100m);
+    }
+    for i in (cz100 - r100)..=(cz100 + r100) {
+        if i % 10 == 0 { continue; }
+        let z = i as f32 * 100.0;
+        gizmos.line(Vec3::new(xlo100, y, z), Vec3::new(xhi100, y, z), color_100m);
+    }
+
+    // ---- 1 km grid  (±6 km) ----
+    let cx1k = (cam.x / 1000.0).floor() as i32;
+    let cz1k = (cam.z / 1000.0).floor() as i32;
+    let r1k  = 6_i32;
+    let xlo1k = (cx1k - r1k) as f32 * 1000.0;
+    let xhi1k = (cx1k + r1k) as f32 * 1000.0;
+    let zlo1k = (cz1k - r1k) as f32 * 1000.0;
+    let zhi1k = (cz1k + r1k) as f32 * 1000.0;
+
+    for i in (cx1k - r1k)..=(cx1k + r1k) {
+        let x = i as f32 * 1000.0;
+        gizmos.line(Vec3::new(x, y, zlo1k), Vec3::new(x, y, zhi1k), color_1km);
+    }
+    for i in (cz1k - r1k)..=(cz1k + r1k) {
+        let z = i as f32 * 1000.0;
+        gizmos.line(Vec3::new(xlo1k, y, z), Vec3::new(xhi1k, y, z), color_1km);
+    }
+
+    // ---- Vertical tick markers at every 1 km intersection ----
+    // Height scales with camera altitude so ticks are readable both low and high.
+    let tick_h = (cam.y * 0.5).clamp(100.0, 2000.0);
+    for ix in (cx1k - r1k)..=(cx1k + r1k) {
+        for iz in (cz1k - r1k)..=(cz1k + r1k) {
+            let x = ix as f32 * 1000.0;
+            let z = iz as f32 * 1000.0;
+            gizmos.line(Vec3::new(x, y, z), Vec3::new(x, y + tick_h, z), color_tick);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
 
@@ -267,6 +354,7 @@ impl Plugin for TerrainDebugPlugin {
                 toggle_terrain_debug_hotkeys,
                 sync_wireframe_modes,
                 draw_terrain_debug,
+                draw_ruler,
                 log_terrain_stats,
             ),
         );
