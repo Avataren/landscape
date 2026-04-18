@@ -6,8 +6,9 @@ use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 pub struct FogPanelState {
     pub open: bool,
     pub enabled: bool,
-    /// Saved density so toggling off/on restores the user's value.
+    /// Saved values restored when re-enabling fog.
     saved_density: f32,
+    saved_ambient_intensity: f32,
 }
 
 impl Default for FogPanelState {
@@ -16,6 +17,7 @@ impl Default for FogPanelState {
             open: false,
             enabled: false,
             saved_density: 0.0003,
+            saved_ambient_intensity: 0.6,
         }
     }
 }
@@ -120,10 +122,12 @@ pub(crate) fn fog_panel_system(
                     .spacing([8.0, 4.0])
                     .show(ui, |ui| {
                         ui.label("Ambient intensity");
-                        ui.add(
-                            egui::Slider::new(&mut vfog.ambient_intensity, 0.0..=1.0)
+                        if ui.add(
+                            egui::Slider::new(&mut state.saved_ambient_intensity, 0.0..=1.0)
                                 .fixed_decimals(3),
-                        );
+                        ).changed() && state.enabled {
+                            vfog.ambient_intensity = state.saved_ambient_intensity;
+                        }
                         ui.end_row();
 
                         ui.label("Ambient color");
@@ -153,10 +157,18 @@ pub(crate) fn fog_panel_system(
 fn apply_fog_enabled(
     state: Res<FogPanelState>,
     mut fog_volumes: Query<&mut FogVolume>,
+    mut volumetric_fogs: Query<&mut VolumetricFog>,
 ) {
     if !state.is_changed() {
         return;
     }
-    let Ok(mut fog) = fog_volumes.single_mut() else { return };
-    fog.density_factor = if state.enabled { state.saved_density } else { 0.0 };
+    if let Ok(mut fog) = fog_volumes.single_mut() {
+        fog.density_factor = if state.enabled { state.saved_density } else { 0.0 };
+    }
+    // Zero ambient_intensity when disabled — the volumetric renderer accumulates
+    // ambient on every ray-march step inside the FogVolume AABB, so even with
+    // density=0 a non-zero ambient_intensity creates a visible seam at the slab top.
+    if let Ok(mut vfog) = volumetric_fogs.single_mut() {
+        vfog.ambient_intensity = if state.enabled { state.saved_ambient_intensity } else { 0.0 };
+    }
 }
