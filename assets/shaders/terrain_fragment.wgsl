@@ -215,7 +215,9 @@ fn apply_normal_detail(
         if slot.uv_scale.z > 0.5 {
             let fine_scale = max(slot.uv_scale.x, 0.01);
             let uv  = world_xz / fine_scale;
-            let smp = sample_no_tile(pbr_normal_arr, pbr_normal_samp, uv, i32(i)).rgb;
+            // Plain sample — no-tile blending averages normals from random offsets,
+            // cancelling high-frequency detail. Simple repeat is correct here.
+            let smp = textureSample(pbr_normal_arr, pbr_normal_samp, uv, i32(i)).rgb;
             // Decode tangent-space XY from Rgba8Unorm [0,1] → signed [-1,1].
             let ts_xy = smp.rg * 2.0 - 1.0;
             let ts_z  = sqrt(max(0.0, 1.0 - dot(ts_xy, ts_xy)));
