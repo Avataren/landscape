@@ -109,6 +109,7 @@ fn setup_scene(
     // to decide which tiles to load first.
     commands.spawn((
         Camera3d::default(),
+        Msaa::Sample4,
         Projection::Perspective(PerspectiveProjection {
             near: 0.1,
             // Terrain world is ~4 096 m across; 100 km gives comfortable margin
