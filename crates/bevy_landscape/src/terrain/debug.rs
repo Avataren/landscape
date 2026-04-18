@@ -20,13 +20,12 @@ pub struct TerrainDebugConfig {
     pub show_lod_colors: bool,
     pub show_stats: bool,
     pub show_wireframe: bool,
-    /// Render the per-pixel surface normal as colour (`n * 0.5 + 0.5`) instead
-    /// of the full material — useful for inspecting normal-map staircasing or
-    /// LOD seam discontinuities without lighting noise getting in the way.
     pub show_normals_only: bool,
-    /// Draw a world-space ruler grid: 100 m (blue) and 1 km (amber) lines at Y=0,
-    /// with vertical tick markers at every 1 km intersection.
     pub show_ruler: bool,
+    /// F5 cycles: 0 = off, 1 = raw normal-map sample, 2 = ORM roughness.
+    /// Samples slot 0 directly at world UV — bypasses blending so you see
+    /// exactly what the GPU reads. Red output = uv_scale.z flag not set.
+    pub show_pbr_debug: u8,
 }
 
 impl Default for TerrainDebugConfig {
@@ -38,6 +37,7 @@ impl Default for TerrainDebugConfig {
             show_wireframe: false,
             show_normals_only: false,
             show_ruler: false,
+            show_pbr_debug: 0,
         }
     }
 }
@@ -58,6 +58,7 @@ const LOD_COLORS: [Color; 8] = [
 ];
 
 /// Runtime debug hotkeys:
+/// - F5  = cycle PBR texture debug (off / raw normal-map / ORM roughness)
 /// - F8  = render terrain normals as colour (no lighting/material)
 /// - F9  = stats logging
 /// - F10 = patch bounds
@@ -67,6 +68,12 @@ pub fn toggle_terrain_debug_hotkeys(
     keys: Res<ButtonInput<KeyCode>>,
     mut debug_cfg: ResMut<TerrainDebugConfig>,
 ) {
+    if keys.just_pressed(KeyCode::F5) {
+        debug_cfg.show_pbr_debug = (debug_cfg.show_pbr_debug + 1) % 3;
+        let label = ["off", "raw normal-map tex", "ORM roughness"][debug_cfg.show_pbr_debug as usize];
+        info!("[Terrain] PBR debug: {label} (F5)");
+    }
+
     if keys.just_pressed(KeyCode::F6) {
         debug_cfg.show_ruler = !debug_cfg.show_ruler;
         info!(
@@ -156,13 +163,14 @@ pub fn sync_wireframe_modes(
         material.params.bounds_fade.w = desired;
     }
 
-    let desired_normals = if debug_cfg.show_normals_only {
-        1.0
-    } else {
-        0.0
-    };
+    let desired_normals = if debug_cfg.show_normals_only { 1.0 } else { 0.0 };
     if material.params.debug_flags.x != desired_normals {
         material.params.debug_flags.x = desired_normals;
+    }
+
+    let desired_pbr = debug_cfg.show_pbr_debug as f32;
+    if material.params.debug_flags.z != desired_pbr {
+        material.params.debug_flags.z = desired_pbr;
     }
 }
 

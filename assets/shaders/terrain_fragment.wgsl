@@ -519,10 +519,27 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     // Apply per-slot normal map detail on top of the macro normal.
     let n = apply_normal_detail(n_macro, in.world_pos.xz, in.world_pos.y, slope_deg);
 
+    // --- PBR texture debug (debug_flags.z) ---
+    // Samples slot 0 directly at world UV — bypasses zone blending so you
+    // see exactly what the GPU reads from the texture array.
+    // debug_flags.z == 1: raw normal-map RGB (should look like a blue-ish normal map)
+    // debug_flags.z == 2: ORM roughness G channel as greyscale
+    // Red output means uv_scale.z == 0 (slot has no texture path set).
+    if terrain.debug_flags.z > 0.5 {
+        let s0   = terrain.slots[0];
+        let uv0  = in.world_pos.xz / max(s0.uv_scale.x, 0.01);
+        if s0.uv_scale.z > 0.5 {
+            if terrain.debug_flags.z > 1.5 {
+                let r = textureSample(pbr_orm_arr, pbr_orm_samp, uv0, 0).g;
+                return vec4<f32>(r, r, r, 1.0);
+            } else {
+                return vec4<f32>(textureSample(pbr_normal_arr, pbr_normal_samp, uv0, 0).rgb, 1.0);
+            }
+        }
+        return vec4<f32>(1.0, 0.0, 0.0, 1.0); // red = no texture path
+    }
+
     // --- Debug: render normals as colour and skip lighting/material ---
-    // X+ → red, Y+ → green (mostly green for upward-facing terrain),
-    // Z+ → blue.  Output is pre-tonemap so atmosphere/bloom may still tint
-    // it slightly, but the dominant channel mapping is preserved.
     if terrain.debug_flags.x > 0.5 {
         return vec4<f32>(n * 0.5 + vec3<f32>(0.5), 1.0);
     }
