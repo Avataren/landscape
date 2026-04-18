@@ -14,7 +14,7 @@ impl Default for FogPanelState {
     fn default() -> Self {
         Self {
             open: false,
-            enabled: true,
+            enabled: false,
             saved_density: 0.0003,
         }
     }

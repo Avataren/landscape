@@ -157,20 +157,26 @@ fn setup_scene(
         VolumetricLight,
     ));
 
-    // The clipmap LOD mesh extends ~1 000 km, so tying the fog volume to
-    // heightmap bounds left it visually tiny with a hard visible boundary.
-    // Use a fixed very-large volume so the camera is always inside and the
-    // FogVolume boundary is never visible. density_factor is per-unit-length
-    // so the near-field haze is unchanged regardless of volume dimensions.
+    // FogVolume renders only when the camera is OUTSIDE the volume: Bevy uses
+    // back-face culling (cull_mode: Back), so when the camera is inside the
+    // AABB all visible faces are back-faces and nothing is drawn.
+    // Solution: keep the volume as a ground-level slab the camera looks down
+    // at from above. The slab covers the full terrain footprint + generous XZ
+    // padding, but only reaches halfway up the terrain height so the camera
+    // (starting at 800 m) is above it and can see the fog below.
+    // When the camera descends into the slab the effect disappears naturally
+    // (like flying into real low-lying cloud).
     let fog_center_xz = (desc.world_min + desc.world_max) * 0.5;
+    // Fog slab: sea level (-500 m) to 600 m altitude.
+    // Center at 50 m, half-height 550 m → top = 600 m.
+    // Camera starts at 800 m → 200 m above the slab top.
     commands.spawn((
         FogVolume {
-            density_factor: 0.0003,
+            density_factor: 0.0,
             ..default()
         },
-        // 500 km wide, 60 km tall (bottom at -2 km, top at 58 km).
-        Transform::from_xyz(fog_center_xz.x, 28_000.0, fog_center_xz.y)
-            .with_scale(Vec3::new(500_000.0, 60_000.0, 500_000.0)),
+        Transform::from_xyz(fog_center_xz.x, 50.0, fog_center_xz.y)
+            .with_scale(Vec3::new(200_000.0, 1100.0, 200_000.0)),
     ));
 }
 
