@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
+use crate::fog_panel::FogPanelState;
 use crate::import::ImportWizard;
 use crate::level_io::LevelIoState;
 use crate::material_panel::MaterialPanelState;
@@ -16,6 +17,7 @@ pub(crate) fn toolbar_system(
     prefs: Res<AppPreferences>,
     mut prefs_dialog: ResMut<PreferencesDialog>,
     mut sky_panel: ResMut<SkyPanelState>,
+    mut fog_panel: ResMut<FogPanelState>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
@@ -50,6 +52,9 @@ pub(crate) fn toolbar_system(
                     ui.close();
                 }
                 if ui.checkbox(&mut sky_panel.open, "Sky / Time of Day").clicked() {
+                    ui.close();
+                }
+                if ui.checkbox(&mut fog_panel.open, "Fog").clicked() {
                     ui.close();
                 }
             });

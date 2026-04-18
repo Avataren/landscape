@@ -102,7 +102,6 @@ fn main() {
 fn setup_scene(
     mut commands: Commands,
     mut scattering_mediums: ResMut<Assets<ScatteringMedium>>,
-    config: Res<TerrainConfig>,
     desc: Res<TerrainSourceDesc>,
 ) {
     // Spawn camera above terrain centre, angled downward so terrain is visible
@@ -158,28 +157,20 @@ fn setup_scene(
         VolumetricLight,
     ));
 
-    // Fog volume derived from terrain bounds so it covers any heightmap size.
-    // Falls back to a 10 km cube when no terrain is loaded.
-    let terrain_span = desc.world_max - desc.world_min;
-    let (fog_xz, fog_center_xz) = if terrain_span.length_squared() > 0.0 {
-        let pad = terrain_span.max_element() * 0.2;
-        (terrain_span + Vec2::splat(pad * 2.0),
-         (desc.world_min + desc.world_max) * 0.5)
-    } else {
-        (Vec2::splat(10_000.0), Vec2::ZERO)
-    };
-    let fog_height = config.height_scale * 1.5;
-    // density_factor drives scattering per unit length. The default (0.1) is
-    // designed for small test volumes; at terrain scale (kilometres) it produces
-    // a completely opaque black box. 0.0003 gives visible haze at >1 km while
-    // keeping nearby terrain clear.
+    // The clipmap LOD mesh extends ~1 000 km, so tying the fog volume to
+    // heightmap bounds left it visually tiny with a hard visible boundary.
+    // Use a fixed very-large volume so the camera is always inside and the
+    // FogVolume boundary is never visible. density_factor is per-unit-length
+    // so the near-field haze is unchanged regardless of volume dimensions.
+    let fog_center_xz = (desc.world_min + desc.world_max) * 0.5;
     commands.spawn((
         FogVolume {
             density_factor: 0.0003,
             ..default()
         },
-        Transform::from_xyz(fog_center_xz.x, config.height_scale * 0.5, fog_center_xz.y)
-            .with_scale(Vec3::new(fog_xz.x, fog_height, fog_xz.y)),
+        // 500 km wide, 60 km tall (bottom at -2 km, top at 58 km).
+        Transform::from_xyz(fog_center_xz.x, 28_000.0, fog_center_xz.y)
+            .with_scale(Vec3::new(500_000.0, 60_000.0, 500_000.0)),
     ));
 }
 
