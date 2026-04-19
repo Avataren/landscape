@@ -23,22 +23,19 @@ pub fn snap_camera_to_level_grid(camera_xz: Vec2, level_scale: f32) -> IVec2 {
 /// all active LOD levels.
 ///
 /// Each coarser level's center is derived by right-shifting the fine center by
-/// L bits: `centers[L] = fine_center >> L`.  For that to produce the same
-/// world-space position at every level (`centers[L] * scale_L = fine * scale_0`),
-/// the fine center must be a multiple of `2^(active_levels - 1)`.
+/// L bits: `centers[L] = fine_center >> L`. This already gives the desired
+/// cadence for each level (L0 every 1 texel, L1 every 2, L2 every 4, ...).
 ///
-/// Masking only bit 0 (`& !1`) is sufficient for 2 levels but leaves residual
-/// seams at deeper LOD ring boundaries when more levels are active.
+/// Do not quantize the finest center to a larger stride. Over-snapping it to
+/// `2^(active_levels - 1)` makes the whole clipmap stack move in huge jumps,
+/// which shows up as black flashes and visible LOD popping while textures and
+/// geometry catch up.
 pub fn snap_camera_to_nested_clipmap_grid(
     camera_xz: Vec2,
     base_level_scale: f32,
-    active_levels: u32,
+    _active_levels: u32,
 ) -> IVec2 {
-    let fine = snap_camera_to_level_grid(camera_xz, base_level_scale);
-    if active_levels <= 1 {
-        return fine;
-    }
-    IVec2::new(fine.x & !1, fine.y & !1)
+    snap_camera_to_level_grid(camera_xz, base_level_scale)
 }
 
 // ---------------------------------------------------------------------------
@@ -177,22 +174,23 @@ mod tests {
     }
 
     #[test]
-    fn nested_snap_preserves_all_level_alignment() {
-        // With 4 active levels the fine center must be a multiple of 2^3 = 8.
+    fn nested_snap_preserves_fine_level_cadence() {
         let c0 = snap_camera_to_nested_clipmap_grid(Vec2::new(0.1, 0.1), 1.0, 4);
         let c1 = snap_camera_to_nested_clipmap_grid(Vec2::new(7.9, 7.9), 1.0, 4);
         let c2 = snap_camera_to_nested_clipmap_grid(Vec2::new(8.1, 8.1), 1.0, 4);
 
         assert_eq!(c0, IVec2::ZERO);
-        assert_eq!(c1, IVec2::ZERO);
+        assert_eq!(c1, IVec2::splat(7));
         assert_eq!(c2, IVec2::splat(8));
+    }
 
-        // Right-shifting by L must give the same world-space position at every L.
-        let scale_0 = 1.0_f32;
-        for l in 0..4_i32 {
-            let world_c2 = (c2.x >> l) as f32 * scale_0 * (1 << l) as f32;
-            assert_eq!(world_c2, 8.0, "level {l} world center mismatch");
-        }
+    #[test]
+    fn nested_snap_still_derives_coarser_levels_by_shift() {
+        let fine = snap_camera_to_nested_clipmap_grid(Vec2::new(13.9, 13.9), 1.0, 4);
+        assert_eq!(fine, IVec2::splat(13));
+        assert_eq!(fine >> 1, IVec2::splat(6));
+        assert_eq!(fine >> 2, IVec2::splat(3));
+        assert_eq!(fine >> 3, IVec2::splat(1));
     }
 
     #[test]

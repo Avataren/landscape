@@ -59,10 +59,16 @@ impl Default for MaterialLibrary {
         ground.coarse_scale_mul = 6.0;
         ground.procedural.altitude_range_m = Vec2::new(-10_000.0, 10_000.0);
         ground.procedural.slope_range_deg = Vec2::new(0.0, 25.0);
-        ground.albedo_path = Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_diff_4k.jpg".into());
-        ground.normal_path = Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_nor_gl_4k.png".into());
-        ground.orm_path    = Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_rough_4k.png".into());
-        ground.height_path = Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_disp_4k.png".into());
+        ground.albedo_path =
+            Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_diff_4k.jpg".into());
+        ground.normal_path = Some(
+            "textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_nor_gl_4k.png".into(),
+        );
+        ground.orm_path = Some(
+            "textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_rough_4k.png".into(),
+        );
+        ground.height_path =
+            Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_disp_4k.png".into());
 
         // Mid-slope: mossy/pitted rock transition zone.
         let mut mid_rock = MaterialSlot::new("Mid Rock");
@@ -71,10 +77,22 @@ impl Default for MaterialLibrary {
         mid_rock.coarse_scale_mul = 6.0;
         mid_rock.procedural.altitude_range_m = Vec2::new(-10_000.0, 10_000.0);
         mid_rock.procedural.slope_range_deg = Vec2::new(18.0, 45.0);
-        mid_rock.albedo_path = Some("textures/rock_boulder_cracked_4k.blend/textures/rock_boulder_cracked_diff_4k.jpg".into());
-        mid_rock.normal_path = Some("textures/rock_boulder_cracked_4k.blend/textures/rock_boulder_cracked_nor_gl_4k.png".into());
-        mid_rock.orm_path    = Some("textures/rock_boulder_cracked_4k.blend/textures/rock_boulder_cracked_rough_4k.png".into());
-        mid_rock.height_path = Some("textures/rock_boulder_cracked_4k.blend/textures/rock_boulder_cracked_disp_4k.png".into());
+        mid_rock.albedo_path = Some(
+            "textures/rock_boulder_cracked_4k.blend/textures/rock_boulder_cracked_diff_4k.jpg"
+                .into(),
+        );
+        mid_rock.normal_path = Some(
+            "textures/rock_boulder_cracked_4k.blend/textures/rock_boulder_cracked_nor_gl_4k.png"
+                .into(),
+        );
+        mid_rock.orm_path = Some(
+            "textures/rock_boulder_cracked_4k.blend/textures/rock_boulder_cracked_rough_4k.png"
+                .into(),
+        );
+        mid_rock.height_path = Some(
+            "textures/rock_boulder_cracked_4k.blend/textures/rock_boulder_cracked_disp_4k.png"
+                .into(),
+        );
 
         // Steep cliff faces.
         let mut cliff = MaterialSlot::new("Cliff");
@@ -83,10 +101,14 @@ impl Default for MaterialLibrary {
         cliff.coarse_scale_mul = 6.0;
         cliff.procedural.altitude_range_m = Vec2::new(-10_000.0, 10_000.0);
         cliff.procedural.slope_range_deg = Vec2::new(38.0, 90.0);
-        cliff.albedo_path = Some("textures/rock_wall_02_4k.blend/textures/rock_wall_02_diff_4k.jpg".into());
-        cliff.normal_path = Some("textures/rock_wall_02_4k.blend/textures/rock_wall_02_nor_gl_4k.png".into());
-        cliff.orm_path    = Some("textures/rock_wall_02_4k.blend/textures/rock_wall_02_rough_4k.jpg".into());
-        cliff.height_path = Some("textures/rock_wall_02_4k.blend/textures/rock_wall_02_disp_4k.png".into());
+        cliff.albedo_path =
+            Some("textures/rock_wall_02_4k.blend/textures/rock_wall_02_diff_4k.jpg".into());
+        cliff.normal_path =
+            Some("textures/rock_wall_02_4k.blend/textures/rock_wall_02_nor_gl_4k.png".into());
+        cliff.orm_path =
+            Some("textures/rock_wall_02_4k.blend/textures/rock_wall_02_rough_4k.jpg".into());
+        cliff.height_path =
+            Some("textures/rock_wall_02_4k.blend/textures/rock_wall_02_disp_4k.png".into());
 
         let mut snow = MaterialSlot::new("Snow");
         snow.tint = [0.90, 0.93, 0.98];
@@ -94,10 +116,18 @@ impl Default for MaterialLibrary {
         snow.coarse_scale_mul = 5.0;
         snow.procedural.altitude_range_m = Vec2::new(600.0, 10_000.0);
         snow.procedural.slope_range_deg = Vec2::new(0.0, 50.0);
-        snow.albedo_path = Some("textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_diff_4k.jpg".into());
-        snow.normal_path = Some("textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_nor_gl_4k.png".into());
-        snow.orm_path    = Some("textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_rough_4k.png".into());
-        snow.height_path = Some("textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_disp_4k.png".into());
+        snow.albedo_path = Some(
+            "textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_diff_4k.jpg".into(),
+        );
+        snow.normal_path = Some(
+            "textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_nor_gl_4k.png".into(),
+        );
+        snow.orm_path = Some(
+            "textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_rough_4k.png".into(),
+        );
+        snow.height_path = Some(
+            "textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_disp_4k.png".into(),
+        );
 
         Self {
             slots: vec![ground, mid_rock, cliff, snow],
@@ -116,8 +146,8 @@ pub struct MaterialSlot {
     /// Exclude from blend without deleting the slot.
     pub visible: bool,
 
-    /// Debug / fallback tint used for shader colour until per-slot albedo
-    /// textures are implemented.  Linear RGB in [0, 1].
+    /// Slot tint multiplier applied to the diffuse texture preview and shader
+    /// albedo. Linear RGB in [0, 1].
     pub tint: [f32; 3],
 
     pub albedo_path: Option<PathBuf>,

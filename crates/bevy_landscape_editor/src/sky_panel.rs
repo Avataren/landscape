@@ -1,7 +1,4 @@
-use bevy::{
-    light::light_consts::lux,
-    prelude::*,
-};
+use bevy::{light::light_consts::lux, prelude::*};
 use bevy_egui::{egui, EguiContexts};
 
 #[derive(Resource)]
@@ -26,10 +23,7 @@ impl Plugin for SkyPanelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TimeOfDay>()
             .init_resource::<SkyPanelState>()
-            .add_systems(
-                bevy_egui::EguiPrimaryContextPass,
-                sky_panel_system,
-            )
+            .add_systems(bevy_egui::EguiPrimaryContextPass, sky_panel_system)
             .add_systems(Update, update_sun_from_time);
     }
 }

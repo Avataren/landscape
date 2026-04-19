@@ -18,7 +18,9 @@
 //! ```
 
 use crate::terrain::{
-    config::TerrainConfig, material_slots::MaterialLibrary, world_desc::TerrainSourceDesc,
+    config::{TerrainConfig, MAX_SUPPORTED_CLIPMAP_LEVELS},
+    material_slots::MaterialLibrary,
+    world_desc::TerrainSourceDesc,
 };
 use bevy::prelude::Vec2;
 use serde::{Deserialize, Serialize};
@@ -50,7 +52,8 @@ pub struct LevelDesc {
     /// Base height range before `world_scale` is applied: a fully-white height
     /// texel (R16Unorm = 1.0) maps to this many world units on the Y axis.
     pub height_scale: f32,
-    /// Number of nested clipmap LOD levels.
+    /// Number of nested clipmap LOD levels. This is the saved landscape view
+    /// distance control exposed in the editor toolbar.
     pub clipmap_levels: u32,
     /// Procedural material slot definitions.
     pub material_library: MaterialLibrary,
@@ -123,7 +126,10 @@ impl LevelDesc {
         let mut config = TerrainConfig::default();
         config.world_scale = self.world_scale;
         config.height_scale = self.height_scale * self.world_scale;
-        config.clipmap_levels = self.clipmap_levels.min(self.max_mip_level as u32 + 1);
+        config.clipmap_levels = self
+            .clipmap_levels
+            .max(1)
+            .min(MAX_SUPPORTED_CLIPMAP_LEVELS as u32);
 
         let tile_root = self.tile_root.as_deref().map(PathBuf::from);
         let (world_min, world_max) = tile_root
@@ -212,4 +218,30 @@ fn scan_world_bounds(tile_root: &Path, tile_size: u32, world_scale: f32) -> (Vec
         Vec2::new(min_tx as f32 * ts, min_ty as f32 * ts),
         Vec2::new((max_tx + 1) as f32 * ts, (max_ty + 1) as f32 * ts),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_preserves_saved_view_distance() {
+        let mut desc = LevelDesc::default();
+        desc.max_mip_level = 3;
+        desc.clipmap_levels = 12;
+
+        let (config, _, _, _, _) = desc.into_runtime();
+
+        assert_eq!(config.clipmap_levels, 12);
+    }
+
+    #[test]
+    fn runtime_clamps_view_distance_to_shader_limit() {
+        let mut desc = LevelDesc::default();
+        desc.clipmap_levels = 99;
+
+        let (config, _, _, _, _) = desc.into_runtime();
+
+        assert_eq!(config.clipmap_levels, MAX_SUPPORTED_CLIPMAP_LEVELS as u32);
+    }
 }

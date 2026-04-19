@@ -4,6 +4,7 @@ mod level_io;
 mod material_panel;
 mod preferences;
 mod sky_panel;
+mod texture_browser;
 mod toolbar;
 
 use bevy::prelude::*;
@@ -15,6 +16,7 @@ use level_io::LevelIoPlugin;
 use material_panel::MaterialPanelPlugin;
 use preferences::PreferencesPlugin;
 use sky_panel::SkyPanelPlugin;
+use texture_browser::TextureBrowserPlugin;
 
 pub use level_io::LevelIoState;
 pub use preferences::AppPreferences;
@@ -26,8 +28,10 @@ impl Plugin for LandscapeEditorPlugin {
         if !app.is_plugin_added::<EguiPlugin>() {
             app.add_plugins(EguiPlugin::default());
         }
+        app.init_resource::<toolbar::ToolbarState>();
         app.add_plugins(FogPanelPlugin)
             .add_plugins(MaterialPanelPlugin)
+            .add_plugins(TextureBrowserPlugin)
             .add_plugins(ImportPlugin)
             .add_plugins(LevelIoPlugin)
             .add_plugins(PreferencesPlugin)

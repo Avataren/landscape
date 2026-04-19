@@ -11,6 +11,10 @@ use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 use bevy_landscape::{MaterialLibrary, MaterialSlot};
 
+use bevy_landscape::{PbrRebuildProgress, PbrTexturesDirty};
+
+use crate::texture_browser::TextureBrowser;
+
 /// Editor-local UI state for the materials panel.
 ///
 /// Open/close is driven by the toolbar; `selected_slot` is a pure UI concern
@@ -34,6 +38,9 @@ fn material_panel_system(
     mut contexts: EguiContexts,
     mut panel: ResMut<MaterialPanelState>,
     mut library: ResMut<MaterialLibrary>,
+    mut browser: ResMut<TextureBrowser>,
+    mut pbr_dirty: ResMut<PbrTexturesDirty>,
+    rebuild_progress: Res<PbrRebuildProgress>,
 ) -> Result {
     if !panel.open {
         return Ok(());
@@ -48,7 +55,14 @@ fn material_panel_system(
         .default_height(480.0)
         .resizable(true)
         .show(ctx, |ui| {
-            draw_material_library(ui, &mut panel, &mut library);
+            draw_material_library(
+                ui,
+                &mut panel,
+                &mut library,
+                &mut browser,
+                &mut pbr_dirty,
+                &rebuild_progress,
+            );
         });
 
     panel.open = open;
@@ -59,7 +73,28 @@ fn draw_material_library(
     ui: &mut egui::Ui,
     panel: &mut MaterialPanelState,
     library: &mut MaterialLibrary,
+    browser: &mut TextureBrowser,
+    pbr_dirty: &mut PbrTexturesDirty,
+    rebuild_progress: &PbrRebuildProgress,
 ) {
+    if rebuild_progress.active {
+        let label = match (rebuild_progress.fraction * 3.0) as u32 {
+            0 => "Loading albedo…",
+            1 => "Loading normals…",
+            2 => "Loading ORM…",
+            _ => "Uploading…",
+        };
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.add(
+                egui::ProgressBar::new(rebuild_progress.fraction)
+                    .text(label)
+                    .desired_width(ui.available_width() - 24.0),
+            );
+        });
+        ui.add_space(2.0);
+    }
+
     ui.horizontal(|ui| {
         ui.label(format!(
             "Slots: {} / {}",
@@ -74,6 +109,7 @@ fn draw_material_library(
             let name = format!("Slot {}", library.slots.len());
             library.slots.push(MaterialSlot::new(name));
             panel.selected_slot = Some(library.slots.len() - 1);
+            pbr_dirty.0 = true;
         }
     });
 
@@ -107,8 +143,11 @@ fn draw_material_library(
                 let selected = panel.selected_slot == Some(idx);
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut slot.visible, "");
-                    // Small tint swatch doubles as a colour picker.
-                    ui.color_edit_button_rgb(&mut slot.tint);
+                    let preview = texture_preview_button(ui, browser, slot, egui::vec2(28.0, 28.0));
+                    if preview.clicked() {
+                        panel.selected_slot = Some(idx);
+                        browser.open_for(idx);
+                    }
                     if ui.selectable_label(selected, &slot.name).clicked() {
                         panel.selected_slot = Some(idx);
                     }
@@ -128,6 +167,7 @@ fn draw_material_library(
             copy.name = format!("{} Copy", copy.name);
             library.slots.insert(idx + 1, copy);
             panel.selected_slot = Some(idx + 1);
+            pbr_dirty.0 = true;
         }
     }
     if let Some(idx) = to_delete {
@@ -137,6 +177,7 @@ fn draw_material_library(
             Some(sel) if sel > idx => Some(sel - 1),
             other => other,
         };
+        pbr_dirty.0 = true;
     }
 
     ui.separator();
@@ -154,12 +195,18 @@ fn draw_material_library(
             ui.label("Select a slot to edit its properties.");
         }
         Some(idx) => {
-            draw_slot_detail(ui, &mut library.slots[idx]);
+            draw_slot_detail(ui, idx, &mut library.slots[idx], browser, pbr_dirty);
         }
     }
 }
 
-fn draw_slot_detail(ui: &mut egui::Ui, slot: &mut MaterialSlot) {
+fn draw_slot_detail(
+    ui: &mut egui::Ui,
+    slot_idx: usize,
+    slot: &mut MaterialSlot,
+    browser: &mut TextureBrowser,
+    pbr_dirty: &mut PbrTexturesDirty,
+) {
     egui::ScrollArea::vertical()
         .id_salt("material_slot_detail")
         .show(ui, |ui| {
@@ -169,16 +216,59 @@ fn draw_slot_detail(ui: &mut egui::Ui, slot: &mut MaterialSlot) {
             });
 
             ui.horizontal(|ui| {
-                ui.label("Tint");
-                ui.color_edit_button_rgb(&mut slot.tint);
-                ui.checkbox(&mut slot.visible, "Visible");
+                let preview = texture_preview_button(ui, browser, slot, egui::vec2(84.0, 84.0))
+                    .on_hover_text(
+                    "Diffuse preview tinted by the slot colour. Click to open the texture atlas.",
+                );
+                if preview.clicked() {
+                    browser.open_for(slot_idx);
+                }
+                ui.vertical(|ui| {
+                    ui.horizontal(|ui| {
+                        ui.label("Tint");
+                        ui.color_edit_button_rgb(&mut slot.tint);
+                    });
+                    ui.checkbox(&mut slot.visible, "Visible");
+                    if let Some(path) = slot.albedo_path.as_ref() {
+                        ui.label(
+                            egui::RichText::new(path.display().to_string())
+                                .small()
+                                .monospace()
+                                .color(egui::Color32::GRAY),
+                        );
+                    } else {
+                        ui.label(
+                            egui::RichText::new("No diffuse texture assigned.")
+                                .small()
+                                .color(egui::Color32::GRAY),
+                        );
+                    }
+                    if ui.button("Choose From Texture Atlas…").clicked() {
+                        browser.open_for(slot_idx);
+                    }
+                });
             });
 
             ui.collapsing("Textures", |ui| {
-                texture_path_row(ui, "Albedo", &mut slot.albedo_path);
-                texture_path_row(ui, "Normal", &mut slot.normal_path);
-                texture_path_row(ui, "ORM", &mut slot.orm_path);
-                texture_path_row(ui, "Height", &mut slot.height_path);
+                if ui
+                    .add(
+                        egui::Button::new("Open Texture Atlas…")
+                            .min_size(egui::vec2(ui.available_width(), 0.0)),
+                    )
+                    .on_hover_text("Open the texture atlas to assign all PBR maps at once.")
+                    .clicked()
+                {
+                    browser.open_for(slot_idx);
+                }
+                ui.add_space(2.0);
+                ui.separator();
+                let changed = texture_path_row(ui, "Albedo", &mut slot.albedo_path)
+                    | texture_path_row(ui, "Normal", &mut slot.normal_path)
+                    | texture_path_row(ui, "ORM", &mut slot.orm_path)
+                    | texture_path_row(ui, "Height", &mut slot.height_path);
+                if changed {
+                    pbr_dirty.0 = true;
+                }
             });
 
             ui.collapsing("Sampling", |ui| {
@@ -261,7 +351,10 @@ fn draw_slot_detail(ui: &mut egui::Ui, slot: &mut MaterialSlot) {
         });
 }
 
-fn texture_path_row(ui: &mut egui::Ui, label: &str, path: &mut Option<std::path::PathBuf>) {
+/// Returns `true` when the path was committed (focus lost, Enter pressed, or cleared),
+/// signalling that a PBR texture rebuild should be triggered.
+fn texture_path_row(ui: &mut egui::Ui, label: &str, path: &mut Option<std::path::PathBuf>) -> bool {
+    let mut rebuild = false;
     ui.horizontal(|ui| {
         ui.label(label);
         let mut text = path
@@ -280,8 +373,75 @@ fn texture_path_row(ui: &mut egui::Ui, label: &str, path: &mut Option<std::path:
                 Some(std::path::PathBuf::from(text))
             };
         }
+        // Trigger rebuild when the user leaves the field (lost_focus covers both
+        // Tab/click-away and Enter).  We don't gate on changed() because that flag
+        // is true only on the frame of the keystroke, not the frame focus is lost.
+        if resp.lost_focus() {
+            rebuild = true;
+        }
         if ui.small_button("✕").on_hover_text("Clear").clicked() {
             *path = None;
+            rebuild = true;
         }
     });
+    rebuild
+}
+
+fn texture_preview_button(
+    ui: &mut egui::Ui,
+    browser: &mut TextureBrowser,
+    slot: &MaterialSlot,
+    size: egui::Vec2,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return response;
+    }
+
+    let tint = tint_color(slot.tint);
+    let bg = if response.hovered() {
+        egui::Color32::from_gray(56)
+    } else {
+        egui::Color32::from_gray(40)
+    };
+    ui.painter().rect_filled(rect, 6.0, bg);
+
+    let image_rect = rect.shrink(2.0);
+    if let Some(handle) = browser.preview_for(ui.ctx(), slot.albedo_path.as_deref()) {
+        let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+        ui.painter().image(handle.id(), image_rect, uv, tint);
+    } else if slot.albedo_path.is_some() {
+        ui.painter()
+            .rect_filled(image_rect, 4.0, egui::Color32::from_gray(24));
+        ui.painter().text(
+            image_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "...",
+            egui::FontId::proportional(13.0),
+            egui::Color32::GRAY,
+        );
+    } else {
+        ui.painter().rect_filled(image_rect, 4.0, tint);
+        ui.painter().text(
+            image_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "+",
+            egui::FontId::proportional(18.0),
+            egui::Color32::from_black_alpha(180),
+        );
+    }
+
+    response.on_hover_text(if slot.albedo_path.is_some() {
+        "Click to choose a different texture set from the atlas."
+    } else {
+        "Click to assign a diffuse texture from the atlas."
+    })
+}
+
+fn tint_color(rgb: [f32; 3]) -> egui::Color32 {
+    egui::Color32::from_rgb(
+        ((rgb[0].clamp(0.0, 1.0) * 255.0) + 0.5) as u8,
+        ((rgb[1].clamp(0.0, 1.0) * 255.0) + 0.5) as u8,
+        ((rgb[2].clamp(0.0, 1.0) * 255.0) + 0.5) as u8,
+    )
 }

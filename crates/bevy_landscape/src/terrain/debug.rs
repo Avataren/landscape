@@ -70,7 +70,8 @@ pub fn toggle_terrain_debug_hotkeys(
 ) {
     if keys.just_pressed(KeyCode::F5) {
         debug_cfg.show_pbr_debug = (debug_cfg.show_pbr_debug + 1) % 3;
-        let label = ["off", "raw normal-map tex", "ORM roughness"][debug_cfg.show_pbr_debug as usize];
+        let label =
+            ["off", "raw normal-map tex", "ORM roughness"][debug_cfg.show_pbr_debug as usize];
         info!("[Terrain] PBR debug: {label} (F5)");
     }
 
@@ -78,7 +79,11 @@ pub fn toggle_terrain_debug_hotkeys(
         debug_cfg.show_ruler = !debug_cfg.show_ruler;
         info!(
             "[Terrain] Ruler grid {} (F6)",
-            if debug_cfg.show_ruler { "enabled" } else { "disabled" }
+            if debug_cfg.show_ruler {
+                "enabled"
+            } else {
+                "disabled"
+            }
         );
     }
 
@@ -163,7 +168,11 @@ pub fn sync_wireframe_modes(
         material.params.bounds_fade.w = desired;
     }
 
-    let desired_normals = if debug_cfg.show_normals_only { 1.0 } else { 0.0 };
+    let desired_normals = if debug_cfg.show_normals_only {
+        1.0
+    } else {
+        0.0
+    };
     if material.params.debug_flags.x != desired_normals {
         material.params.debug_flags.x = desired_normals;
     }
@@ -295,25 +304,29 @@ pub fn draw_ruler(
     let y = 0.0_f32; // draw at sea-level / terrain base
 
     let color_100m = Color::srgba(0.3, 0.75, 1.0, 0.55);
-    let color_1km  = Color::srgba(1.0, 0.75, 0.1, 0.90);
-    let color_tick = Color::srgba(1.0, 1.0,  1.0, 0.85);
+    let color_1km = Color::srgba(1.0, 0.75, 0.1, 0.90);
+    let color_tick = Color::srgba(1.0, 1.0, 1.0, 0.85);
 
     // ---- 100 m grid  (±500 m, skip multiples of 1 000 m — drawn by 1km pass) ----
     let cx100 = (cam.x / 100.0).floor() as i32;
     let cz100 = (cam.z / 100.0).floor() as i32;
-    let r100  = 5_i32;
+    let r100 = 5_i32;
     let xlo100 = (cx100 - r100) as f32 * 100.0;
     let xhi100 = (cx100 + r100) as f32 * 100.0;
     let zlo100 = (cz100 - r100) as f32 * 100.0;
     let zhi100 = (cz100 + r100) as f32 * 100.0;
 
     for i in (cx100 - r100)..=(cx100 + r100) {
-        if i % 10 == 0 { continue; } // 1 km line — skip
+        if i % 10 == 0 {
+            continue;
+        } // 1 km line — skip
         let x = i as f32 * 100.0;
         gizmos.line(Vec3::new(x, y, zlo100), Vec3::new(x, y, zhi100), color_100m);
     }
     for i in (cz100 - r100)..=(cz100 + r100) {
-        if i % 10 == 0 { continue; }
+        if i % 10 == 0 {
+            continue;
+        }
         let z = i as f32 * 100.0;
         gizmos.line(Vec3::new(xlo100, y, z), Vec3::new(xhi100, y, z), color_100m);
     }
@@ -321,7 +334,7 @@ pub fn draw_ruler(
     // ---- 1 km grid  (±6 km) ----
     let cx1k = (cam.x / 1000.0).floor() as i32;
     let cz1k = (cam.z / 1000.0).floor() as i32;
-    let r1k  = 6_i32;
+    let r1k = 6_i32;
     let xlo1k = (cx1k - r1k) as f32 * 1000.0;
     let xhi1k = (cx1k + r1k) as f32 * 1000.0;
     let zlo1k = (cz1k - r1k) as f32 * 1000.0;

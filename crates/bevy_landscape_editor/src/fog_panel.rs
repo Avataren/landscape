@@ -77,11 +77,15 @@ pub(crate) fn fog_panel_system(
                     .spacing([8.0, 4.0])
                     .show(ui, |ui| {
                         ui.label("Density");
-                        if ui.add(
-                            egui::Slider::new(&mut state.density, 0.0..=0.002)
-                                .logarithmic(true)
-                                .fixed_decimals(6),
-                        ).changed() && state.enabled {
+                        if ui
+                            .add(
+                                egui::Slider::new(&mut state.density, 0.0..=0.002)
+                                    .logarithmic(true)
+                                    .fixed_decimals(6),
+                            )
+                            .changed()
+                            && state.enabled
+                        {
                             fog.density_factor = state.density;
                         }
                         ui.end_row();

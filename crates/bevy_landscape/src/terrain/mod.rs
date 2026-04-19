@@ -40,6 +40,9 @@ use macro_color::load_macro_color_texture;
 use material::{TerrainMaterial, TerrainMaterialUniforms};
 use material_slots::{sync_material_library_to_terrain_material, MaterialLibrary};
 use math::{compute_needed_tiles_for_level, level_scale, snap_camera_to_nested_clipmap_grid};
+use pbr_textures::{
+    rebuild_pbr_textures_system, PbrRebuildProgress, PbrRebuildState, PbrTexturesDirty,
+};
 use physics_colliders::spawn_global_heightfield;
 use physics_colliders::{spawn_global_heightfield_for_desc, GlobalTerrainHeightfield};
 use render::TerrainRenderPlugin;
@@ -120,6 +123,9 @@ impl Plugin for TerrainPlugin {
             .init_resource::<PatchEntities>()
             .init_resource::<TerrainClipmapUploads>()
             .init_resource::<MaterialLibrary>()
+            .init_resource::<PbrTexturesDirty>()
+            .init_resource::<PbrRebuildProgress>()
+            .init_resource::<PbrRebuildState>()
             // Startup
             .add_systems(Startup, (setup_tile_channel, setup_terrain).chain())
             .add_systems(PostStartup, preload_terrain_startup)
@@ -150,6 +156,7 @@ impl Plugin for TerrainPlugin {
                     .after(update_terrain_view_state),
             )
             .add_systems(Update, sync_material_library_to_terrain_material)
+            .add_systems(Update, rebuild_pbr_textures_system)
             .add_systems(
                 Update,
                 reload_terrain_system.before(update_terrain_view_state),
@@ -516,15 +523,18 @@ fn setup_terrain(
     patch_entities.mesh_handle = mesh_handle.clone();
 
     let assets_dir = std::path::Path::new("assets");
-    let pbr_albedo_handle = images.add(
-        pbr_textures::build_albedo_array(&material_library.slots, assets_dir),
-    );
-    let pbr_normal_handle = images.add(
-        pbr_textures::build_normal_array(&material_library.slots, assets_dir),
-    );
-    let pbr_orm_handle = images.add(
-        pbr_textures::build_orm_array(&material_library.slots, assets_dir),
-    );
+    let pbr_albedo_handle = images.add(pbr_textures::build_albedo_array(
+        &material_library.slots,
+        assets_dir,
+    ));
+    let pbr_normal_handle = images.add(pbr_textures::build_normal_array(
+        &material_library.slots,
+        assets_dir,
+    ));
+    let pbr_orm_handle = images.add(pbr_textures::build_orm_array(
+        &material_library.slots,
+        assets_dir,
+    ));
 
     let mat_handle = terrain_materials.add(TerrainMaterial {
         height_texture: height_handle.clone(),
@@ -532,7 +542,7 @@ fn setup_terrain(
         normal_texture: normal_handle.clone(),
         pbr_albedo_array: pbr_albedo_handle,
         pbr_normal_array: pbr_normal_handle,
-        pbr_orm_array:    pbr_orm_handle,
+        pbr_orm_array: pbr_orm_handle,
         params: TerrainMaterialUniforms {
             height_scale: config.height_scale,
             base_patch_size,
@@ -772,6 +782,7 @@ fn reload_terrain_system(
     mut images: ResMut<Assets<Image>>,
     mut commands: Commands,
     mut patch_entities: ResMut<PatchEntities>,
+    mut pbr_dirty: ResMut<PbrTexturesDirty>,
     camera_q: Query<(&Transform, &TerrainCamera)>,
     global_heightfield_q: Query<Entity, With<GlobalTerrainHeightfield>>,
 ) {
@@ -793,6 +804,7 @@ fn reload_terrain_system(
         *config = new_config.clone();
         *desc = new_desc.clone();
         *material_library = new_library;
+        pbr_dirty.0 = true; // rebuild PBR texture arrays from the newly loaded library
 
         // --- 2. Despawn ALL old patch entities immediately --------------------
         // This prevents stale geometry (wrong world_scale transforms) from

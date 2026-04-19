@@ -1,0 +1,136 @@
+{
+  "tile_root": "assets/tiles",
+  "normal_root": null,
+  "diffuse_path": null,
+  "max_mip_level": 3,
+  "collision_mip_level": 2,
+  "world_scale": 1.0,
+  "height_scale": 512.0,
+  "clipmap_levels": 12,
+  "material_library": {
+    "slots": [
+      {
+        "name": "Ground",
+        "visible": true,
+        "tint": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "albedo_path": "textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_diff_4k.jpg",
+        "normal_path": "textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_nor_gl_4k.png",
+        "orm_path": "textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_rough_4k.png",
+        "height_path": "textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_disp_4k.png",
+        "fine_scale_m": 6.0,
+        "coarse_scale_mul": 6.0,
+        "triplanar_threshold_deg": 45.0,
+        "height_blend_sharpness": 0.1,
+        "procedural": {
+          "altitude_range_m": [
+            -10000.0,
+            10000.0
+          ],
+          "slope_range_deg": [
+            0.0,
+            29.0
+          ],
+          "curvature_bias": 0.0,
+          "noise_scale_m": 50.0,
+          "noise_strength": 0.25
+        }
+      },
+      {
+        "name": "Mid Rock",
+        "visible": true,
+        "tint": [
+          0.38000003,
+          0.36000004,
+          0.30000004
+        ],
+        "albedo_path": "textures/coast_land_rocks_01_4k.blend/textures/coast_land_rocks_01_diff_4k.jpg",
+        "normal_path": "textures/coast_land_rocks_01_4k.blend/textures/coast_land_rocks_01_nor_gl_4k.png",
+        "orm_path": "textures/coast_land_rocks_01_4k.blend/textures/coast_land_rocks_01_rough_4k.png",
+        "height_path": "textures/coast_land_rocks_01_4k.blend/textures/coast_land_rocks_01_disp_4k.png",
+        "fine_scale_m": 4.0,
+        "coarse_scale_mul": 6.0,
+        "triplanar_threshold_deg": 45.0,
+        "height_blend_sharpness": 0.1,
+        "procedural": {
+          "altitude_range_m": [
+            -10000.0,
+            10000.0
+          ],
+          "slope_range_deg": [
+            18.0,
+            45.0
+          ],
+          "curvature_bias": 0.0,
+          "noise_scale_m": 50.0,
+          "noise_strength": 0.25
+        }
+      },
+      {
+        "name": "Cliff",
+        "visible": true,
+        "tint": [
+          0.4,
+          0.36,
+          0.32
+        ],
+        "albedo_path": "textures/marble_cliff_01_4k.blend/textures/marble_cliff_01_diff_4k.jpg",
+        "normal_path": "textures/marble_cliff_01_4k.blend/textures/marble_cliff_01_nor_gl_4k.png",
+        "orm_path": "textures/marble_cliff_01_4k.blend/textures/marble_cliff_01_rough_4k.png",
+        "height_path": "textures/marble_cliff_01_4k.blend/textures/marble_cliff_01_disp_4k.png",
+        "fine_scale_m": 2.5,
+        "coarse_scale_mul": 8.2,
+        "triplanar_threshold_deg": 45.0,
+        "height_blend_sharpness": 0.23,
+        "procedural": {
+          "altitude_range_m": [
+            -10000.0,
+            10000.0
+          ],
+          "slope_range_deg": [
+            38.0,
+            90.0
+          ],
+          "curvature_bias": -0.05,
+          "noise_scale_m": 50.0,
+          "noise_strength": 0.55
+        }
+      },
+      {
+        "name": "Snow",
+        "visible": true,
+        "tint": [
+          0.90000015,
+          0.9300002,
+          0.9800002
+        ],
+        "albedo_path": "textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_diff_4k.jpg",
+        "normal_path": "textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_nor_gl_4k.png",
+        "orm_path": "textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_rough_4k.png",
+        "height_path": "textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_disp_4k.png",
+        "fine_scale_m": 8.0,
+        "coarse_scale_mul": 5.0,
+        "triplanar_threshold_deg": 45.0,
+        "height_blend_sharpness": 0.1,
+        "procedural": {
+          "altitude_range_m": [
+            600.0,
+            10000.0
+          ],
+          "slope_range_deg": [
+            0.0,
+            50.0
+          ],
+          "curvature_bias": 0.0,
+          "noise_scale_m": 50.0,
+          "noise_strength": 0.25
+        }
+      }
+    ],
+    "max_slots": 8,
+    "use_macro_color_override": false
+  }
+}
