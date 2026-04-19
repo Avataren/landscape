@@ -74,8 +74,6 @@ pub fn bake_heightmap(config: BakeConfig, log: impl Fn(String)) -> Result<(), St
         ));
     }
 
-    let effective_height_scale = config.height_scale * config.world_scale;
-
     log(format!(
         "Loading height map: {} …",
         config.height_path.display()
@@ -90,6 +88,17 @@ pub fn bake_heightmap(config: BakeConfig, log: impl Fn(String)) -> Result<(), St
             img_w, img_h
         ));
     }
+
+    let bake_size = derive_bake_extent(img_w, config.tile_size)?;
+    if bake_size != img_w {
+        log(format!(
+            "Trimming source border sample: baking {}×{} as {}×{}.",
+            img_w, img_h, bake_size, bake_size
+        ));
+    }
+
+    let effective_height_scale = config.height_scale * config.world_scale;
+    let height_pixels_raw = crop_square_border(&height_pixels_raw, img_w, bake_size);
 
     // Normalise to [0, 1].
     let h_min = height_pixels_raw
@@ -119,7 +128,8 @@ pub fn bake_heightmap(config: BakeConfig, log: impl Fn(String)) -> Result<(), St
             "Smoothing heightmap (sigma={:.2}) …",
             config.smooth_sigma
         ));
-        height_pixels = gaussian_blur_f32(&height_pixels, img_w, img_h, config.smooth_sigma);
+        height_pixels =
+            gaussian_blur_f32(&height_pixels, bake_size, bake_size, config.smooth_sigma);
         log(format!("Smoothing done in {:.1}s", elapsed()));
     }
 
@@ -129,7 +139,7 @@ pub fn bake_heightmap(config: BakeConfig, log: impl Fn(String)) -> Result<(), St
                 return Err(format!("bump map not found: {}", bump_path.display()));
             }
             log(format!("Loading bump map: {} …", bump_path.display()));
-            let (mut bheight, bnormal, bw, bh) =
+            let (mut bheight, mut bnormal, bw, bh) =
                 load_bump_map(bump_path).map_err(|e| e.to_string())?;
             log(format!("  {}×{}", bw, bh));
             if bw != img_w || bh != img_h {
@@ -137,6 +147,14 @@ pub fn bake_heightmap(config: BakeConfig, log: impl Fn(String)) -> Result<(), St
                     "Bump map {}×{} must match height map {}×{}",
                     bw, bh, img_w, img_h
                 ));
+            }
+            if bake_size != img_w {
+                if let Some(ref mut pix) = bheight {
+                    *pix = crop_square_border(pix, bw, bake_size);
+                }
+                if let Some(ref mut pix) = bnormal {
+                    *pix = crop_square_border(pix, bw, bake_size);
+                }
             }
             if let Some(ref mut pix) = bheight {
                 let bmin = pix.iter().cloned().fold(f32::INFINITY, f32::min);
@@ -156,7 +174,7 @@ pub fn bake_heightmap(config: BakeConfig, log: impl Fn(String)) -> Result<(), St
     let tile_size = config.tile_size;
 
     let levels = {
-        let mut sz = img_w;
+        let mut sz = bake_size;
         let mut n = 0u32;
         while sz / tile_size >= 2 {
             n += 1;
@@ -164,6 +182,16 @@ pub fn bake_heightmap(config: BakeConfig, log: impl Fn(String)) -> Result<(), St
         }
         n
     };
+
+    if levels == 0 {
+        return Err(format!(
+            "Heightmap resolution {} is too small for {}px tiles. Use at least {} or {} samples.",
+            img_w,
+            tile_size,
+            tile_size * 2,
+            tile_size * 2 + 1
+        ));
+    }
 
     prepare_output_dir(&config.output_dir, &log)?;
     log(format!(
@@ -176,7 +204,7 @@ pub fn bake_heightmap(config: BakeConfig, log: impl Fn(String)) -> Result<(), St
     let mut current_height = height_pixels;
     let mut current_bump_height = bump_height;
     let mut current_bump_normal = bump_normal;
-    let mut current_size = img_w;
+    let mut current_size = bake_size;
     let mut total_tiles = 0usize;
 
     for lod in 0..levels {
@@ -328,6 +356,58 @@ fn prepare_output_dir(output_dir: &Path, log: &impl Fn(String)) -> Result<(), St
     }
 
     Ok(())
+}
+
+fn derive_bake_extent(source_size: usize, tile_size: usize) -> Result<usize, String> {
+    if tile_size == 0 || !tile_size.is_power_of_two() {
+        return Err(format!(
+            "tile_size must be a non-zero power of two, got {}",
+            tile_size
+        ));
+    }
+
+    let bake_size = if source_size % tile_size == 0 {
+        source_size
+    } else if source_size > 1 && (source_size - 1) % tile_size == 0 {
+        source_size - 1
+    } else {
+        return Err(format!(
+            "Unsupported heightmap resolution {}. Expected a square image whose width is either a multiple of {} or that value plus one (for example 4096 or 4097).",
+            source_size, tile_size
+        ));
+    };
+
+    let tiles_per_side = bake_size / tile_size;
+    if tiles_per_side < 2 {
+        return Err(format!(
+            "Heightmap resolution {} is too small for {}px tiles. Use at least {} or {} samples.",
+            source_size,
+            tile_size,
+            tile_size * 2,
+            tile_size * 2 + 1
+        ));
+    }
+    if !tiles_per_side.is_power_of_two() {
+        return Err(format!(
+            "Unsupported heightmap resolution {}. It produces {} tiles per side, but the baker requires a power-of-two tile count (for example 512, 1024, 2048, 4096, or 4097).",
+            source_size, tiles_per_side
+        ));
+    }
+
+    Ok(bake_size)
+}
+
+fn crop_square_border<T: Copy>(src: &[T], src_size: usize, dst_size: usize) -> Vec<T> {
+    if src_size == dst_size {
+        return src.to_vec();
+    }
+
+    let mut out = Vec::with_capacity(dst_size * dst_size);
+    for row in 0..dst_size {
+        let start = row * src_size;
+        out.extend_from_slice(&src[start..start + dst_size]);
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -657,6 +737,13 @@ mod tests {
         std::env::temp_dir().join(format!("landscape-{label}-{nonce}"))
     }
 
+    fn write_heightmap(path: &Path, size: u32) {
+        let img: ImageBuffer<Luma<u16>, Vec<u16>> = ImageBuffer::from_fn(size, size, |x, y| {
+            Luma([((x + y) % u16::MAX as u32) as u16])
+        });
+        img.save(path).unwrap();
+    }
+
     #[test]
     fn bake_clears_stale_output_hierarchy() {
         let temp_dir = unique_temp_dir("bake-clean");
@@ -666,9 +753,7 @@ mod tests {
         fs::write(temp_dir.join("normal/L5/stale.bin"), [5u8, 6, 7, 8]).unwrap();
 
         let height_path = temp_dir.join("height.png");
-        let img: ImageBuffer<Luma<u16>, Vec<u16>> =
-            ImageBuffer::from_fn(512, 512, |x, y| Luma([((x + y) % u16::MAX as u32) as u16]));
-        img.save(&height_path).unwrap();
+        write_heightmap(&height_path, 512);
 
         let config = BakeConfig {
             height_path,
@@ -683,6 +768,68 @@ mod tests {
         assert!(temp_dir.join("normal/L0").exists());
         assert!(!temp_dir.join("height/L5").exists());
         assert!(!temp_dir.join("normal/L5").exists());
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn bake_supports_power_of_two_plus_one_heightmaps() {
+        let temp_dir = unique_temp_dir("bake-plus-one");
+        let height_path = temp_dir.join("height.png");
+        fs::create_dir_all(&temp_dir).unwrap();
+        write_heightmap(&height_path, 513);
+
+        let config = BakeConfig {
+            height_path,
+            output_dir: temp_dir.clone(),
+            tile_size: 256,
+            ..Default::default()
+        };
+
+        bake_heightmap(config, |_| {}).unwrap();
+
+        let tile_count = fs::read_dir(temp_dir.join("height/L0")).unwrap().count();
+        assert_eq!(tile_count, 4);
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn bake_rejects_single_tile_heightmaps() {
+        let temp_dir = unique_temp_dir("bake-too-small");
+        let height_path = temp_dir.join("height.png");
+        fs::create_dir_all(&temp_dir).unwrap();
+        write_heightmap(&height_path, 257);
+
+        let config = BakeConfig {
+            height_path,
+            output_dir: temp_dir.clone(),
+            tile_size: 256,
+            ..Default::default()
+        };
+
+        let err = bake_heightmap(config, |_| {}).unwrap_err();
+        assert!(err.contains("too small"));
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn bake_rejects_non_power_of_two_tile_counts() {
+        let temp_dir = unique_temp_dir("bake-bad-tiles");
+        let height_path = temp_dir.join("height.png");
+        fs::create_dir_all(&temp_dir).unwrap();
+        write_heightmap(&height_path, 769);
+
+        let config = BakeConfig {
+            height_path,
+            output_dir: temp_dir.clone(),
+            tile_size: 256,
+            ..Default::default()
+        };
+
+        let err = bake_heightmap(config, |_| {}).unwrap_err();
+        assert!(err.contains("power-of-two tile count"));
 
         let _ = fs::remove_dir_all(temp_dir);
     }

@@ -218,11 +218,14 @@ fn generator_panel_system(
                     .num_columns(2)
                     .spacing([8.0, 4.0])
                     .show(ui, |ui| {
-                        ui.label("Height Scale (m)");
+                        ui.label("Height Scale (base m)");
                         ui.add(
                             egui::DragValue::new(&mut params.height_scale)
                                 .speed(16.0)
                                 .range(64.0..=8192.0),
+                        )
+                        .on_hover_text(
+                            "Base world-space Y range before world_scale is applied."
                         );
                         ui.end_row();
 
@@ -231,7 +234,17 @@ fn generator_panel_system(
                             egui::DragValue::new(&mut params.world_scale)
                                 .speed(0.1)
                                 .range(0.25..=32.0),
+                        )
+                        .on_hover_text(
+                            "Uniform X/Y/Z scale. Final terrain height span is height_scale × world_scale."
                         );
+                        ui.end_row();
+
+                        ui.label("Final Height Span");
+                        ui.label(format!(
+                            "{:.1} m",
+                            params.height_scale * params.world_scale
+                        ));
                         ui.end_row();
 
                         ui.label("Export Resolution");
@@ -262,7 +275,17 @@ fn generator_panel_system(
                                 }
                             });
                         ui.end_row();
+
+                        ui.label("Baked Rings");
+                        let baked_levels = baked_clipmap_levels(params.export_resolution);
+                        ui.label(format!("{baked_levels}"));
+                        ui.end_row();
                     });
+
+                let baked_levels = baked_clipmap_levels(params.export_resolution);
+                ui.label(format!(
+                    "Current export resolution bakes {baked_levels} mip levels before the runtime starts reusing the coarsest level."
+                ));
 
                 // Preview
                 ui.add_space(8.0);
@@ -410,6 +433,38 @@ fn scan_world_bounds(output_dir: &Path, world_scale: f32) -> (Vec2, Vec2) {
 }
 
 fn derive_clipmap_levels(requested: u32, max_mip: u8) -> u32 {
-    // Keep user's view distance but ensure we don't exceed what's baked.
-    requested.min((max_mip as u32 + 1) * 4)
+    // Preserve the user's view distance, but ensure we expose at least the
+    // baked hierarchy depth. Farther runtime rings reuse the coarsest baked mip.
+    requested.max(max_mip as u32 + 1).max(1)
+}
+
+fn baked_clipmap_levels(export_resolution: u32) -> u32 {
+    const TILE_SIZE: u32 = 256;
+
+    let mut sz = export_resolution;
+    let mut levels = 0u32;
+    while sz / TILE_SIZE >= 2 {
+        levels += 1;
+        sz /= 2;
+    }
+    levels.max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{baked_clipmap_levels, derive_clipmap_levels};
+
+    #[test]
+    fn generator_clipmap_levels_preserve_view_distance() {
+        assert_eq!(derive_clipmap_levels(8, 3), 8);
+        assert_eq!(derive_clipmap_levels(4, 3), 4);
+        assert_eq!(derive_clipmap_levels(2, 5), 6);
+    }
+
+    #[test]
+    fn export_resolution_reports_baked_ring_count() {
+        assert_eq!(baked_clipmap_levels(512), 1);
+        assert_eq!(baked_clipmap_levels(4096), 4);
+        assert_eq!(baked_clipmap_levels(16384), 6);
+    }
 }

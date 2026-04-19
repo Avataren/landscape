@@ -151,17 +151,14 @@ fn fbm(mut p: Vec2, octaves: u32, lacunarity: f32, gain: f32) -> f32 {
 
 fn hash22(p: Vec2) -> Vec2 {
     let mut p3 = Vec3::new(p.x * 0.1031, p.y * 0.1030, p.x * 0.0973);
-    p3 = p3.fract();
+    p3 = fract3(p3);
     p3 += p3.dot(Vec3::new(p3.y, p3.z, p3.x) + 33.33);
-    Vec2::new(
-        ((p3.x + p3.y) * p3.z).fract(),
-        ((p3.x + p3.z) * p3.y).fract(),
-    )
+    Vec2::new(fract1((p3.x + p3.y) * p3.z), fract1((p3.x + p3.z) * p3.y))
 }
 
 fn gradient_noise(p: Vec2) -> f32 {
     let i = p.floor();
-    let f = p.fract();
+    let f = fract2(p);
     let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
 
     let ga = hash22(i + Vec2::new(0.0, 0.0)) * 2.0 - Vec2::ONE;
@@ -186,6 +183,18 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+fn fract1(v: f32) -> f32 {
+    v - v.floor()
+}
+
+fn fract2(v: Vec2) -> Vec2 {
+    v - v.floor()
+}
+
+fn fract3(v: Vec3) -> Vec3 {
+    v - v.floor()
+}
+
 fn saturate(v: f32) -> f32 {
     v.clamp(0.0, 1.0)
 }
@@ -196,7 +205,7 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::sample_height;
+    use super::{fract1, sample_height};
     use crate::params::GeneratorParams;
 
     #[test]
@@ -219,5 +228,23 @@ mod tests {
         let a = sample_height(&params_a, 0.37, 0.61);
         let b = sample_height(&params_b, 0.37, 0.61);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn fract_matches_shader_semantics_for_negative_values() {
+        assert!((fract1(-0.2) - 0.8).abs() < 1e-6);
+        assert!((fract1(-1.75) - 0.25).abs() < 1e-6);
+        assert!((fract1(1.75) - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn negative_domain_sampling_stays_continuous() {
+        let params = GeneratorParams::default();
+        let a = sample_height(&params, -0.7501, 0.12);
+        let b = sample_height(&params, -0.7499, 0.12);
+        assert!(
+            (a - b).abs() < 0.01,
+            "unexpected discontinuity across negative coordinate seam: {a} vs {b}"
+        );
     }
 }

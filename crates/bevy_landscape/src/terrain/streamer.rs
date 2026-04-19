@@ -53,7 +53,7 @@ pub(crate) fn load_tile_data(
             if source_level == key.level {
                 load_disk_height_tile(root, key, tile_size, bounds)
             } else {
-                build_resampled_tile(
+                build_resampled_height_tile(
                     key,
                     tile_size,
                     level_scale_ws,
@@ -89,15 +89,19 @@ pub(crate) fn load_tile_data(
             if source_level == key.level {
                 load_disk_normal_tile(root, key, tile_size, bounds)
             } else {
-                build_resampled_tile(
-                    key,
+                None
+            }
+        })
+        .or_else(|| {
+            if source_level < key.level {
+                Some(build_normal_tile_from_height_data(
+                    &height_data,
                     tile_size,
                     level_scale_ws,
-                    source_level,
-                    source_scale_ws,
-                    bounds,
-                    |src_key| read_rg8_snorm_tile(&normal_tile_path(root, src_key), tile_size),
-                )
+                    height_scale,
+                ))
+            } else {
+                None
             }
         })
         .unwrap_or_else(|| {
@@ -251,7 +255,7 @@ where
     Some(out)
 }
 
-fn build_resampled_tile<T, F>(
+fn build_resampled_height_tile<F>(
     key: TileKey,
     tile_size: u32,
     requested_scale_ws: f32,
@@ -259,49 +263,117 @@ fn build_resampled_tile<T, F>(
     source_scale_ws: f32,
     source_bounds: Option<GridBounds>,
     mut fetch_tile: F,
-) -> Option<Vec<T>>
+) -> Option<Vec<f32>>
 where
-    T: Copy + Default,
-    F: FnMut(TileKey) -> Option<Vec<T>>,
+    F: FnMut(TileKey) -> Option<Vec<f32>>,
 {
     let tile_size_i32 = tile_size as i32;
-    let mut out = vec![T::default(); (tile_size * tile_size) as usize];
-    let mut cache: HashMap<TileKey, Vec<T>> = HashMap::new();
+    let mut out = vec![0.0f32; (tile_size * tile_size) as usize];
+    let mut cache: HashMap<TileKey, Vec<f32>> = HashMap::new();
 
     for row in 0..tile_size {
         for col in 0..tile_size {
             let world_x = ((key.x * tile_size_i32 + col as i32) as f32 + 0.5) * requested_scale_ws;
             let world_z = ((key.y * tile_size_i32 + row as i32) as f32 + 0.5) * requested_scale_ws;
 
-            let gx = (world_x / source_scale_ws).floor() as i32;
-            let gz = (world_z / source_scale_ws).floor() as i32;
+            let src_x = world_x / source_scale_ws - 0.5;
+            let src_z = world_z / source_scale_ws - 0.5;
 
             if let Some(bounds) = source_bounds {
-                if gx < bounds.min.x || gx > bounds.max.x || gz < bounds.min.y || gz > bounds.max.y
+                if src_x < bounds.min.x as f32
+                    || src_x > bounds.max.x as f32
+                    || src_z < bounds.min.y as f32
+                    || src_z > bounds.max.y as f32
                 {
                     continue;
                 }
             }
 
-            let src_key = TileKey {
-                level: source_level,
-                x: gx.div_euclid(tile_size_i32),
-                y: gz.div_euclid(tile_size_i32),
-            };
+            let x0 = src_x.floor() as i32;
+            let z0 = src_z.floor() as i32;
+            let tx = src_x - x0 as f32;
+            let tz = src_z - z0 as f32;
 
-            if !cache.contains_key(&src_key) {
-                cache.insert(src_key, fetch_tile(src_key)?);
-            }
+            let h00 = sample_height_from_resampled_source(
+                x0,
+                z0,
+                source_level,
+                tile_size_i32,
+                source_bounds,
+                &mut fetch_tile,
+                &mut cache,
+            )?;
+            let h10 = sample_height_from_resampled_source(
+                x0 + 1,
+                z0,
+                source_level,
+                tile_size_i32,
+                source_bounds,
+                &mut fetch_tile,
+                &mut cache,
+            )?;
+            let h01 = sample_height_from_resampled_source(
+                x0,
+                z0 + 1,
+                source_level,
+                tile_size_i32,
+                source_bounds,
+                &mut fetch_tile,
+                &mut cache,
+            )?;
+            let h11 = sample_height_from_resampled_source(
+                x0 + 1,
+                z0 + 1,
+                source_level,
+                tile_size_i32,
+                source_bounds,
+                &mut fetch_tile,
+                &mut cache,
+            )?;
 
-            let src_tile = cache.get(&src_key)?;
-            let local_x = gx.rem_euclid(tile_size_i32) as usize;
-            let local_y = gz.rem_euclid(tile_size_i32) as usize;
-            out[(row * tile_size + col) as usize] =
-                src_tile[local_y * tile_size as usize + local_x];
+            let hx0 = h00 + (h10 - h00) * tx;
+            let hx1 = h01 + (h11 - h01) * tx;
+            out[(row * tile_size + col) as usize] = hx0 + (hx1 - hx0) * tz;
         }
     }
 
     Some(out)
+}
+
+fn sample_height_from_resampled_source<F>(
+    gx: i32,
+    gz: i32,
+    source_level: u8,
+    tile_size_i32: i32,
+    source_bounds: Option<GridBounds>,
+    fetch_tile: &mut F,
+    cache: &mut HashMap<TileKey, Vec<f32>>,
+) -> Option<f32>
+where
+    F: FnMut(TileKey) -> Option<Vec<f32>>,
+{
+    let (gx, gz) = match source_bounds {
+        Some(bounds) => (
+            gx.clamp(bounds.min.x, bounds.max.x),
+            gz.clamp(bounds.min.y, bounds.max.y),
+        ),
+        None => (gx, gz),
+    };
+
+    let src_key = TileKey {
+        level: source_level,
+        x: gx.div_euclid(tile_size_i32),
+        y: gz.div_euclid(tile_size_i32),
+    };
+
+    if !cache.contains_key(&src_key) {
+        cache.insert(src_key, fetch_tile(src_key)?);
+    }
+
+    let src_tile = cache.get(&src_key)?;
+    let local_x = gx.rem_euclid(tile_size_i32) as usize;
+    let local_y = gz.rem_euclid(tile_size_i32) as usize;
+    Some(src_tile[local_y * tile_size_i32 as usize + local_x])
 }
 
 fn load_disk_height_tile(
@@ -384,6 +456,45 @@ fn build_procedural_normal_tile(
             )));
         }
     }
+    pixels
+}
+
+fn build_normal_tile_from_height_data(
+    height_data: &[f32],
+    tile_size: u32,
+    level_scale_ws: f32,
+    height_scale: f32,
+) -> Vec<[u8; 2]> {
+    let tile_size_i32 = tile_size as i32;
+    let mut pixels = Vec::with_capacity((tile_size * tile_size) as usize);
+    let sample = |x: i32, y: i32| -> f32 {
+        let x = x.clamp(0, tile_size_i32 - 1) as usize;
+        let y = y.clamp(0, tile_size_i32 - 1) as usize;
+        height_data[y * tile_size as usize + x]
+    };
+
+    for row in 0..tile_size_i32 {
+        for col in 0..tile_size_i32 {
+            let h = |dx: i32, dy: i32| sample(col + dx, row + dy);
+            let gx = (h(1, -1) + 2.0 * h(1, 0) + h(1, 1) - h(-1, -1) - 2.0 * h(-1, 0) - h(-1, 1))
+                * (1.0 / 8.0)
+                * height_scale;
+            let gz = (h(-1, 1) + 2.0 * h(0, 1) + h(1, 1) - h(-1, -1) - 2.0 * h(0, -1) - h(1, -1))
+                * (1.0 / 8.0)
+                * height_scale;
+            let nx = -gx;
+            let nz = -gz;
+            let len = (nx * nx + level_scale_ws * level_scale_ws + nz * nz)
+                .sqrt()
+                .max(1e-6);
+            pixels.push(encode_normal_xz_snorm(Vec3::new(
+                nx / len,
+                level_scale_ws / len,
+                nz / len,
+            )));
+        }
+    }
+
     pixels
 }
 
@@ -554,7 +665,7 @@ mod tests {
             vec![13.0, 14.0, 15.0, 16.0],
         );
 
-        let tile = build_resampled_tile(
+        let tile = build_resampled_height_tile(
             TileKey {
                 level: 1,
                 x: 0,
@@ -569,6 +680,42 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(tile, vec![4.0, 8.0, 12.0, 16.0]);
+        assert_eq!(tile, vec![2.5, 6.5, 10.5, 14.5]);
+    }
+
+    #[test]
+    fn resampled_height_tile_blends_source_texels() {
+        let tile = build_resampled_height_tile(
+            TileKey {
+                level: 1,
+                x: 0,
+                y: 0,
+            },
+            4,
+            2.0,
+            0,
+            1.0,
+            Some(GridBounds {
+                min: IVec2::ZERO,
+                max: IVec2::splat(7),
+            }),
+            |src_key| {
+                let mut values = vec![0.0f32; 16];
+                for row in 0..4 {
+                    for col in 0..4 {
+                        let gx = src_key.x * 4 + col as i32;
+                        values[row * 4 + col] = gx as f32;
+                    }
+                }
+                Some(values)
+            },
+        )
+        .unwrap();
+
+        let first_row = &tile[0..4];
+        let expected = [0.5, 2.5, 4.5, 6.5];
+        for (actual, expected) in first_row.iter().zip(expected) {
+            assert!((actual - expected).abs() < 1e-5);
+        }
     }
 }

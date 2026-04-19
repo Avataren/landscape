@@ -209,7 +209,7 @@ fn generate(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 
     let res = vec2<f32>(f32(params.resolution.x), f32(params.resolution.y));
-    let uv = vec2<f32>(f32(id.x), f32(id.y)) / res;
+    let uv = (vec2<f32>(f32(id.x), f32(id.y)) + vec2<f32>(0.5, 0.5)) / res;
     let h = terrain_height(uv);
 
     textureStore(output, vec2<i32>(id.xy), vec4<f32>(h, h, h, 1.0));
