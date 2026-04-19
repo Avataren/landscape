@@ -1,0 +1,136 @@
+{
+  "tile_root": "assets/tiles",
+  "normal_root": null,
+  "diffuse_path": null,
+  "max_mip_level": 5,
+  "collision_mip_level": 2,
+  "world_scale": 1.0,
+  "height_scale": 2048.0,
+  "clipmap_levels": 12,
+  "material_library": {
+    "slots": [
+      {
+        "name": "Grass",
+        "visible": true,
+        "tint": [
+          0.28,
+          0.52,
+          0.18
+        ],
+        "albedo_path": null,
+        "normal_path": null,
+        "orm_path": null,
+        "height_path": null,
+        "fine_scale_m": 1.0,
+        "coarse_scale_mul": 5.0,
+        "triplanar_threshold_deg": 45.0,
+        "height_blend_sharpness": 0.1,
+        "procedural": {
+          "altitude_range_m": [
+            -10000.0,
+            10000.0
+          ],
+          "slope_range_deg": [
+            0.0,
+            18.0
+          ],
+          "curvature_bias": 0.0,
+          "noise_scale_m": 50.0,
+          "noise_strength": 0.25
+        }
+      },
+      {
+        "name": "Soil",
+        "visible": true,
+        "tint": [
+          0.5,
+          0.4,
+          0.28
+        ],
+        "albedo_path": null,
+        "normal_path": null,
+        "orm_path": null,
+        "height_path": null,
+        "fine_scale_m": 1.0,
+        "coarse_scale_mul": 5.0,
+        "triplanar_threshold_deg": 45.0,
+        "height_blend_sharpness": 0.1,
+        "procedural": {
+          "altitude_range_m": [
+            -10000.0,
+            10000.0
+          ],
+          "slope_range_deg": [
+            12.0,
+            30.0
+          ],
+          "curvature_bias": 0.0,
+          "noise_scale_m": 50.0,
+          "noise_strength": 0.25
+        }
+      },
+      {
+        "name": "Rock",
+        "visible": true,
+        "tint": [
+          0.44,
+          0.38,
+          0.32
+        ],
+        "albedo_path": null,
+        "normal_path": null,
+        "orm_path": null,
+        "height_path": null,
+        "fine_scale_m": 1.0,
+        "coarse_scale_mul": 5.0,
+        "triplanar_threshold_deg": 45.0,
+        "height_blend_sharpness": 0.1,
+        "procedural": {
+          "altitude_range_m": [
+            -10000.0,
+            10000.0
+          ],
+          "slope_range_deg": [
+            28.0,
+            90.0
+          ],
+          "curvature_bias": 0.0,
+          "noise_scale_m": 50.0,
+          "noise_strength": 0.25
+        }
+      },
+      {
+        "name": "Snow",
+        "visible": true,
+        "tint": [
+          0.9,
+          0.93,
+          0.98
+        ],
+        "albedo_path": null,
+        "normal_path": null,
+        "orm_path": null,
+        "height_path": null,
+        "fine_scale_m": 1.0,
+        "coarse_scale_mul": 5.0,
+        "triplanar_threshold_deg": 45.0,
+        "height_blend_sharpness": 0.1,
+        "procedural": {
+          "altitude_range_m": [
+            600.0,
+            10000.0
+          ],
+          "slope_range_deg": [
+            0.0,
+            55.0
+          ],
+          "curvature_bias": 0.0,
+          "noise_scale_m": 50.0,
+          "noise_strength": 0.25
+        }
+      }
+    ],
+    "max_slots": 8,
+    "use_macro_color_override": false
+  }
+}
