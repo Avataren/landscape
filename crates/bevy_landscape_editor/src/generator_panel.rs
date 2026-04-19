@@ -10,21 +10,23 @@ use bevy_landscape_generator::{export::ExportHandle, GeneratorParams, Heightfiel
 
 #[derive(Resource)]
 pub struct GeneratorPanelState {
-    pub open:    bool,
-    preview_id:  Option<TextureId>,
-    output_dir:  String,
-    export:      Option<ExportHandle>,
-    log:         Vec<String>,
+    pub open: bool,
+    preview_id: Option<TextureId>,
+    preview_handle: Option<Handle<Image>>,
+    output_dir: String,
+    export: Option<ExportHandle>,
+    log: Vec<String>,
 }
 
 impl Default for GeneratorPanelState {
     fn default() -> Self {
         Self {
-            open:       false,
+            open: false,
             preview_id: None,
+            preview_handle: None,
             output_dir: "assets/tiles_generated".into(),
-            export:     None,
-            log:        Vec::new(),
+            export: None,
+            log: Vec::new(),
         }
     }
 }
@@ -58,28 +60,38 @@ fn generator_panel_system(
             while let Ok(msg) = handle.log_rx.lock().unwrap().try_recv() {
                 new_msgs.push(msg);
             }
-            finished  = handle.done.load(std::sync::atomic::Ordering::Acquire);
+            finished = handle.done.load(std::sync::atomic::Ordering::Acquire);
             succeeded = handle.succeeded.load(std::sync::atomic::Ordering::Acquire);
-            out_dir   = handle.output_dir.clone();
+            out_dir = handle.output_dir.clone();
         }
 
         panel.log.extend(new_msgs);
 
         if finished {
             if succeeded {
-                panel.log.push("Reloading terrain from generated tiles…".into());
-                trigger_reload(&out_dir, &params, &active_config, &active_library, &mut reload_tx);
+                panel
+                    .log
+                    .push("Reloading terrain from generated tiles…".into());
+                trigger_reload(
+                    &out_dir,
+                    &params,
+                    &active_config,
+                    &active_library,
+                    &mut reload_tx,
+                );
             }
             panel.export = None;
         }
     }
 
     // Register the heightfield texture with egui once it's available.
-    if panel.preview_id.is_none() {
-        if let Some(ref img) = gen_image {
-            panel.preview_id = Some(contexts.add_image(
-                bevy_egui::EguiTextureHandle::Strong(img.heightfield.clone()),
-            ));
+    if let Some(ref img) = gen_image {
+        let needs_refresh = panel.preview_handle.as_ref() != Some(&img.heightfield);
+        if needs_refresh {
+            panel.preview_handle = Some(img.heightfield.clone());
+            panel.preview_id = Some(contexts.add_image(bevy_egui::EguiTextureHandle::Strong(
+                img.heightfield.clone(),
+            )));
         }
     }
 
@@ -138,8 +150,7 @@ fn generator_panel_system(
 
                         ui.label("Frequency");
                         ui.add(
-                            egui::Slider::new(&mut params.frequency, 0.1..=16.0)
-                                .logarithmic(true),
+                            egui::Slider::new(&mut params.frequency, 0.1..=16.0).logarithmic(true),
                         );
                         ui.end_row();
 
@@ -157,6 +168,45 @@ fn generator_panel_system(
 
                         ui.label("Offset Z");
                         ui.add(egui::DragValue::new(&mut params.offset.y).speed(0.01));
+                        ui.end_row();
+                    });
+
+                ui.add_space(6.0);
+                ui.heading("Landform Shaping");
+                ui.separator();
+
+                egui::Grid::new("gen_landform")
+                    .num_columns(2)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Continent Frequency");
+                        ui.add(
+                            egui::Slider::new(&mut params.continent_frequency, 0.1..=4.0)
+                                .logarithmic(true),
+                        );
+                        ui.end_row();
+
+                        ui.label("Continent Strength");
+                        ui.add(egui::Slider::new(&mut params.continent_strength, 0.0..=1.0));
+                        ui.end_row();
+
+                        ui.label("Ridge Strength");
+                        ui.add(egui::Slider::new(&mut params.ridge_strength, 0.0..=1.0));
+                        ui.end_row();
+
+                        ui.label("Warp Frequency");
+                        ui.add(
+                            egui::Slider::new(&mut params.warp_frequency, 0.1..=8.0)
+                                .logarithmic(true),
+                        );
+                        ui.end_row();
+
+                        ui.label("Warp Strength");
+                        ui.add(egui::Slider::new(&mut params.warp_strength, 0.0..=2.0));
+                        ui.end_row();
+
+                        ui.label("Erosion Strength");
+                        ui.add(egui::Slider::new(&mut params.erosion_strength, 0.0..=1.0));
                         ui.end_row();
                     });
 
@@ -186,11 +236,11 @@ fn generator_panel_system(
 
                         ui.label("Export Resolution");
                         let export_res_options: &[(u32, &str)] = &[
-                            (512,   "512"),
-                            (1024,  "1k"),
-                            (2048,  "2k"),
-                            (4096,  "4k"),
-                            (8192,  "8k"),
+                            (512, "512"),
+                            (1024, "1k"),
+                            (2048, "2k"),
+                            (4096, "4k"),
+                            (8192, "8k"),
                             (16384, "16k"),
                             (32768, "32k"),
                         ];
@@ -241,9 +291,10 @@ fn generator_panel_system(
                         let p = params.clone();
                         let dir = PathBuf::from(&panel.output_dir);
                         panel.log.clear();
-                        panel.log.push(format!("Export started → {}", dir.display()));
-                        panel.export =
-                            Some(bevy_landscape_generator::export::start_export(p, dir));
+                        panel
+                            .log
+                            .push(format!("Export started → {}", dir.display()));
+                        panel.export = Some(bevy_landscape_generator::export::start_export(p, dir));
                     }
                 });
 
@@ -280,13 +331,13 @@ fn trigger_reload(
     let max_mip = scan_max_mip(output_dir.join("height").as_path());
 
     let mut new_config = active_config.clone();
-    new_config.world_scale  = params.world_scale;
+    new_config.world_scale = params.world_scale;
     new_config.height_scale = params.height_scale * params.world_scale;
     new_config.clipmap_levels = derive_clipmap_levels(active_config.clipmap_levels, max_mip);
 
     let new_source = TerrainSourceDesc {
-        tile_root:        Some(output_dir.to_path_buf()),
-        normal_root:      None,
+        tile_root: Some(output_dir.to_path_buf()),
+        normal_root: None,
         macro_color_root: None,
         world_min,
         world_max,
@@ -323,7 +374,9 @@ fn scan_world_bounds(output_dir: &Path, world_scale: f32) -> (Vec2, Vec2) {
     let fallback_h = 8192.0 * world_scale;
     let fallback = (Vec2::splat(-fallback_h), Vec2::splat(fallback_h));
     let l0 = output_dir.join("height").join("L0");
-    let Ok(dir) = std::fs::read_dir(&l0) else { return fallback; };
+    let Ok(dir) = std::fs::read_dir(&l0) else {
+        return fallback;
+    };
     let mut min_tx = i32::MAX;
     let mut min_ty = i32::MAX;
     let mut max_tx = i32::MIN;
@@ -331,16 +384,24 @@ fn scan_world_bounds(output_dir: &Path, world_scale: f32) -> (Vec2, Vec2) {
     let mut found = false;
     for entry in dir.flatten() {
         let name = entry.file_name();
-        let Some(stem) = name.to_str().and_then(|s| s.strip_suffix(".bin")) else { continue; };
-        let Some((xs, ys)) = stem.split_once('_') else { continue; };
-        let (Ok(tx), Ok(ty)) = (xs.parse::<i32>(), ys.parse::<i32>()) else { continue; };
+        let Some(stem) = name.to_str().and_then(|s| s.strip_suffix(".bin")) else {
+            continue;
+        };
+        let Some((xs, ys)) = stem.split_once('_') else {
+            continue;
+        };
+        let (Ok(tx), Ok(ty)) = (xs.parse::<i32>(), ys.parse::<i32>()) else {
+            continue;
+        };
         min_tx = min_tx.min(tx);
         min_ty = min_ty.min(ty);
         max_tx = max_tx.max(tx);
         max_ty = max_ty.max(ty);
         found = true;
     }
-    if !found { return fallback; }
+    if !found {
+        return fallback;
+    }
     let ts = TILE_SIZE as f32 * world_scale;
     (
         Vec2::new(min_tx as f32 * ts, min_ty as f32 * ts),

@@ -6,35 +6,36 @@ use std::sync::{
     Mutex,
 };
 
-use bevy::math::{Vec2, Vec3};
-
 use crate::params::GeneratorParams;
+use crate::terrain_fn::sample_height;
 
 /// Receiver is wrapped in Mutex so ExportHandle is Sync (required for Bevy Resource).
 pub struct ExportHandle {
-    pub log_rx:     Mutex<Receiver<String>>,
-    pub done:       std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub log_rx: Mutex<Receiver<String>>,
+    pub done: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Set to true only on a clean successful export (not on error).
-    pub succeeded:  std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub succeeded: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Output directory for the completed export.
     pub output_dir: PathBuf,
 }
 
 pub fn start_export(params: GeneratorParams, output_dir: PathBuf) -> ExportHandle {
     let (log_tx, log_rx) = mpsc::channel::<String>();
-    let done      = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let succeeded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let done_clone      = done.clone();
+    let done_clone = done.clone();
     let succeeded_clone = succeeded.clone();
     let output_dir_thread = output_dir.clone();
 
     std::thread::spawn(move || {
         let output_dir = output_dir_thread;
         let run = || -> Result<(), String> {
-            log_tx.send(format!(
-                "Generating {}×{} tile hierarchy …",
-                params.export_resolution, params.export_resolution,
-            )).ok();
+            log_tx
+                .send(format!(
+                    "Generating {}×{} tile hierarchy …",
+                    params.export_resolution, params.export_resolution,
+                ))
+                .ok();
 
             generate_tiles_direct(&params, &output_dir, &log_tx)?;
             Ok(())
@@ -87,7 +88,8 @@ fn generate_tiles_direct(
         ));
     }
 
-    log.send(format!("  {} LOD levels, tile {}px", levels, TILE)).ok();
+    log.send(format!("  {} LOD levels, tile {}px", levels, TILE))
+        .ok();
 
     for subdir in ["height", "normal"] {
         let path = output_dir.join(subdir);
@@ -96,8 +98,7 @@ fn generate_tiles_direct(
                 .map_err(|e| format!("Failed to clear '{subdir}': {e}"))?;
         }
     }
-    std::fs::create_dir_all(output_dir)
-        .map_err(|e| format!("Failed to create output dir: {e}"))?;
+    std::fs::create_dir_all(output_dir).map_err(|e| format!("Failed to create output dir: {e}"))?;
 
     let effective_height_scale = params.height_scale * params.world_scale;
 
@@ -139,7 +140,7 @@ fn generate_tiles_direct(
                                 let r = ty * TILE as i32 + brow as i32 - 1;
                                 let uv_x = c as f32 * tile_scale as f32 / export_res as f32 + 0.5;
                                 let uv_y = r as f32 * tile_scale as f32 / export_res as f32 + 0.5;
-                                buf[brow * BUF + bcol] = height_at(params, uv_x, uv_y);
+                                buf[brow * BUF + bcol] = sample_height(params, uv_x, uv_y);
                             }
                         }
 
@@ -191,65 +192,6 @@ fn generate_tiles_direct(
         log.send(format!("Level {lod}: {} tiles", tile_count)).ok();
     }
 
-    log.send(format!(
-        "Done → '{}'",
-        output_dir.display()
-    )).ok();
+    log.send(format!("Done → '{}'", output_dir.display())).ok();
     Ok(())
-}
-
-/// Evaluate the FBM heightfield at a UV coordinate [0,1).
-fn height_at(params: &GeneratorParams, uv_x: f32, uv_y: f32) -> f32 {
-    let seed_off = Vec2::new(
-        params.seed as f32 * 0.47316,
-        params.seed as f32 * 0.31419,
-    );
-    let pos = (Vec2::new(uv_x, uv_y) + params.offset + seed_off) * params.frequency;
-    let h = fbm_cpu(pos, params.octaves, params.lacunarity, params.gain);
-    (h * 0.5 + 0.5).clamp(0.0, 1.0)
-}
-
-// --- CPU FBM matching the WGSL shader ---
-
-fn hash22(p: Vec2) -> Vec2 {
-    let mut p3 = Vec3::new(p.x * 0.1031, p.y * 0.1030, p.x * 0.0973);
-    p3 = p3.fract();
-    p3 += p3.dot(Vec3::new(p3.y, p3.z, p3.x) + 33.33);
-    Vec2::new(
-        ((p3.x + p3.y) * p3.z).fract(),
-        ((p3.x + p3.z) * p3.y).fract(),
-    )
-}
-
-fn gradient_noise(p: Vec2) -> f32 {
-    let i = p.floor();
-    let f = p.fract();
-    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-
-    let ga = hash22(i + Vec2::new(0.0, 0.0)) * 2.0 - Vec2::ONE;
-    let gb = hash22(i + Vec2::new(1.0, 0.0)) * 2.0 - Vec2::ONE;
-    let gc = hash22(i + Vec2::new(0.0, 1.0)) * 2.0 - Vec2::ONE;
-    let gd = hash22(i + Vec2::new(1.0, 1.0)) * 2.0 - Vec2::ONE;
-
-    let va = ga.dot(f - Vec2::new(0.0, 0.0));
-    let vb = gb.dot(f - Vec2::new(1.0, 0.0));
-    let vc = gc.dot(f - Vec2::new(0.0, 1.0));
-    let vd = gd.dot(f - Vec2::new(1.0, 1.0));
-
-    lerp(lerp(va, vb, u.x), lerp(vc, vd, u.x), u.y)
-}
-
-fn fbm_cpu(mut p: Vec2, octaves: u32, lacunarity: f32, gain: f32) -> f32 {
-    let mut value = 0.0f32;
-    let mut amplitude = 0.5f32;
-    for _ in 0..octaves {
-        value += amplitude * gradient_noise(p);
-        p *= lacunarity;
-        amplitude *= gain;
-    }
-    value
-}
-
-fn lerp(a: f32, b: f32, t: f32) -> f32 {
-    a + t * (b - a)
 }
