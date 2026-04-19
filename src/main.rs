@@ -20,8 +20,8 @@ use bevy::{
     window::PrimaryWindow,
 };
 use bevy_landscape::{
-    level::load_level, TerrainCamera, TerrainConfig, TerrainDebugPlugin, TerrainPlugin,
-    TerrainSourceDesc,
+    level::load_level, MaterialLibrary, TerrainCamera, TerrainConfig, TerrainDebugPlugin,
+    TerrainPlugin, TerrainSourceDesc,
 };
 use bevy_landscape_clouds::{CloudsConfig, VolumetricCloudsPlugin};
 use bevy_landscape_editor::{AppPreferences, LandscapeEditorPlugin};
@@ -41,32 +41,36 @@ fn main() {
     };
     let level_arg = level_arg.or_else(|| AppPreferences::load().default_level);
 
-    let (terrain_config, terrain_source, clouds_config) = if let Some(ref path) = level_arg {
-        match load_level(path) {
-            Ok(desc) => {
-                let loaded_clouds: Option<CloudsConfig> = desc
-                    .clouds
-                    .as_ref()
-                    .and_then(|v| serde_json::from_value(v.clone()).ok());
-                let (mut config, source, _library, _wmin, _wmax) = desc.into_runtime();
-                config.height_scale *= 1.0; // into_runtime already multiplies
-                (config, source, loaded_clouds)
+    let (terrain_config, terrain_source, loaded_library, clouds_config) =
+        if let Some(ref path) = level_arg {
+            match load_level(path) {
+                Ok(desc) => {
+                    let loaded_clouds: Option<CloudsConfig> = desc
+                        .clouds
+                        .as_ref()
+                        .and_then(|v| serde_json::from_value(v.clone()).ok());
+                    let (mut config, source, library, _wmin, _wmax) = desc.into_runtime();
+                    config.height_scale *= 1.0; // into_runtime already multiplies
+                    (config, source, Some(library), loaded_clouds)
+                }
+                Err(e) => {
+                    eprintln!("Failed to load level '{path}': {e}");
+                    std::process::exit(1);
+                }
             }
-            Err(e) => {
-                eprintln!("Failed to load level '{path}': {e}");
-                std::process::exit(1);
-            }
-        }
-    } else {
-        // No level configured — start the editor with an empty flat terrain.
-        // Use File → Import Heightmap to load data, then Save Landscape and
-        // set it as the default level in the preferences to auto-load on startup.
-        (TerrainConfig::default(), TerrainSourceDesc::default(), None)
-    };
+        } else {
+            // No level configured — start the editor with an empty flat terrain.
+            // Use File → Import Heightmap to load data, then Save Landscape and
+            // set it as the default level in the preferences to auto-load on startup.
+            (TerrainConfig::default(), TerrainSourceDesc::default(), None, None)
+        };
 
     let mut app = App::new();
     if let Some(cc) = clouds_config {
         app.insert_resource(cc);
+    }
+    if let Some(lib) = loaded_library {
+        app.insert_resource(lib);
     }
     app
         .insert_resource(ClearColor(Color::BLACK))
