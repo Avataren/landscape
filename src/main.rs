@@ -63,7 +63,12 @@ fn main() {
             // No level configured — start the editor with an empty flat terrain.
             // Use File → Import Heightmap to load data, then Save Landscape and
             // set it as the default level in the preferences to auto-load on startup.
-            (TerrainConfig::default(), TerrainSourceDesc::default(), None, None)
+            (
+                TerrainConfig::default(),
+                TerrainSourceDesc::default(),
+                None,
+                None,
+            )
         };
 
     let mut app = App::new();
@@ -73,8 +78,7 @@ fn main() {
     if let Some(lib) = loaded_library {
         app.insert_resource(lib);
     }
-    app
-        .insert_resource(ClearColor(Color::BLACK))
+    app.insert_resource(ClearColor(Color::BLACK))
         // Terrain uses the atmosphere cubemap for ambient IBL; non-terrain PBR
         // objects also receive IBL from AtmosphereEnvironmentMapLight on the camera.
         .insert_resource(GlobalAmbientLight {

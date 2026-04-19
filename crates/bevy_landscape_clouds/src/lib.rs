@@ -121,7 +121,12 @@ fn sync_cloud_uniforms(
         config.cloud_detail_strength,
         config.cloud_base_edge_softness,
     );
-    uniform.softness = Vec4::new(config.cloud_bottom_softness, config.cloud_evolution_speed, 0.0, 0.0);
+    uniform.softness = Vec4::new(
+        config.cloud_bottom_softness,
+        config.cloud_evolution_speed,
+        0.0,
+        0.0,
+    );
     uniform.ambient_top = config.cloud_ambient_color_top;
     uniform.ambient_bottom = config.cloud_ambient_color_bottom;
     uniform.phase_steps = Vec4::new(
