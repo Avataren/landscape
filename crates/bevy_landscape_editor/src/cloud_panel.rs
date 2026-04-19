@@ -196,11 +196,17 @@ pub(crate) fn cloud_panel_system(
                     ui.end_row();
 
                     ui.label("Wind X");
-                    ui.add(egui::Slider::new(&mut config.wind_velocity.x, -200.0..=200.0));
+                    ui.add(egui::Slider::new(
+                        &mut config.wind_velocity.x,
+                        -200.0..=200.0,
+                    ));
                     ui.end_row();
 
                     ui.label("Wind Z");
-                    ui.add(egui::Slider::new(&mut config.wind_velocity.z, -200.0..=200.0));
+                    ui.add(egui::Slider::new(
+                        &mut config.wind_velocity.z,
+                        -200.0..=200.0,
+                    ));
                     ui.end_row();
                 });
 

@@ -78,8 +78,8 @@ fn prepare_image_bind_group(
 #[derive(Resource)]
 struct GeneratorPipeline {
     uniform_layout: BindGroupLayoutDescriptor,
-    image_layout:   BindGroupLayoutDescriptor,
-    pipeline:       CachedComputePipelineId,
+    image_layout: BindGroupLayoutDescriptor,
+    pipeline: CachedComputePipelineId,
 }
 
 impl FromWorld for GeneratorPipeline {
@@ -91,10 +91,8 @@ impl FromWorld for GeneratorPipeline {
             ShaderStages::COMPUTE,
             (uniform_buffer::<GeneratorUniform>(false),),
         );
-        let uniform_layout = BindGroupLayoutDescriptor::new(
-            "generator_uniform_bind_group_layout",
-            &uniform_entries,
-        );
+        let uniform_layout =
+            BindGroupLayoutDescriptor::new("generator_uniform_bind_group_layout", &uniform_entries);
 
         let shader = load_embedded_asset!(world, "shaders/generator.wgsl");
         let pipeline_cache = world.resource::<PipelineCache>();
