@@ -1,0 +1,12 @@
+[package]
+name = "bevy_landscape_generator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = { version = "0.18" }
+bytemuck = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(unix)'.dependencies]
+bevy = { version = "0.18", features = ["dynamic_linking"] }

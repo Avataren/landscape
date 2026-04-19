@@ -1238,10 +1238,20 @@ dependencies = [
  "bevy_egui",
  "bevy_landscape",
  "bevy_landscape_clouds",
+ "bevy_landscape_generator",
  "image",
  "rfd",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "bevy_landscape_generator"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bytemuck",
+ "serde",
 ]
 
 [[package]]
@@ -3856,6 +3866,7 @@ dependencies = [
  "bevy_landscape",
  "bevy_landscape_clouds",
  "bevy_landscape_editor",
+ "bevy_landscape_generator",
  "bytemuck",
  "exr",
  "image",

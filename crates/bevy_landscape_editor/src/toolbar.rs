@@ -7,6 +7,7 @@ use bevy_landscape::{
 
 use crate::cloud_panel::CloudPanelState;
 use crate::fog_panel::FogPanelState;
+use crate::generator_panel::GeneratorPanelState;
 use crate::import::ImportWizard;
 use crate::level_io::LevelIoState;
 use crate::material_panel::MaterialPanelState;
@@ -42,6 +43,7 @@ pub(crate) fn toolbar_system(
     mut sky_panel: ResMut<SkyPanelState>,
     mut cloud_panel: ResMut<CloudPanelState>,
     mut fog_panel: ResMut<FogPanelState>,
+    mut generator_panel: ResMut<GeneratorPanelState>,
     config: Res<TerrainConfig>,
     desc: Res<TerrainSourceDesc>,
     library: Res<MaterialLibrary>,
@@ -100,6 +102,9 @@ pub(crate) fn toolbar_system(
                     ui.close();
                 }
                 if ui.checkbox(&mut fog_panel.open, "Fog").clicked() {
+                    ui.close();
+                }
+                if ui.checkbox(&mut generator_panel.open, "Terrain Generator").clicked() {
                     ui.close();
                 }
             });

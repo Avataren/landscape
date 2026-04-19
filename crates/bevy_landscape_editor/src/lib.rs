@@ -1,5 +1,6 @@
 mod cloud_panel;
 mod fog_panel;
+mod generator_panel;
 mod import;
 mod level_io;
 mod material_panel;
@@ -13,6 +14,7 @@ use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 
 use cloud_panel::CloudPanelPlugin;
 use fog_panel::FogPanelPlugin;
+use generator_panel::GeneratorPanelPlugin;
 use import::ImportPlugin;
 use level_io::LevelIoPlugin;
 use material_panel::MaterialPanelPlugin;
@@ -33,6 +35,7 @@ impl Plugin for LandscapeEditorPlugin {
         app.init_resource::<toolbar::ToolbarState>();
         app.add_plugins(CloudPanelPlugin)
             .add_plugins(FogPanelPlugin)
+            .add_plugins(GeneratorPanelPlugin)
             .add_plugins(MaterialPanelPlugin)
             .add_plugins(TextureBrowserPlugin)
             .add_plugins(ImportPlugin)

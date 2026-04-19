@@ -25,6 +25,7 @@ use bevy_landscape::{
 };
 use bevy_landscape_clouds::{CloudsConfig, VolumetricCloudsPlugin};
 use bevy_landscape_editor::{AppPreferences, LandscapeEditorPlugin};
+use bevy_landscape_generator::LandscapeGeneratorPlugin;
 use player::{CameraMode, PlayerPlugin};
 
 const WINDOW_TITLE: &str = "Landscape Renderer";
@@ -106,6 +107,7 @@ fn main() {
             source: terrain_source,
         })
         .add_plugins(VolumetricCloudsPlugin)
+        .add_plugins(LandscapeGeneratorPlugin)
         .add_plugins(TerrainDebugPlugin)
         .add_plugins(LandscapeEditorPlugin)
         .add_plugins(PlayerPlugin)
