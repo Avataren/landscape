@@ -22,7 +22,7 @@ pub use world_desc::TerrainSourceDesc;
 
 use bevy::{
     camera::primitives::Aabb,
-    camera::visibility::NoFrustumCulling,
+    camera::visibility::NoAutoAabb,
     pbr::wireframe::{NoWireframe, WireframePlugin},
     prelude::*,
 };
@@ -951,10 +951,10 @@ fn respawn_patch_entities(
                     patch_scale_ws: patch.patch_size_ws,
                 },
                 local_aabb,
-                // Prevent Bevy's calculate_bounds system from overwriting the
-                // manual AABB with the flat mesh bounds (all vertices at Y=0).
-                // The clipmap ring builder already manages patch visibility.
-                NoFrustumCulling,
+                // Keep Bevy's built-in frustum culling enabled, but stop its
+                // automatic bounds pass from replacing the conservative
+                // displaced-terrain AABB with the flat source mesh bounds.
+                NoAutoAabb,
                 NoWireframe,
             ))
             .id();
