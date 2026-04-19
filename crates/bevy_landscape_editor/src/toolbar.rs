@@ -5,6 +5,7 @@ use bevy_landscape::{
     MAX_SUPPORTED_CLIPMAP_LEVELS,
 };
 
+use crate::cloud_panel::CloudPanelState;
 use crate::fog_panel::FogPanelState;
 use crate::import::ImportWizard;
 use crate::level_io::LevelIoState;
@@ -39,6 +40,7 @@ pub(crate) fn toolbar_system(
     prefs: Res<AppPreferences>,
     mut prefs_dialog: ResMut<PreferencesDialog>,
     mut sky_panel: ResMut<SkyPanelState>,
+    mut cloud_panel: ResMut<CloudPanelState>,
     mut fog_panel: ResMut<FogPanelState>,
     config: Res<TerrainConfig>,
     desc: Res<TerrainSourceDesc>,
@@ -92,6 +94,9 @@ pub(crate) fn toolbar_system(
                     .checkbox(&mut sky_panel.open, "Sky / Time of Day")
                     .clicked()
                 {
+                    ui.close();
+                }
+                if ui.checkbox(&mut cloud_panel.open, "Clouds").clicked() {
                     ui.close();
                 }
                 if ui.checkbox(&mut fog_panel.open, "Fog").clicked() {

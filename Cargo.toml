@@ -1,5 +1,10 @@
 [workspace]
-members = [".", "crates/bevy_landscape", "crates/bevy_landscape_editor"]
+members = [
+    ".",
+    "crates/bevy_landscape",
+    "crates/bevy_landscape_clouds",
+    "crates/bevy_landscape_editor",
+]
 resolver = "2"
 
 [package]
@@ -10,6 +15,7 @@ default-run = "landscape"
 
 [dependencies]
 bevy_landscape = { path = "crates/bevy_landscape" }
+bevy_landscape_clouds = { path = "crates/bevy_landscape_clouds" }
 bevy_landscape_editor = { path = "crates/bevy_landscape_editor" }
 bevy = { version = "0.18" }
 avian3d = "0.6"

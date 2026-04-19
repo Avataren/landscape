@@ -23,6 +23,7 @@ use bevy_landscape::{
     level::load_level, TerrainCamera, TerrainConfig, TerrainDebugPlugin, TerrainPlugin,
     TerrainSourceDesc,
 };
+use bevy_landscape_clouds::VolumetricCloudsPlugin;
 use bevy_landscape_editor::{AppPreferences, LandscapeEditorPlugin};
 use player::{CameraMode, PlayerPlugin};
 
@@ -92,6 +93,7 @@ fn main() {
             config: terrain_config,
             source: terrain_source,
         })
+        .add_plugins(VolumetricCloudsPlugin)
         .add_plugins(TerrainDebugPlugin)
         .add_plugins(LandscapeEditorPlugin)
         .add_plugins(PlayerPlugin)

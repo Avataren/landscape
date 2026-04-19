@@ -1223,12 +1223,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_landscape_clouds"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+]
+
+[[package]]
 name = "bevy_landscape_editor"
 version = "0.1.0"
 dependencies = [
  "bevy",
  "bevy_egui",
  "bevy_landscape",
+ "bevy_landscape_clouds",
  "image",
  "rfd",
  "serde",
@@ -3845,6 +3853,7 @@ dependencies = [
  "avian3d",
  "bevy",
  "bevy_landscape",
+ "bevy_landscape_clouds",
  "bevy_landscape_editor",
  "bytemuck",
  "exr",
