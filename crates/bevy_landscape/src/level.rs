@@ -57,6 +57,10 @@ pub struct LevelDesc {
     pub clipmap_levels: u32,
     /// Procedural material slot definitions.
     pub material_library: MaterialLibrary,
+    /// Cloud renderer settings. Stored as a raw JSON value so `bevy_landscape`
+    /// does not need to depend on `bevy_landscape_clouds`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clouds: Option<serde_json::Value>,
 }
 
 impl Default for LevelDesc {
@@ -72,6 +76,7 @@ impl Default for LevelDesc {
             height_scale: default_config.height_scale,
             clipmap_levels: default_config.clipmap_levels,
             material_library: MaterialLibrary::default(),
+            clouds: None,
         }
     }
 }
@@ -104,6 +109,7 @@ impl LevelDesc {
             height_scale: base_height_scale,
             clipmap_levels: config.clipmap_levels,
             material_library: library.clone(),
+            clouds: None,
         }
     }
 

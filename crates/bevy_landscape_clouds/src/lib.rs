@@ -22,7 +22,7 @@ pub struct VolumetricCloudsPlugin;
 
 impl Plugin for VolumetricCloudsPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(CloudsConfig::default())
+        app.init_resource::<CloudsConfig>()
             .init_resource::<CloudsUniform>()
             .add_plugins((CloudsRenderPlugin, CloudsComputePlugin))
             .add_systems(Startup, setup_cloud_layer)
@@ -79,6 +79,14 @@ fn sync_cloud_uniforms(
     uniform.planet_radius = config.planet_radius;
     uniform.previous_camera_translation = previous_camera_translation;
     uniform.camera_translation = camera_transform.translation();
+
+    // Compute previous_view_proj from stored matrices before overwriting them.
+    // inverse_camera_view = view-to-world, so its inverse is world-to-view.
+    // inverse_camera_projection = clip-to-view, so its inverse is view-to-clip (projection).
+    let prev_view = uniform.inverse_camera_view.inverse();
+    let prev_proj = uniform.inverse_camera_projection.inverse();
+    uniform.previous_view_proj = prev_proj * prev_view;
+
     uniform.inverse_camera_view = camera_transform.to_matrix();
     uniform.inverse_camera_projection = camera.computed.clip_from_view.inverse();
     uniform.wind_displacement += config.wind_velocity * time.delta_secs();

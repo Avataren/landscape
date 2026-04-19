@@ -1,6 +1,7 @@
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
-#[derive(Resource, Clone, Copy)]
+#[derive(Resource, Clone, Copy, Serialize, Deserialize)]
 pub struct CloudsConfig {
     pub render_resolution: UVec2,
     pub cloud_view_steps: u32,

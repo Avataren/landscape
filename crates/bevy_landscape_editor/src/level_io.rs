@@ -12,6 +12,7 @@ use bevy_landscape::{
     level::{save_level, LevelDesc},
     load_level, MaterialLibrary, ReloadTerrainRequest, TerrainConfig, TerrainSourceDesc,
 };
+use bevy_landscape_clouds::CloudsConfig;
 use std::path::PathBuf;
 use std::sync::{mpsc, Mutex};
 
@@ -91,6 +92,7 @@ fn level_io_system(
     config: Res<TerrainConfig>,
     desc: Res<TerrainSourceDesc>,
     library: Res<MaterialLibrary>,
+    mut clouds_config: ResMut<CloudsConfig>,
     mut reload_tx: MessageWriter<ReloadTerrainRequest>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -109,7 +111,8 @@ fn level_io_system(
         if let Some(path) = maybe_path {
             match op {
                 Some(LevelIoOp::Save) => {
-                    let level_desc = LevelDesc::from_current(&config, &desc, &library);
+                    let mut level_desc = LevelDesc::from_current(&config, &desc, &library);
+                    level_desc.clouds = serde_json::to_value(&*clouds_config).ok();
                     match save_level(&path, &level_desc) {
                         Ok(()) => {
                             state.status = Some((format!("✓ Saved → {}", path.display()), false));
@@ -121,6 +124,13 @@ fn level_io_system(
                 }
                 Some(LevelIoOp::Load) => match load_level(&path) {
                     Ok(level_desc) => {
+                        if let Some(cc) = level_desc
+                            .clouds
+                            .as_ref()
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                        {
+                            *clouds_config = cc;
+                        }
                         let (new_config, new_source, new_library, _, _) = level_desc.into_runtime();
                         reload_tx.write(ReloadTerrainRequest {
                             config: new_config,

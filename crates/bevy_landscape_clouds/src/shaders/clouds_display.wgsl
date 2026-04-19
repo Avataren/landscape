@@ -31,34 +31,5 @@ fn vertex(vertex: Vertex) -> VertexOutput {
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let viewport_uv = coords_to_viewport_uv(in.position.xy, view.viewport);
-    let dims = vec2<f32>(textureDimensions(cloud_render_texture, 0));
-    let texel = 1.0 / max(dims, vec2<f32>(1.0));
-
-    let center = textureSampleLevel(cloud_render_texture, cloud_render_sampler, viewport_uv, 0.0);
-    let blur_x_pos = textureSampleLevel(
-        cloud_render_texture,
-        cloud_render_sampler,
-        viewport_uv + vec2<f32>(texel.x, 0.0),
-        0.0,
-    );
-    let blur_x_neg = textureSampleLevel(
-        cloud_render_texture,
-        cloud_render_sampler,
-        viewport_uv - vec2<f32>(texel.x, 0.0),
-        0.0,
-    );
-    let blur_y_pos = textureSampleLevel(
-        cloud_render_texture,
-        cloud_render_sampler,
-        viewport_uv + vec2<f32>(0.0, texel.y),
-        0.0,
-    );
-    let blur_y_neg = textureSampleLevel(
-        cloud_render_texture,
-        cloud_render_sampler,
-        viewport_uv - vec2<f32>(0.0, texel.y),
-        0.0,
-    );
-
-    return center * 0.4 + (blur_x_pos + blur_x_neg + blur_y_pos + blur_y_neg) * 0.15;
+    return textureSampleLevel(cloud_render_texture, cloud_render_sampler, viewport_uv, 0.0);
 }

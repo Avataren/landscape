@@ -8,6 +8,7 @@ struct Config {
     _pad_prev: f32,
     inverse_camera_view: mat4x4<f32>,
     inverse_camera_projection: mat4x4<f32>,
+    previous_view_proj: mat4x4<f32>,
     wind_displacement: vec3<f32>,
     _pad2: f32,
     sun_direction: vec4<f32>,
@@ -176,11 +177,23 @@ fn render_clouds_worley(coord: vec3<f32>) -> vec4<f32> {
     return vec4<f32>(c, c, c, 1.0);
 }
 
+fn wrap_atlas(v: f32) -> u32 {
+    let s = f32(CLOUD_ATLAS_SIZE);
+    return u32(((v % s) + s) % s);
+}
+
+fn wrap_worley(v: vec3<f32>) -> vec3<f32> {
+    let s = CLOUD_WORLEY_SIZE_F32;
+    return ((v % s) + s) % s;
+}
+
 fn cloud_map_base(p: vec3<f32>, normalized_height: f32) -> f32 {
-    let uv = abs(p * (0.00005 * config.noise_scales.x) * config.render_resolution.xyy);
+    let scale = 0.00005 * config.noise_scales.x;
+    let sx = p.x * scale * config.render_resolution.x;
+    let sz = p.z * scale * config.render_resolution.y;
     let cloud = textureLoad(
         cloud_atlas_texture,
-        vec2<u32>(u32(uv.x) % CLOUD_ATLAS_SIZE, u32(uv.z) % CLOUD_ATLAS_SIZE),
+        vec2<u32>(wrap_atlas(sx), wrap_atlas(sz)),
     ).rgb;
 
     let n = normalized_height * normalized_height * cloud.b + pow(1.0 - normalized_height, 16.0);
@@ -188,13 +201,13 @@ fn cloud_map_base(p: vec3<f32>, normalized_height: f32) -> f32 {
 }
 
 fn cloud_map_detail(position: vec3<f32>) -> f32 {
-    let p = abs(position) * (0.0016 * config.noise_scales.x * config.noise_scales.y);
-    let p1 = p % CLOUD_WORLEY_SIZE_F32;
+    let p = position * (0.0016 * config.noise_scales.x * config.noise_scales.y);
+    let p1 = wrap_worley(p);
     let a = textureLoad(
         cloud_worley_texture,
         vec3<u32>(u32(p1.x), u32(p1.y), u32(p1.z)),
     ).r;
-    let p2 = (p + 1.0) % CLOUD_WORLEY_SIZE_F32;
+    let p2 = (p1 + 1.0) % CLOUD_WORLEY_SIZE_F32;
     let b = textureLoad(
         cloud_worley_texture,
         vec3<u32>(u32(p2.x), u32(p2.y), u32(p2.z)),
@@ -385,6 +398,21 @@ fn init(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
     }
 }
 
+fn sample_history_bilinear(uv: vec2<f32>) -> vec4<f32> {
+    let dims = config.render_resolution;
+    let px = uv * dims - vec2<f32>(0.5);
+    let f = fract(px);
+    let p0 = vec2<u32>(u32(clamp(floor(px.x), 0.0, dims.x - 1.0)),
+                       u32(clamp(floor(px.y), 0.0, dims.y - 1.0)));
+    let p1x = min(p0.x + 1u, u32(dims.x) - 1u);
+    let p1y = min(p0.y + 1u, u32(dims.y) - 1u);
+    let s00 = textureLoad(cloud_history_texture, p0);
+    let s10 = textureLoad(cloud_history_texture, vec2<u32>(p1x, p0.y));
+    let s01 = textureLoad(cloud_history_texture, vec2<u32>(p0.x, p1y));
+    let s11 = textureLoad(cloud_history_texture, vec2<u32>(p1x, p1y));
+    return mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn update(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
     if invocation_id.x >= u32(config.render_resolution.x) || invocation_id.y >= u32(config.render_resolution.y) {
@@ -393,10 +421,41 @@ fn update(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
 
     let pixel = vec2<f32>(f32(invocation_id.x), f32(invocation_id.y)) + vec2<f32>(0.5);
     let current = render_clouds(pixel);
-    let previous = textureLoad(cloud_history_texture, invocation_id.xy);
-    let camera_motion = length(config.camera_translation - config.previous_camera_translation);
-    let history_factor = config.shadow_params.w * (1.0 - smoothstep(0.0, 4.0, camera_motion));
-    let blended = mix(current, previous, history_factor);
+    let history_factor = config.shadow_params.w;
+
+    var blended = current;
+    if history_factor > 0.01 {
+        let ray_dir = get_ray_direction(pixel);
+
+        // Intersect ray with cloud layer midpoint in sky-shifted space.
+        let cloud_mid_y_sky = config.planet_radius + (config.cloud_heights.x + config.cloud_heights.y) * 0.5;
+        let ray_origin_sky = sky_ray_origin();
+
+        if abs(ray_dir.y) > 0.001 {
+            let t = (cloud_mid_y_sky - ray_origin_sky.y) / ray_dir.y;
+            if t > 0.0 && t < MAX_CLOUD_DISTANCE {
+                // Convert sky-shifted world pos back to actual world space.
+                // sky_ray_origin = camera_translation - wind_displacement + (0, planet_radius, 0)
+                // actual_world = sky_world - (0, planet_radius, 0) + wind_displacement
+                //              = camera_translation + ray_dir * t  (wind terms cancel)
+                let world_pos = config.camera_translation + ray_dir * t;
+
+                // Reproject through the previous frame's view-projection matrix (world -> clip).
+                let prev_clip = config.previous_view_proj * vec4<f32>(world_pos, 1.0);
+                if prev_clip.w > EPSILON {
+                    let prev_ndc = prev_clip.xy / prev_clip.w;
+                    // NDC -> UV: X right, Y up in NDC; Y flipped for texture (top=0).
+                    let prev_uv = prev_ndc * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5);
+
+                    if all(prev_uv >= vec2<f32>(0.0)) && all(prev_uv <= vec2<f32>(1.0)) {
+                        let previous = sample_history_bilinear(prev_uv);
+                        blended = mix(current, previous, history_factor);
+                    }
+                }
+            }
+        }
+    }
+
     textureStore(cloud_render_texture, invocation_id.xy, blended);
     textureStore(cloud_history_texture, invocation_id.xy, blended);
 }
