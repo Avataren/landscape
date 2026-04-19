@@ -279,6 +279,7 @@ fn generator_panel_system(
                 if let Some(tex_id) = panel.preview_id {
                     let avail = ui.available_width().min(480.0);
                     ui.add(egui::Image::new((tex_id, egui::Vec2::splat(avail))));
+                    ui.small("Contrast-enhanced hillshade preview");
                 } else {
                     ui.label("(waiting for GPU texture…)");
                 }

@@ -232,6 +232,43 @@ fn sample_height_texel(src: texture_2d<f32>, coord: vec2<i32>, resolution: vec2<
     return textureLoad(src, clamp_texel(coord, resolution), 0).x;
 }
 
+fn preview_palette(h: f32) -> vec3<f32> {
+    let contrast_h = smoothstep(0.14, 0.9, pow(h, 0.72));
+    let foothills = vec3<f32>(0.10, 0.12, 0.09);
+    let uplands = vec3<f32>(0.30, 0.38, 0.21);
+    let rock = vec3<f32>(0.60, 0.53, 0.39);
+    let peaks = vec3<f32>(0.94, 0.92, 0.88);
+
+    let low_to_mid = mix(foothills, uplands, smoothstep(0.06, 0.38, contrast_h));
+    let mid_to_high = mix(low_to_mid, rock, smoothstep(0.34, 0.68, contrast_h));
+    return mix(mid_to_high, peaks, smoothstep(0.64, 0.94, contrast_h));
+}
+
+fn preview_color(uv: vec2<f32>) -> vec3<f32> {
+    let res = vec2<f32>(f32(params.resolution.x), f32(params.resolution.y));
+    let texel = 1.0 / res;
+
+    let h = terrain_height_for(params, uv);
+    let hx0 = terrain_height_for(params, uv - vec2<f32>(texel.x, 0.0));
+    let hx1 = terrain_height_for(params, uv + vec2<f32>(texel.x, 0.0));
+    let hy0 = terrain_height_for(params, uv - vec2<f32>(0.0, texel.y));
+    let hy1 = terrain_height_for(params, uv + vec2<f32>(0.0, texel.y));
+
+    let dx = (hx1 - hx0) * 4.6;
+    let dy = (hy1 - hy0) * 4.6;
+    let normal = normalize(vec3<f32>(-dx, 0.48, -dy));
+    let light_dir = normalize(vec3<f32>(-0.62, 0.74, 0.28));
+
+    let diffuse = max(dot(normal, light_dir), 0.0);
+    let ambient = 0.24 + 0.34 * (1.0 - normal.y);
+    let ridge_boost = smoothstep(0.12, 0.78, 1.0 - normal.y) * 0.30;
+    let shade = pow(saturate(ambient + diffuse * 0.78 + ridge_boost), 0.88);
+
+    let base = preview_palette(h);
+    let height_boost = smoothstep(0.22, 0.92, h) * 0.12;
+    return clamp(base * shade + vec3<f32>(height_boost), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn generate(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= params.resolution.x || id.y >= params.resolution.y {
@@ -240,9 +277,9 @@ fn generate(@builtin(global_invocation_id) id: vec3<u32>) {
 
     let res = vec2<f32>(f32(params.resolution.x), f32(params.resolution.y));
     let uv = (vec2<f32>(f32(id.x), f32(id.y)) + vec2<f32>(0.5, 0.5)) / res;
-    let h = terrain_height_for(params, uv);
+    let color = preview_color(uv);
 
-    textureStore(preview_output, vec2<i32>(id.xy), vec4<f32>(h, h, h, 1.0));
+    textureStore(preview_output, vec2<i32>(id.xy), vec4<f32>(color, 1.0));
 }
 
 @compute @workgroup_size(8, 8, 1)
