@@ -1,7 +1,3 @@
-// Heightfield generator compute shader.
-// Generates a terrain preview that matches the CPU export path:
-// continent shaping, domain warp, ridged mountains, and erosion-inspired carving.
-
 const CONTINENT_OCTAVES: u32 = 4u;
 const WARP_OCTAVES: u32 = 3u;
 const CHANNEL_OCTAVES: u32 = 4u;
@@ -25,8 +21,30 @@ struct GeneratorParams {
     erosion_strength:    f32,
 }
 
+struct DownsampleParams {
+    src_resolution: vec2<u32>,
+    dst_resolution: vec2<u32>,
+}
+
+struct NormalParams {
+    resolution: vec2<u32>,
+    effective_height_scale: f32,
+    lod_scale: f32,
+}
+
 @group(0) @binding(0) var<uniform> params: GeneratorParams;
-@group(1) @binding(0) var output: texture_storage_2d<rgba32float, read_write>;
+@group(1) @binding(0) var preview_output: texture_storage_2d<rgba32float, read_write>;
+
+@group(0) @binding(1) var<uniform> export_params: GeneratorParams;
+@group(1) @binding(1) var export_output: texture_storage_2d<r32float, write>;
+
+@group(0) @binding(2) var<uniform> downsample_params: DownsampleParams;
+@group(1) @binding(2) var downsample_src: texture_2d<f32>;
+@group(1) @binding(3) var downsample_dst: texture_storage_2d<r32float, write>;
+
+@group(0) @binding(3) var<uniform> normal_params: NormalParams;
+@group(1) @binding(4) var normal_src: texture_2d<f32>;
+@group(1) @binding(5) var normal_dst: texture_storage_2d<rg8snorm, write>;
 
 fn saturate(v: f32) -> f32 {
     return clamp(v, 0.0, 1.0);
@@ -134,32 +152,32 @@ fn continent_mask(pos: vec2<f32>) -> f32 {
     return smoothstep(0.28, 0.72, continents);
 }
 
-fn domain_warp(base_uv: vec2<f32>) -> vec2<f32> {
-    let warp_strength = clamp(params.warp_strength, 0.0, 2.0);
-    if warp_strength <= 0.0 {
+fn domain_warp(base_uv: vec2<f32>, warp_frequency: f32, warp_strength: f32) -> vec2<f32> {
+    let clamped_strength = clamp(warp_strength, 0.0, 2.0);
+    if clamped_strength <= 0.0 {
         return base_uv;
     }
 
-    let warp_pos = base_uv * max(params.warp_frequency, 0.05);
+    let warp_pos = base_uv * max(warp_frequency, 0.05);
     let warp = vec2<f32>(
         fbm(warp_pos + vec2<f32>(5.2, 1.3), WARP_OCTAVES, 2.0, 0.5),
         fbm(warp_pos + vec2<f32>(8.3, -2.8), WARP_OCTAVES, 2.0, 0.5),
     );
-    return base_uv + warp * warp_strength;
+    return base_uv + warp * clamped_strength;
 }
 
-fn terrain_height(uv: vec2<f32>) -> f32 {
+fn terrain_height_for(params_ref: GeneratorParams, uv: vec2<f32>) -> f32 {
     let seed_off = vec2<f32>(
-        f32(params.seed) * 0.47316,
-        f32(params.seed) * 0.31419,
+        f32(params_ref.seed) * 0.47316,
+        f32(params_ref.seed) * 0.31419,
     );
-    let base_uv = uv + params.offset + seed_off;
-    let detail_uv = domain_warp(base_uv);
-    let detail_pos = detail_uv * max(params.frequency, 0.001);
-    let octaves = max(params.octaves, 1u);
-    let lacunarity = max(params.lacunarity, 1.01);
-    let gain = clamp(params.gain, 0.05, 0.95);
-    let erosion = saturate(params.erosion_strength);
+    let base_uv = uv + params_ref.offset + seed_off;
+    let detail_uv = domain_warp(base_uv, params_ref.warp_frequency, params_ref.warp_strength);
+    let detail_pos = detail_uv * max(params_ref.frequency, 0.001);
+    let octaves = max(params_ref.octaves, 1u);
+    let lacunarity = max(params_ref.lacunarity, 1.01);
+    let gain = clamp(params_ref.gain, 0.05, 0.95);
+    let erosion = saturate(params_ref.erosion_strength);
 
     let detail = erosion_shaped_fbm(detail_pos, octaves, lacunarity, gain, erosion);
 
@@ -175,21 +193,21 @@ fn terrain_height(uv: vec2<f32>) -> f32 {
     );
 
     let base_height = remap01(detail);
-    let mountainous = mix(base_height, ridges, saturate(params.ridge_strength));
+    let mountainous = mix(base_height, ridges, saturate(params_ref.ridge_strength));
 
     let continent = continent_mask(
-        base_uv * max(params.continent_frequency, 0.05) + vec2<f32>(31.7, -22.9),
+        base_uv * max(params_ref.continent_frequency, 0.05) + vec2<f32>(31.7, -22.9),
     );
     let continental_height = mountainous * (0.18 + 0.82 * continent) + continent * 0.18 - 0.09;
 
     var height = mix(
         mountainous,
         continental_height,
-        saturate(params.continent_strength),
+        saturate(params_ref.continent_strength),
     );
 
     let channels = ridged_fbm(
-        (detail_uv + vec2<f32>(-13.5, 21.4)) * (params.frequency * 0.55 + 0.35),
+        (detail_uv + vec2<f32>(-13.5, 21.4)) * (params_ref.frequency * 0.55 + 0.35),
         CHANNEL_OCTAVES,
         2.05,
         0.55,
@@ -202,6 +220,18 @@ fn terrain_height(uv: vec2<f32>) -> f32 {
     return saturate(height);
 }
 
+fn clamp_texel(coord: vec2<i32>, resolution: vec2<u32>) -> vec2<i32> {
+    return clamp(
+        coord,
+        vec2<i32>(0, 0),
+        vec2<i32>(i32(resolution.x) - 1, i32(resolution.y) - 1),
+    );
+}
+
+fn sample_height_texel(src: texture_2d<f32>, coord: vec2<i32>, resolution: vec2<u32>) -> f32 {
+    return textureLoad(src, clamp_texel(coord, resolution), 0).x;
+}
+
 @compute @workgroup_size(8, 8, 1)
 fn generate(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= params.resolution.x || id.y >= params.resolution.y {
@@ -210,7 +240,68 @@ fn generate(@builtin(global_invocation_id) id: vec3<u32>) {
 
     let res = vec2<f32>(f32(params.resolution.x), f32(params.resolution.y));
     let uv = (vec2<f32>(f32(id.x), f32(id.y)) + vec2<f32>(0.5, 0.5)) / res;
-    let h = terrain_height(uv);
+    let h = terrain_height_for(params, uv);
 
-    textureStore(output, vec2<i32>(id.xy), vec4<f32>(h, h, h, 1.0));
+    textureStore(preview_output, vec2<i32>(id.xy), vec4<f32>(h, h, h, 1.0));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn generate_height(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= export_params.resolution.x || id.y >= export_params.resolution.y {
+        return;
+    }
+
+    let res = vec2<f32>(f32(export_params.resolution.x), f32(export_params.resolution.y));
+    let uv = (vec2<f32>(f32(id.x), f32(id.y)) + vec2<f32>(0.5, 0.5)) / res;
+    let h = terrain_height_for(export_params, uv);
+
+    textureStore(export_output, vec2<i32>(id.xy), vec4<f32>(h, 0.0, 0.0, 1.0));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn downsample_height(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= downsample_params.dst_resolution.x || id.y >= downsample_params.dst_resolution.y {
+        return;
+    }
+
+    let base = vec2<i32>(i32(id.x) * 2, i32(id.y) * 2);
+    let h00 = sample_height_texel(downsample_src, base + vec2<i32>(0, 0), downsample_params.src_resolution);
+    let h10 = sample_height_texel(downsample_src, base + vec2<i32>(1, 0), downsample_params.src_resolution);
+    let h01 = sample_height_texel(downsample_src, base + vec2<i32>(0, 1), downsample_params.src_resolution);
+    let h11 = sample_height_texel(downsample_src, base + vec2<i32>(1, 1), downsample_params.src_resolution);
+    let h = (h00 + h10 + h01 + h11) * 0.25;
+
+    textureStore(downsample_dst, vec2<i32>(id.xy), vec4<f32>(h, 0.0, 0.0, 1.0));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn derive_normals(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= normal_params.resolution.x || id.y >= normal_params.resolution.y {
+        return;
+    }
+
+    let center = vec2<i32>(id.xy);
+    let hf_m1_m1 = sample_height_texel(normal_src, center + vec2<i32>(-1, -1), normal_params.resolution);
+    let hf_0_m1 = sample_height_texel(normal_src, center + vec2<i32>(0, -1), normal_params.resolution);
+    let hf_1_m1 = sample_height_texel(normal_src, center + vec2<i32>(1, -1), normal_params.resolution);
+    let hf_m1_0 = sample_height_texel(normal_src, center + vec2<i32>(-1, 0), normal_params.resolution);
+    let hf_1_0 = sample_height_texel(normal_src, center + vec2<i32>(1, 0), normal_params.resolution);
+    let hf_m1_1 = sample_height_texel(normal_src, center + vec2<i32>(-1, 1), normal_params.resolution);
+    let hf_0_1 = sample_height_texel(normal_src, center + vec2<i32>(0, 1), normal_params.resolution);
+    let hf_1_1 = sample_height_texel(normal_src, center + vec2<i32>(1, 1), normal_params.resolution);
+
+    let gx = (
+        hf_1_m1 + 2.0 * hf_1_0 + hf_1_1
+        - hf_m1_m1 - 2.0 * hf_m1_0 - hf_m1_1
+    ) * (1.0 / 8.0) * normal_params.effective_height_scale;
+    let gz = (
+        hf_m1_1 + 2.0 * hf_0_1 + hf_1_1
+        - hf_m1_m1 - 2.0 * hf_0_m1 - hf_1_m1
+    ) * (1.0 / 8.0) * normal_params.effective_height_scale;
+
+    let nx = -gx;
+    let nz = -gz;
+    let len = max(sqrt(nx * nx + normal_params.lod_scale * normal_params.lod_scale + nz * nz), 1e-6);
+    let packed = vec2<f32>(clamp(nx / len, -1.0, 1.0), clamp(nz / len, -1.0, 1.0));
+    textureStore(normal_dst, center, vec4<f32>(packed, 0.0, 1.0));
 }

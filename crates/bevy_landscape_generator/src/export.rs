@@ -1,98 +1,1025 @@
-//! Direct tile-hierarchy generator — no PNG intermediate, supports arbitrary resolution.
+use std::{
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self, Receiver},
+        Arc, Mutex,
+    },
+};
 
-use std::collections::HashMap;
-use std::path::Path;
-use std::path::PathBuf;
-use std::sync::{
-    mpsc::{self, Receiver},
-    Mutex,
+use bevy::asset::{embedded_asset, load_embedded_asset};
+use bevy::{
+    asset::RenderAssetUsages,
+    prelude::*,
+    render::{
+        extract_resource::{ExtractResource, ExtractResourcePlugin},
+        gpu_readback::{Readback, ReadbackComplete},
+        render_asset::RenderAssets,
+        render_graph::{Node, NodeRunError, RenderGraph, RenderGraphContext, RenderLabel},
+        render_resource::{
+            BindGroup, BindGroupEntries, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
+            BindingType, BufferBindingType, CachedComputePipelineId, CachedPipelineState,
+            ComputePassDescriptor, ComputePipelineDescriptor, Extent3d, PipelineCache,
+            ShaderStages, ShaderType, StorageTextureAccess, TextureDimension, TextureFormat,
+            TextureSampleType, TextureUsages, TextureViewDimension, UniformBuffer,
+        },
+        renderer::{RenderContext, RenderDevice, RenderQueue},
+        texture::GpuImage,
+        Render, RenderApp, RenderSystems,
+    },
 };
 
 use crate::params::GeneratorParams;
-use crate::terrain_fn::sample_height;
 
-/// Receiver is wrapped in Mutex so ExportHandle is Sync (required for Bevy Resource).
-pub struct ExportHandle {
-    pub log_rx: Mutex<Receiver<String>>,
-    pub done: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Set to true only on a clean successful export (not on error).
-    pub succeeded: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Output directory for the completed export.
+const TILE_SIZE: u32 = 256;
+const WORKGROUP_SIZE: u32 = 8;
+pub const MAX_EXPORT_RESOLUTION: u32 = 16_384;
+
+#[derive(Message, Clone)]
+pub struct StartGeneratorExport {
+    pub params: GeneratorParams,
     pub output_dir: PathBuf,
 }
 
-pub fn start_export(params: GeneratorParams, output_dir: PathBuf) -> ExportHandle {
+#[derive(Resource, Default)]
+pub struct GeneratorExportState {
+    pub active: bool,
+    pub output_dir: Option<PathBuf>,
+    pub log: Vec<String>,
+    pub succeeded: bool,
+    pub completed_generation: u64,
+}
+
+#[derive(Resource, Default)]
+struct GeneratorExportRuntime {
+    next_generation: u64,
+    job: Option<GeneratorExportJob>,
+}
+
+struct GeneratorExportJob {
+    generation: u64,
+    params: GeneratorParams,
+    output_dir: PathBuf,
+    levels: u32,
+    height_images: Vec<Handle<Image>>,
+    normal_images: Vec<Handle<Image>>,
+    gpu_dispatched: Arc<AtomicBool>,
+    readback_started: bool,
+    heights: Vec<Option<Vec<u8>>>,
+    normals: Vec<Option<Vec<u8>>>,
+    writer: Option<ExportWriterHandle>,
+}
+
+struct ExportWriterHandle {
+    log_rx: Mutex<Receiver<String>>,
+    done: Arc<AtomicBool>,
+    succeeded: Arc<AtomicBool>,
+}
+
+#[derive(Component, Clone, Copy)]
+struct PendingGeneratorReadback {
+    generation: u64,
+    lod: u32,
+    width: u32,
+    height: u32,
+    kind: ReadbackKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReadbackKind {
+    Height,
+    Normal,
+}
+
+#[derive(Resource, Clone, ExtractResource)]
+struct ActiveGeneratorExport {
+    generation: u64,
+    params: GeneratorParams,
+    levels: u32,
+    height_images: Vec<Handle<Image>>,
+    normal_images: Vec<Handle<Image>>,
+    gpu_dispatched: Arc<AtomicBool>,
+}
+
+#[derive(Clone, ShaderType)]
+struct ExportGeneratorUniform {
+    resolution: UVec2,
+    octaves: u32,
+    seed: u32,
+    offset: Vec2,
+    frequency: f32,
+    lacunarity: f32,
+    gain: f32,
+    height_scale: f32,
+    continent_frequency: f32,
+    continent_strength: f32,
+    ridge_strength: f32,
+    warp_frequency: f32,
+    warp_strength: f32,
+    erosion_strength: f32,
+}
+
+impl ExportGeneratorUniform {
+    fn from_params(params: &GeneratorParams, resolution: u32) -> Self {
+        Self {
+            resolution: UVec2::splat(resolution),
+            octaves: params.octaves,
+            seed: params.seed,
+            offset: params.offset,
+            frequency: params.frequency,
+            lacunarity: params.lacunarity,
+            gain: params.gain,
+            height_scale: params.height_scale,
+            continent_frequency: params.continent_frequency,
+            continent_strength: params.continent_strength,
+            ridge_strength: params.ridge_strength,
+            warp_frequency: params.warp_frequency,
+            warp_strength: params.warp_strength,
+            erosion_strength: params.erosion_strength,
+        }
+    }
+}
+
+#[derive(Clone, ShaderType)]
+struct DownsampleUniform {
+    src_resolution: UVec2,
+    dst_resolution: UVec2,
+}
+
+#[derive(Clone, ShaderType)]
+struct NormalUniform {
+    resolution: UVec2,
+    effective_height_scale: f32,
+    lod_scale: f32,
+}
+
+struct GeneratePassResources {
+    _uniform: UniformBuffer<ExportGeneratorUniform>,
+    uniform_bind_group: BindGroup,
+    image_bind_group: BindGroup,
+}
+
+struct DownsamplePassResources {
+    _uniform: UniformBuffer<DownsampleUniform>,
+    uniform_bind_group: BindGroup,
+    image_bind_group: BindGroup,
+    dst_resolution: u32,
+}
+
+struct NormalPassResources {
+    _uniform: UniformBuffer<NormalUniform>,
+    uniform_bind_group: BindGroup,
+    image_bind_group: BindGroup,
+    resolution: u32,
+}
+
+#[derive(Resource)]
+struct GeneratorExportRenderResources {
+    generation: u64,
+    generate_pass: GeneratePassResources,
+    downsample_passes: Vec<DownsamplePassResources>,
+    normal_passes: Vec<NormalPassResources>,
+}
+
+#[derive(Resource)]
+struct GeneratorExportPipeline {
+    generate_uniform_layout: BindGroupLayoutDescriptor,
+    generate_image_layout: BindGroupLayoutDescriptor,
+    downsample_uniform_layout: BindGroupLayoutDescriptor,
+    downsample_image_layout: BindGroupLayoutDescriptor,
+    normal_uniform_layout: BindGroupLayoutDescriptor,
+    normal_image_layout: BindGroupLayoutDescriptor,
+    generate_pipeline: CachedComputePipelineId,
+    downsample_pipeline: CachedComputePipelineId,
+    normal_pipeline: CachedComputePipelineId,
+}
+
+impl FromWorld for GeneratorExportPipeline {
+    fn from_world(world: &mut World) -> Self {
+        let generate_uniform_layout = BindGroupLayoutDescriptor::new(
+            "generator_export_generate_uniform_layout",
+            &[BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: Some(ExportGeneratorUniform::min_size()),
+                },
+                count: None,
+            }],
+        );
+        let generate_image_layout = BindGroupLayoutDescriptor::new(
+            "generator_export_generate_image_layout",
+            &[BindGroupLayoutEntry {
+                binding: 1,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::StorageTexture {
+                    access: StorageTextureAccess::WriteOnly,
+                    format: TextureFormat::R32Float,
+                    view_dimension: TextureViewDimension::D2,
+                },
+                count: None,
+            }],
+        );
+        let downsample_uniform_layout = BindGroupLayoutDescriptor::new(
+            "generator_export_downsample_uniform_layout",
+            &[BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: Some(DownsampleUniform::min_size()),
+                },
+                count: None,
+            }],
+        );
+        let downsample_image_layout = BindGroupLayoutDescriptor::new(
+            "generator_export_downsample_image_layout",
+            &[
+                BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Texture {
+                        multisampled: false,
+                        sample_type: TextureSampleType::Float { filterable: false },
+                        view_dimension: TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly,
+                        format: TextureFormat::R32Float,
+                        view_dimension: TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+            ],
+        );
+        let normal_uniform_layout = BindGroupLayoutDescriptor::new(
+            "generator_export_normal_uniform_layout",
+            &[BindGroupLayoutEntry {
+                binding: 3,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Buffer {
+                    ty: BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: Some(NormalUniform::min_size()),
+                },
+                count: None,
+            }],
+        );
+        let normal_image_layout = BindGroupLayoutDescriptor::new(
+            "generator_export_normal_image_layout",
+            &[
+                BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::Texture {
+                        multisampled: false,
+                        sample_type: TextureSampleType::Float { filterable: false },
+                        view_dimension: TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: ShaderStages::COMPUTE,
+                    ty: BindingType::StorageTexture {
+                        access: StorageTextureAccess::WriteOnly,
+                        format: TextureFormat::Rg8Snorm,
+                        view_dimension: TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+            ],
+        );
+
+        let shader = load_embedded_asset!(world, "shaders/generator.wgsl");
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let generate_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("landscape_generator_export_generate".into()),
+            layout: vec![
+                generate_uniform_layout.clone(),
+                generate_image_layout.clone(),
+            ],
+            shader: shader.clone(),
+            shader_defs: vec![],
+            entry_point: Some("generate_height".into()),
+            ..default()
+        });
+        let downsample_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("landscape_generator_export_downsample".into()),
+                layout: vec![
+                    downsample_uniform_layout.clone(),
+                    downsample_image_layout.clone(),
+                ],
+                shader: shader.clone(),
+                shader_defs: vec![],
+                entry_point: Some("downsample_height".into()),
+                ..default()
+            });
+        let normal_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("landscape_generator_export_normals".into()),
+            layout: vec![normal_uniform_layout.clone(), normal_image_layout.clone()],
+            shader,
+            shader_defs: vec![],
+            entry_point: Some("derive_normals".into()),
+            ..default()
+        });
+
+        Self {
+            generate_uniform_layout,
+            generate_image_layout,
+            downsample_uniform_layout,
+            downsample_image_layout,
+            normal_uniform_layout,
+            normal_image_layout,
+            generate_pipeline,
+            downsample_pipeline,
+            normal_pipeline,
+        }
+    }
+}
+
+pub(crate) struct GeneratorExportPlugin;
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
+struct GeneratorExportLabel;
+
+enum GeneratorExportNodeState {
+    Loading,
+    Ready,
+}
+
+struct GeneratorExportNode {
+    state: GeneratorExportNodeState,
+}
+
+impl Default for GeneratorExportNode {
+    fn default() -> Self {
+        Self {
+            state: GeneratorExportNodeState::Loading,
+        }
+    }
+}
+
+impl Node for GeneratorExportNode {
+    fn update(&mut self, world: &mut World) {
+        let pipeline = world.resource::<GeneratorExportPipeline>();
+        let pipeline_cache = world.resource::<PipelineCache>();
+        if matches!(self.state, GeneratorExportNodeState::Loading)
+            && matches!(
+                pipeline_cache.get_compute_pipeline_state(pipeline.generate_pipeline),
+                CachedPipelineState::Ok(_)
+            )
+            && matches!(
+                pipeline_cache.get_compute_pipeline_state(pipeline.downsample_pipeline),
+                CachedPipelineState::Ok(_)
+            )
+            && matches!(
+                pipeline_cache.get_compute_pipeline_state(pipeline.normal_pipeline),
+                CachedPipelineState::Ok(_)
+            )
+        {
+            self.state = GeneratorExportNodeState::Ready;
+        }
+    }
+
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        if matches!(self.state, GeneratorExportNodeState::Loading) {
+            return Ok(());
+        }
+
+        let Some(active_export) = world.get_resource::<ActiveGeneratorExport>() else {
+            return Ok(());
+        };
+        if active_export.gpu_dispatched.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let Some(resources) = world.get_resource::<GeneratorExportRenderResources>() else {
+            return Ok(());
+        };
+        if resources.generation != active_export.generation {
+            return Ok(());
+        }
+
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let pipeline = world.resource::<GeneratorExportPipeline>();
+        let Some(generate_pipeline) =
+            pipeline_cache.get_compute_pipeline(pipeline.generate_pipeline)
+        else {
+            return Ok(());
+        };
+        let Some(downsample_pipeline) =
+            pipeline_cache.get_compute_pipeline(pipeline.downsample_pipeline)
+        else {
+            return Ok(());
+        };
+        let Some(normal_pipeline) = pipeline_cache.get_compute_pipeline(pipeline.normal_pipeline)
+        else {
+            return Ok(());
+        };
+
+        let mut pass =
+            render_context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("generator_export_pass"),
+                    ..default()
+                });
+
+        pass.set_pipeline(generate_pipeline);
+        pass.set_bind_group(0, &resources.generate_pass.uniform_bind_group, &[]);
+        pass.set_bind_group(1, &resources.generate_pass.image_bind_group, &[]);
+        let resolution = active_export.params.export_resolution;
+        pass.dispatch_workgroups(
+            resolution.div_ceil(WORKGROUP_SIZE),
+            resolution.div_ceil(WORKGROUP_SIZE),
+            1,
+        );
+
+        pass.set_pipeline(downsample_pipeline);
+        for downsample in &resources.downsample_passes {
+            pass.set_bind_group(0, &downsample.uniform_bind_group, &[]);
+            pass.set_bind_group(1, &downsample.image_bind_group, &[]);
+            pass.dispatch_workgroups(
+                downsample.dst_resolution.div_ceil(WORKGROUP_SIZE),
+                downsample.dst_resolution.div_ceil(WORKGROUP_SIZE),
+                1,
+            );
+        }
+
+        pass.set_pipeline(normal_pipeline);
+        for normal in &resources.normal_passes {
+            pass.set_bind_group(0, &normal.uniform_bind_group, &[]);
+            pass.set_bind_group(1, &normal.image_bind_group, &[]);
+            pass.dispatch_workgroups(
+                normal.resolution.div_ceil(WORKGROUP_SIZE),
+                normal.resolution.div_ceil(WORKGROUP_SIZE),
+                1,
+            );
+        }
+
+        active_export.gpu_dispatched.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
+impl Plugin for GeneratorExportPlugin {
+    fn build(&self, app: &mut App) {
+        embedded_asset!(app, "shaders/generator.wgsl");
+
+        app.init_resource::<GeneratorExportState>()
+            .init_resource::<GeneratorExportRuntime>()
+            .add_message::<StartGeneratorExport>()
+            .add_observer(handle_generator_readback_complete)
+            .add_plugins(ExtractResourcePlugin::<ActiveGeneratorExport>::default())
+            .add_systems(
+                Update,
+                (
+                    start_generator_export,
+                    begin_generator_readback,
+                    drain_generator_writer_logs,
+                )
+                    .chain(),
+            );
+
+        let render_app = app.sub_app_mut(RenderApp);
+        render_app.add_systems(
+            Render,
+            prepare_export_bind_groups.in_set(RenderSystems::PrepareBindGroups),
+        );
+
+        let mut render_graph = render_app.world_mut().resource_mut::<RenderGraph>();
+        render_graph.add_node(GeneratorExportLabel, GeneratorExportNode::default());
+        render_graph.add_node_edge(GeneratorExportLabel, bevy::render::graph::CameraDriverLabel);
+    }
+
+    fn finish(&self, app: &mut App) {
+        let render_app = app.sub_app_mut(RenderApp);
+        render_app.init_resource::<GeneratorExportPipeline>();
+    }
+}
+
+fn start_generator_export(
+    mut commands: Commands,
+    mut requests: MessageReader<StartGeneratorExport>,
+    mut runtime: ResMut<GeneratorExportRuntime>,
+    mut state: ResMut<GeneratorExportState>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    for request in requests.read() {
+        if runtime.job.is_some() {
+            state
+                .log
+                .push("Export already running; wait for it to finish.".into());
+            continue;
+        }
+
+        state.log.clear();
+        let mut params = request.params.clone();
+        if params.export_resolution > MAX_EXPORT_RESOLUTION {
+            state.log.push(format!(
+                "Export resolution {} exceeds the current 16k cap; clamping to {}.",
+                params.export_resolution, MAX_EXPORT_RESOLUTION
+            ));
+            params.export_resolution = MAX_EXPORT_RESOLUTION;
+        }
+
+        let levels = match baked_level_count(params.export_resolution) {
+            Ok(levels) => levels,
+            Err(err) => {
+                state.log.push(format!("Export failed: {err}"));
+                state.active = false;
+                state.succeeded = false;
+                state.output_dir = Some(request.output_dir.clone());
+                state.completed_generation = state.completed_generation.saturating_add(1);
+                continue;
+            }
+        };
+
+        runtime.next_generation += 1;
+        let generation = runtime.next_generation;
+        let gpu_dispatched = Arc::new(AtomicBool::new(false));
+
+        let mut height_images = Vec::with_capacity(levels as usize);
+        let mut normal_images = Vec::with_capacity(levels as usize);
+        for lod in 0..levels {
+            let resolution = params.export_resolution >> lod;
+            height_images.push(build_export_image(
+                &mut images,
+                resolution,
+                TextureFormat::R32Float,
+            ));
+            normal_images.push(build_export_image(
+                &mut images,
+                resolution,
+                TextureFormat::Rg8Snorm,
+            ));
+        }
+
+        state.log.push(format!(
+            "Export started → {} ({} levels)",
+            request.output_dir.display(),
+            levels
+        ));
+        state.active = true;
+        state.succeeded = false;
+        state.output_dir = Some(request.output_dir.clone());
+
+        commands.insert_resource(ActiveGeneratorExport {
+            generation,
+            params: params.clone(),
+            levels,
+            height_images: height_images.clone(),
+            normal_images: normal_images.clone(),
+            gpu_dispatched: gpu_dispatched.clone(),
+        });
+
+        runtime.job = Some(GeneratorExportJob {
+            generation,
+            params,
+            output_dir: request.output_dir.clone(),
+            levels,
+            height_images,
+            normal_images,
+            gpu_dispatched,
+            readback_started: false,
+            heights: vec![None; levels as usize],
+            normals: vec![None; levels as usize],
+            writer: None,
+        });
+    }
+}
+
+fn begin_generator_readback(
+    mut commands: Commands,
+    mut runtime: ResMut<GeneratorExportRuntime>,
+    mut state: ResMut<GeneratorExportState>,
+) {
+    let Some(job) = runtime.job.as_mut() else {
+        return;
+    };
+    if job.readback_started || !job.gpu_dispatched.load(Ordering::Acquire) {
+        return;
+    }
+
+    job.readback_started = true;
+    state
+        .log
+        .push("GPU bake finished; reading back baked levels…".into());
+
+    for lod in 0..job.levels {
+        let resolution = job.params.export_resolution >> lod;
+        commands.spawn((
+            PendingGeneratorReadback {
+                generation: job.generation,
+                lod,
+                width: resolution,
+                height: resolution,
+                kind: ReadbackKind::Height,
+            },
+            Readback::texture(job.height_images[lod as usize].clone()),
+        ));
+        commands.spawn((
+            PendingGeneratorReadback {
+                generation: job.generation,
+                lod,
+                width: resolution,
+                height: resolution,
+                kind: ReadbackKind::Normal,
+            },
+            Readback::texture(job.normal_images[lod as usize].clone()),
+        ));
+    }
+}
+
+fn handle_generator_readback_complete(
+    event: On<ReadbackComplete>,
+    mut commands: Commands,
+    pending: Query<&PendingGeneratorReadback>,
+    mut runtime: ResMut<GeneratorExportRuntime>,
+    mut state: ResMut<GeneratorExportState>,
+) {
+    let Ok(pending) = pending.get(event.entity) else {
+        return;
+    };
+    commands.entity(event.entity).despawn();
+
+    let Some(job) = runtime.job.as_mut() else {
+        return;
+    };
+    if job.generation != pending.generation || job.writer.is_some() {
+        return;
+    }
+
+    let bytes_per_pixel = match pending.kind {
+        ReadbackKind::Height => 4,
+        ReadbackKind::Normal => 2,
+    };
+    let compact = strip_padded_rows(&event.data, pending.width, pending.height, bytes_per_pixel);
+    let lod = pending.lod as usize;
+    match pending.kind {
+        ReadbackKind::Height => job.heights[lod] = Some(compact),
+        ReadbackKind::Normal => job.normals[lod] = Some(compact),
+    }
+
+    let completed = job.heights.iter().flatten().count() + job.normals.iter().flatten().count();
+    let total = (job.levels as usize) * 2;
+    if completed < total {
+        return;
+    }
+
+    state
+        .log
+        .push("Readback complete; writing tile hierarchy…".into());
+
+    let heights = job
+        .heights
+        .iter_mut()
+        .map(|slot| slot.take().expect("missing height readback"))
+        .collect();
+    let normals = job
+        .normals
+        .iter_mut()
+        .map(|slot| slot.take().expect("missing normal readback"))
+        .collect();
+    job.writer = Some(spawn_export_writer(
+        job.params.clone(),
+        job.output_dir.clone(),
+        heights,
+        normals,
+    ));
+}
+
+fn drain_generator_writer_logs(
+    mut commands: Commands,
+    mut runtime: ResMut<GeneratorExportRuntime>,
+    mut state: ResMut<GeneratorExportState>,
+) {
+    let Some(job) = runtime.job.as_mut() else {
+        return;
+    };
+    let Some(writer) = job.writer.as_ref() else {
+        return;
+    };
+
+    while let Ok(line) = writer.log_rx.lock().unwrap().try_recv() {
+        state.log.push(line);
+    }
+
+    if !writer.done.load(Ordering::Acquire) {
+        return;
+    }
+
+    state.active = false;
+    state.succeeded = writer.succeeded.load(Ordering::Acquire);
+    state.completed_generation = job.generation;
+    commands.remove_resource::<ActiveGeneratorExport>();
+    runtime.job = None;
+}
+
+fn prepare_export_bind_groups(
+    mut commands: Commands,
+    active_export: Option<Res<ActiveGeneratorExport>>,
+    existing: Option<Res<GeneratorExportRenderResources>>,
+    pipeline: Res<GeneratorExportPipeline>,
+    pipeline_cache: Res<PipelineCache>,
+    render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+    gpu_images: Res<RenderAssets<GpuImage>>,
+) {
+    let Some(active_export) = active_export else {
+        if existing.is_some() {
+            commands.remove_resource::<GeneratorExportRenderResources>();
+        }
+        return;
+    };
+    if existing
+        .as_ref()
+        .map(|existing| existing.generation == active_export.generation)
+        .unwrap_or(false)
+    {
+        return;
+    }
+
+    let Some(l0_height) = gpu_images.get(&active_export.height_images[0]) else {
+        return;
+    };
+
+    let mut generate_uniform = UniformBuffer::from(ExportGeneratorUniform::from_params(
+        &active_export.params,
+        active_export.params.export_resolution,
+    ));
+    generate_uniform.write_buffer(&render_device, &render_queue);
+    let generate_uniform_bind_group = render_device.create_bind_group(
+        None,
+        &pipeline_cache.get_bind_group_layout(&pipeline.generate_uniform_layout),
+        &BindGroupEntries::with_indices(((1, generate_uniform.binding().unwrap()),)),
+    );
+    let generate_image_bind_group = render_device.create_bind_group(
+        None,
+        &pipeline_cache.get_bind_group_layout(&pipeline.generate_image_layout),
+        &BindGroupEntries::with_indices(((1, &l0_height.texture_view),)),
+    );
+
+    let mut downsample_passes = Vec::with_capacity(active_export.levels.saturating_sub(1) as usize);
+    for lod in 1..active_export.levels {
+        let Some(src) = gpu_images.get(&active_export.height_images[(lod - 1) as usize]) else {
+            return;
+        };
+        let Some(dst) = gpu_images.get(&active_export.height_images[lod as usize]) else {
+            return;
+        };
+        let dst_resolution = active_export.params.export_resolution >> lod;
+        let mut uniform = UniformBuffer::from(DownsampleUniform {
+            src_resolution: UVec2::splat(active_export.params.export_resolution >> (lod - 1)),
+            dst_resolution: UVec2::splat(dst_resolution),
+        });
+        uniform.write_buffer(&render_device, &render_queue);
+        let bind_group = render_device.create_bind_group(
+            None,
+            &pipeline_cache.get_bind_group_layout(&pipeline.downsample_uniform_layout),
+            &BindGroupEntries::with_indices(((2, uniform.binding().unwrap()),)),
+        );
+        let image_bind_group = render_device.create_bind_group(
+            None,
+            &pipeline_cache.get_bind_group_layout(&pipeline.downsample_image_layout),
+            &BindGroupEntries::with_indices(((2, &src.texture_view), (3, &dst.texture_view))),
+        );
+        downsample_passes.push(DownsamplePassResources {
+            _uniform: uniform,
+            uniform_bind_group: bind_group,
+            image_bind_group,
+            dst_resolution,
+        });
+    }
+
+    let mut normal_passes = Vec::with_capacity(active_export.levels as usize);
+    let effective_height_scale =
+        active_export.params.height_scale * active_export.params.world_scale;
+    for lod in 0..active_export.levels {
+        let resolution = active_export.params.export_resolution >> lod;
+        let Some(src) = gpu_images.get(&active_export.height_images[lod as usize]) else {
+            return;
+        };
+        let Some(dst) = gpu_images.get(&active_export.normal_images[lod as usize]) else {
+            return;
+        };
+        let mut uniform = UniformBuffer::from(NormalUniform {
+            resolution: UVec2::splat(resolution),
+            effective_height_scale,
+            lod_scale: active_export.params.world_scale * (1u32 << lod) as f32,
+        });
+        uniform.write_buffer(&render_device, &render_queue);
+        let bind_group = render_device.create_bind_group(
+            None,
+            &pipeline_cache.get_bind_group_layout(&pipeline.normal_uniform_layout),
+            &BindGroupEntries::with_indices(((3, uniform.binding().unwrap()),)),
+        );
+        let image_bind_group = render_device.create_bind_group(
+            None,
+            &pipeline_cache.get_bind_group_layout(&pipeline.normal_image_layout),
+            &BindGroupEntries::with_indices(((4, &src.texture_view), (5, &dst.texture_view))),
+        );
+        normal_passes.push(NormalPassResources {
+            _uniform: uniform,
+            uniform_bind_group: bind_group,
+            image_bind_group,
+            resolution,
+        });
+    }
+
+    commands.insert_resource(GeneratorExportRenderResources {
+        generation: active_export.generation,
+        generate_pass: GeneratePassResources {
+            _uniform: generate_uniform,
+            uniform_bind_group: generate_uniform_bind_group,
+            image_bind_group: generate_image_bind_group,
+        },
+        downsample_passes,
+        normal_passes,
+    });
+}
+
+fn build_export_image(
+    images: &mut Assets<Image>,
+    resolution: u32,
+    format: TextureFormat,
+) -> Handle<Image> {
+    let mut image = Image::new_uninit(
+        Extent3d {
+            width: resolution,
+            height: resolution,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        format,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.texture_descriptor.usage |=
+        TextureUsages::COPY_SRC | TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING;
+    images.add(image)
+}
+
+fn baked_level_count(export_resolution: u32) -> Result<u32, String> {
+    if export_resolution > MAX_EXPORT_RESOLUTION {
+        return Err(format!(
+            "export_resolution {export_resolution} exceeds the current maximum of {MAX_EXPORT_RESOLUTION}"
+        ));
+    }
+    if !export_resolution.is_power_of_two() {
+        return Err(format!(
+            "export_resolution {export_resolution} must be a power of two"
+        ));
+    }
+    if export_resolution < TILE_SIZE * 2 {
+        return Err(format!(
+            "export_resolution {export_resolution} is too small (min {})",
+            TILE_SIZE * 2
+        ));
+    }
+    if export_resolution % TILE_SIZE != 0 {
+        return Err(format!(
+            "export_resolution {export_resolution} must be a multiple of {TILE_SIZE}"
+        ));
+    }
+
+    let mut sz = export_resolution as usize;
+    let mut levels = 0u32;
+    while sz / TILE_SIZE as usize >= 2 {
+        levels += 1;
+        sz /= 2;
+    }
+    Ok(levels)
+}
+
+fn strip_padded_rows(data: &[u8], width: u32, height: u32, bytes_per_pixel: usize) -> Vec<u8> {
+    let tight_row_bytes = width as usize * bytes_per_pixel;
+    let padded_row_bytes = tight_row_bytes.next_multiple_of(256);
+    if padded_row_bytes == tight_row_bytes {
+        return data.to_vec();
+    }
+
+    let mut compact = Vec::with_capacity(tight_row_bytes * height as usize);
+    for row in 0..height as usize {
+        let start = row * padded_row_bytes;
+        compact.extend_from_slice(&data[start..start + tight_row_bytes]);
+    }
+    compact
+}
+
+fn spawn_export_writer(
+    params: GeneratorParams,
+    output_dir: PathBuf,
+    heights: Vec<Vec<u8>>,
+    normals: Vec<Vec<u8>>,
+) -> ExportWriterHandle {
     let (log_tx, log_rx) = mpsc::channel::<String>();
-    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let succeeded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let succeeded = Arc::new(AtomicBool::new(false));
     let done_clone = done.clone();
     let succeeded_clone = succeeded.clone();
-    let output_dir_thread = output_dir.clone();
 
     std::thread::spawn(move || {
-        let output_dir = output_dir_thread;
         let run = || -> Result<(), String> {
-            log_tx
-                .send(format!(
-                    "Generating {}×{} tile hierarchy …",
-                    params.export_resolution, params.export_resolution,
-                ))
-                .ok();
-
-            generate_tiles_direct(&params, &output_dir, &log_tx)?;
+            write_export_tiles(&params, &output_dir, &heights, &normals, &log_tx)?;
             Ok(())
         };
 
         match run() {
-            Ok(()) => {
-                succeeded_clone.store(true, std::sync::atomic::Ordering::Release);
-            }
-            Err(e) => {
-                log_tx.send(format!("Export failed: {e}")).ok();
+            Ok(()) => succeeded_clone.store(true, Ordering::Release),
+            Err(err) => {
+                log_tx.send(format!("Export failed: {err}")).ok();
             }
         }
-        done_clone.store(true, std::sync::atomic::Ordering::Release);
+        done_clone.store(true, Ordering::Release);
     });
 
-    ExportHandle {
+    ExportWriterHandle {
         log_rx: Mutex::new(log_rx),
         done,
         succeeded,
-        output_dir,
     }
 }
 
-fn generate_tiles_direct(
+fn write_export_tiles(
     params: &GeneratorParams,
-    output_dir: &std::path::Path,
+    output_dir: &Path,
+    heights: &[Vec<u8>],
+    normals: &[Vec<u8>],
     log: &mpsc::Sender<String>,
 ) -> Result<(), String> {
-    const TILE: usize = 256;
-    const BUF: usize = TILE + 2; // 258×258: 1px border for cross-tile Sobel normals
+    prepare_output_dir(output_dir)?;
+    log.send(format!(
+        "Writing {} levels to '{}'",
+        heights.len(),
+        output_dir.display()
+    ))
+    .ok();
 
-    let export_res = params.export_resolution;
+    for (lod, (height_level, normal_level)) in heights.iter().zip(normals.iter()).enumerate() {
+        let lod = lod as u32;
+        let resolution = params.export_resolution >> lod;
+        let tiles_per_side = (resolution / TILE_SIZE) as i32;
+        let tile_start = -(tiles_per_side / 2);
 
-    let levels = {
-        let mut sz = export_res as usize;
-        let mut n = 0u32;
-        while sz / TILE >= 2 {
-            n += 1;
-            sz /= 2;
+        let height_dir = output_dir.join(format!("height/L{lod}"));
+        let normal_dir = output_dir.join(format!("normal/L{lod}"));
+        std::fs::create_dir_all(&height_dir).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&normal_dir).map_err(|e| e.to_string())?;
+
+        for tile_y in 0..tiles_per_side as usize {
+            for tile_x in 0..tiles_per_side as usize {
+                let tx = tile_start + tile_x as i32;
+                let ty = tile_start + tile_y as i32;
+
+                let height_tile =
+                    build_height_tile_bytes(height_level, resolution as usize, tile_x, tile_y);
+                let normal_tile =
+                    build_normal_tile_bytes(normal_level, resolution as usize, tile_x, tile_y);
+
+                let height_path = height_dir.join(format!("{tx}_{ty}.bin"));
+                std::fs::write(&height_path, height_tile).map_err(|e| {
+                    format!(
+                        "Failed to write height tile L{lod}/{tx}_{ty}.bin to '{}': {e}",
+                        height_path.display()
+                    )
+                })?;
+
+                let normal_path = normal_dir.join(format!("{tx}_{ty}.bin"));
+                std::fs::write(&normal_path, normal_tile).map_err(|e| {
+                    format!(
+                        "Failed to write normal tile L{lod}/{tx}_{ty}.bin to '{}': {e}",
+                        normal_path.display()
+                    )
+                })?;
+            }
         }
-        n
-    };
 
-    if levels == 0 {
-        return Err(format!(
-            "export_resolution {} is too small (min {})",
-            export_res,
-            TILE * 2
-        ));
+        log.send(format!(
+            "Level {lod}: {} tiles",
+            tiles_per_side * tiles_per_side
+        ))
+        .ok();
     }
 
-    log.send(format!("  {} LOD levels, tile {}px", levels, TILE))
-        .ok();
+    log.send(format!("Done → '{}'", output_dir.display())).ok();
+    Ok(())
+}
 
+fn prepare_output_dir(output_dir: &Path) -> Result<(), String> {
     for subdir in ["height", "normal"] {
         let path = output_dir.join(subdir);
         if path.exists() {
@@ -100,365 +1027,110 @@ fn generate_tiles_direct(
                 .map_err(|e| format!("Failed to clear '{subdir}': {e}"))?;
         }
     }
-    std::fs::create_dir_all(output_dir).map_err(|e| format!("Failed to create output dir: {e}"))?;
-
-    let effective_height_scale = params.height_scale * params.world_scale;
-
-    for lod in 0..levels {
-        let tile_scale = 1u32 << lod;
-        let mip_size = export_res >> lod;
-        let tiles_per_side = (mip_size / TILE as u32) as i32;
-        let tile_start = -(tiles_per_side / 2);
-        let tile_end = tile_start + tiles_per_side;
-        let lod_scale = params.world_scale * tile_scale as f32;
-
-        let height_dir = output_dir.join(format!("height/L{lod}"));
-        let normal_dir = output_dir.join(format!("normal/L{lod}"));
-        std::fs::create_dir_all(&height_dir).map_err(|e| e.to_string())?;
-        std::fs::create_dir_all(&normal_dir).map_err(|e| e.to_string())?;
-
-        let tile_coords: Vec<(i32, i32)> = (tile_start..tile_end)
-            .flat_map(|ty| (tile_start..tile_end).map(move |tx| (tx, ty)))
-            .collect();
-        let tile_count = tile_coords.len();
-
-        let thread_count = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
-        let chunk_size = (tile_count + thread_count - 1) / thread_count;
-
-        std::thread::scope(|s| -> Result<(), String> {
-            let mut handles = Vec::new();
-            for chunk in tile_coords.chunks(chunk_size) {
-                let height_dir = &height_dir;
-                let normal_dir = &normal_dir;
-                let output_dir = output_dir;
-                handles.push(s.spawn(move || -> Result<(), String> {
-                    for &(tx, ty) in chunk {
-                        let buf = build_height_buf(params, output_dir, export_res, lod, tx, ty)?;
-
-                        let mut tile_bytes = Vec::with_capacity(TILE * TILE * 2);
-                        let mut normal_bytes = Vec::with_capacity(TILE * TILE * 2);
-
-                        for row in 0..TILE {
-                            for col in 0..TILE {
-                                let cx = col + 1; // offset into the 258×258 buf
-                                let cy = row + 1;
-
-                                // R16Unorm height
-                                let h = buf[cy * BUF + cx];
-                                let v = (h.clamp(0.0, 1.0) * 65535.0) as u16;
-                                tile_bytes.extend_from_slice(&v.to_le_bytes());
-
-                                // Sobel-based world-space normal (XZ channels, RG8Snorm)
-                                let hf = |dx: i32, dy: i32| -> f32 {
-                                    buf[(cy as i32 + dy) as usize * BUF + (cx as i32 + dx) as usize]
-                                };
-                                let gx = (hf(1, -1) + 2.0 * hf(1, 0) + hf(1, 1)
-                                    - hf(-1, -1)
-                                    - 2.0 * hf(-1, 0)
-                                    - hf(-1, 1))
-                                    * (1.0 / 8.0)
-                                    * effective_height_scale;
-                                let gz = (hf(-1, 1) + 2.0 * hf(0, 1) + hf(1, 1)
-                                    - hf(-1, -1)
-                                    - 2.0 * hf(0, -1)
-                                    - hf(1, -1))
-                                    * (1.0 / 8.0)
-                                    * effective_height_scale;
-                                let nx = -gx;
-                                let nz = -gz;
-                                let len =
-                                    (nx * nx + lod_scale * lod_scale + nz * nz).sqrt().max(1e-6);
-                                normal_bytes
-                                        .push(((nx / len).clamp(-1.0, 1.0) * 127.0).round() as i8
-                                            as u8);
-                                normal_bytes
-                                        .push(((nz / len).clamp(-1.0, 1.0) * 127.0).round() as i8
-                                            as u8);
-                            }
-                        }
-
-                        let height_path = height_dir.join(format!("{tx}_{ty}.bin"));
-                        std::fs::write(&height_path, &tile_bytes).map_err(|e| {
-                            format!(
-                                "Failed to write height tile L{lod}/{tx}_{ty}.bin to '{}': {e}",
-                                height_path.display()
-                            )
-                        })?;
-
-                        let normal_path = normal_dir.join(format!("{tx}_{ty}.bin"));
-                        std::fs::write(&normal_path, &normal_bytes).map_err(|e| {
-                            format!(
-                                "Failed to write normal tile L{lod}/{tx}_{ty}.bin to '{}': {e}",
-                                normal_path.display()
-                            )
-                        })?;
-                    }
-                    Ok(())
-                }));
-            }
-
-            for handle in handles {
-                handle.join().map_err(|_| {
-                    format!("Terrain export worker panicked while writing LOD {lod}")
-                })??;
-            }
-            Ok(())
-        })?;
-
-        log.send(format!("Level {lod}: {} tiles", tile_count)).ok();
-    }
-
-    log.send(format!("Done → '{}'", output_dir.display())).ok();
-    Ok(())
+    std::fs::create_dir_all(output_dir).map_err(|e| {
+        format!(
+            "Failed to create output dir '{}': {e}",
+            output_dir.display()
+        )
+    })
 }
 
-fn build_height_buf(
-    params: &GeneratorParams,
-    output_dir: &Path,
-    export_res: u32,
-    lod: u32,
-    tx: i32,
-    ty: i32,
-) -> Result<Vec<f32>, String> {
-    const TILE: usize = 256;
-    const BUF: usize = TILE + 2;
+fn build_height_tile_bytes(
+    level_bytes: &[u8],
+    resolution: usize,
+    tile_x: usize,
+    tile_y: usize,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity((TILE_SIZE * TILE_SIZE * 2) as usize);
+    let start_x = tile_x * TILE_SIZE as usize;
+    let start_y = tile_y * TILE_SIZE as usize;
 
-    let mut buf = vec![0.0f32; BUF * BUF];
-
-    if lod == 0 {
-        for brow in 0..BUF {
-            for bcol in 0..BUF {
-                let c = tx * TILE as i32 + bcol as i32 - 1;
-                let r = ty * TILE as i32 + brow as i32 - 1;
-                buf[brow * BUF + bcol] = sample_height_at_grid(params, export_res, c, r, 1);
-            }
-        }
-        return Ok(buf);
-    }
-
-    let prev_height_dir = output_dir.join(format!("height/L{}", lod - 1));
-    let prev_tile_scale = 1u32 << (lod - 1);
-    let mut cache: HashMap<(i32, i32), Option<Vec<f32>>> = HashMap::new();
-
-    for brow in 0..BUF {
-        for bcol in 0..BUF {
-            let c = tx * TILE as i32 + bcol as i32 - 1;
-            let r = ty * TILE as i32 + brow as i32 - 1;
-            let gx = c * 2;
-            let gz = r * 2;
-
-            let h00 = sample_prev_level_texel(
-                params,
-                export_res,
-                prev_tile_scale,
-                &prev_height_dir,
-                &mut cache,
-                gx,
-                gz,
-            )?;
-            let h10 = sample_prev_level_texel(
-                params,
-                export_res,
-                prev_tile_scale,
-                &prev_height_dir,
-                &mut cache,
-                gx + 1,
-                gz,
-            )?;
-            let h01 = sample_prev_level_texel(
-                params,
-                export_res,
-                prev_tile_scale,
-                &prev_height_dir,
-                &mut cache,
-                gx,
-                gz + 1,
-            )?;
-            let h11 = sample_prev_level_texel(
-                params,
-                export_res,
-                prev_tile_scale,
-                &prev_height_dir,
-                &mut cache,
-                gx + 1,
-                gz + 1,
-            )?;
-
-            buf[brow * BUF + bcol] = (h00 + h10 + h01 + h11) * 0.25;
+    for row in 0..TILE_SIZE as usize {
+        let src_row = start_y + row;
+        for col in 0..TILE_SIZE as usize {
+            let src_col = start_x + col;
+            let offset = (src_row * resolution + src_col) * 4;
+            let sample = f32::from_le_bytes([
+                level_bytes[offset],
+                level_bytes[offset + 1],
+                level_bytes[offset + 2],
+                level_bytes[offset + 3],
+            ]);
+            let quantized = (sample.clamp(0.0, 1.0) * 65535.0).round() as u16;
+            out.extend_from_slice(&quantized.to_le_bytes());
         }
     }
 
-    Ok(buf)
+    out
 }
 
-fn sample_prev_level_texel(
-    params: &GeneratorParams,
-    export_res: u32,
-    prev_tile_scale: u32,
-    prev_height_dir: &Path,
-    cache: &mut HashMap<(i32, i32), Option<Vec<f32>>>,
-    gx: i32,
-    gz: i32,
-) -> Result<f32, String> {
-    const TILE: usize = 256;
+fn build_normal_tile_bytes(
+    level_bytes: &[u8],
+    resolution: usize,
+    tile_x: usize,
+    tile_y: usize,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity((TILE_SIZE * TILE_SIZE * 2) as usize);
+    let start_x = tile_x * TILE_SIZE as usize;
+    let start_y = tile_y * TILE_SIZE as usize;
 
-    let tx = gx.div_euclid(TILE as i32);
-    let ty = gz.div_euclid(TILE as i32);
-    let key = (tx, ty);
-
-    if !cache.contains_key(&key) {
-        let path = prev_height_dir.join(format!("{tx}_{ty}.bin"));
-        let tile = if path.exists() {
-            Some(read_r16_tile(&path, TILE)?)
-        } else {
-            None
-        };
-        cache.insert(key, tile);
+    for row in 0..TILE_SIZE as usize {
+        let src_row = start_y + row;
+        let start = (src_row * resolution + start_x) * 2;
+        let end = start + TILE_SIZE as usize * 2;
+        out.extend_from_slice(&level_bytes[start..end]);
     }
 
-    if let Some(Some(tile)) = cache.get(&key) {
-        let local_x = gx.rem_euclid(TILE as i32) as usize;
-        let local_y = gz.rem_euclid(TILE as i32) as usize;
-        return Ok(tile[local_y * TILE + local_x]);
-    }
-
-    Ok(sample_height_at_grid(
-        params,
-        export_res,
-        gx,
-        gz,
-        prev_tile_scale,
-    ))
-}
-
-fn read_r16_tile(path: &Path, tile_size: usize) -> Result<Vec<f32>, String> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| format!("Failed to read tile '{}': {e}", path.display()))?;
-    let expected = tile_size * tile_size * 2;
-    if bytes.len() != expected {
-        return Err(format!(
-            "Unexpected tile size for '{}': expected {} bytes, got {}",
-            path.display(),
-            expected,
-            bytes.len()
-        ));
-    }
-
-    Ok(bytes
-        .chunks_exact(2)
-        .map(|b| u16::from_le_bytes([b[0], b[1]]) as f32 / 65535.0)
-        .collect())
-}
-
-fn sample_height_at_grid(
-    params: &GeneratorParams,
-    export_res: u32,
-    grid_x: i32,
-    grid_y: i32,
-    tile_scale: u32,
-) -> f32 {
-    sample_height(
-        params,
-        sample_coordinate(grid_x, tile_scale, export_res),
-        sample_coordinate(grid_y, tile_scale, export_res),
-    )
-}
-
-fn sample_coordinate(grid_coord: i32, tile_scale: u32, export_res: u32) -> f32 {
-    ((grid_coord as f32 + 0.5) * tile_scale as f32 / export_res as f32) + 0.5
+    out
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{generate_tiles_direct, read_r16_tile, sample_coordinate};
-    use crate::GeneratorParams;
-    use std::sync::mpsc;
-    use std::{
-        fs,
-        path::{Path, PathBuf},
-        time::{SystemTime, UNIX_EPOCH},
+    use super::{
+        baked_level_count, build_height_tile_bytes, build_normal_tile_bytes, strip_padded_rows,
     };
 
-    fn unique_temp_dir(label: &str) -> PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("landscape-gen-{label}-{nonce}"))
-    }
-
-    fn combine_child_tiles(level_dir: &Path, tx: i32, ty: i32) -> Vec<f32> {
-        let mut out = vec![0.0f32; 512 * 512];
-        for child_y in 0..2 {
-            for child_x in 0..2 {
-                let tile = read_r16_tile(
-                    &level_dir.join(format!("{}_{}.bin", tx * 2 + child_x, ty * 2 + child_y)),
-                    256,
-                )
-                .unwrap();
-                for row in 0..256 {
-                    let dst_row = (child_y as usize * 256 + row) * 512 + child_x as usize * 256;
-                    let src_row = row * 256;
-                    out[dst_row..dst_row + 256].copy_from_slice(&tile[src_row..src_row + 256]);
-                }
-            }
-        }
-        out
-    }
-
-    fn box_filter_2x(src: &[f32], size: usize) -> Vec<f32> {
-        let out_size = size / 2;
-        let mut out = vec![0.0f32; out_size * out_size];
-        for y in 0..out_size {
-            for x in 0..out_size {
-                let sx = x * 2;
-                let sy = y * 2;
-                out[y * out_size + x] = (src[sy * size + sx]
-                    + src[sy * size + sx + 1]
-                    + src[(sy + 1) * size + sx]
-                    + src[(sy + 1) * size + sx + 1])
-                    * 0.25;
-            }
-        }
-        out
+    #[test]
+    fn export_requires_power_of_two_tile_multiple() {
+        assert!(baked_level_count(4096).is_ok());
+        assert!(baked_level_count(32768).is_err());
+        assert!(baked_level_count(3000).is_err());
+        assert!(baked_level_count(256).is_err());
     }
 
     #[test]
-    fn export_samples_texel_centers() {
-        assert_eq!(sample_coordinate(0, 1, 4096), 0.5001220703125);
-        assert_eq!(sample_coordinate(0, 2, 4096), 0.500244140625);
-        assert_eq!(sample_coordinate(-2048, 1, 4096), 0.0001220703125);
+    fn strip_padded_rows_removes_copy_padding() {
+        let mut raw = vec![0u8; 512];
+        raw[0..4].copy_from_slice(&[1, 2, 3, 4]);
+        raw[256..260].copy_from_slice(&[5, 6, 7, 8]);
+        let compact = strip_padded_rows(&raw, 1, 2, 4);
+        assert_eq!(compact, vec![1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]
-    fn export_builds_filtered_mips() {
-        let temp_dir = unique_temp_dir("filtered-mips");
-        fs::create_dir_all(&temp_dir).unwrap();
+    fn height_and_normal_tiles_slice_expected_region() {
+        let resolution = 512usize;
+        let mut heights = vec![0u8; resolution * resolution * 4];
+        let mut normals = vec![0u8; resolution * resolution * 2];
 
-        let params = GeneratorParams {
-            export_resolution: 1024,
-            ..Default::default()
-        };
-        let (log_tx, _log_rx) = mpsc::channel();
-        generate_tiles_direct(&params, &temp_dir, &log_tx).unwrap();
+        for y in 0..resolution {
+            for x in 0..resolution {
+                let idx = y * resolution + x;
+                let h = (idx as f32) / ((resolution * resolution - 1) as f32);
+                heights[idx * 4..idx * 4 + 4].copy_from_slice(&h.to_le_bytes());
+                normals[idx * 2] = (x & 0xff) as u8;
+                normals[idx * 2 + 1] = (y & 0xff) as u8;
+            }
+        }
 
-        let combined = combine_child_tiles(&temp_dir.join("height/L0"), 0, 0);
-        let downsampled = box_filter_2x(&combined, 512);
-        let l1_tile = read_r16_tile(&temp_dir.join("height/L1/0_0.bin"), 256).unwrap();
+        let height_tile = build_height_tile_bytes(&heights, resolution, 1, 1);
+        let normal_tile = build_normal_tile_bytes(&normals, resolution, 1, 1);
 
-        let max_diff = downsampled
-            .iter()
-            .zip(l1_tile.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
-
-        assert!(
-            max_diff <= 2.0 / 65535.0,
-            "expected filtered mip pyramid, max diff was {max_diff}"
-        );
-
-        let _ = fs::remove_dir_all(temp_dir);
+        assert_eq!(height_tile.len(), (256 * 256 * 2) as usize);
+        assert_eq!(normal_tile.len(), (256 * 256 * 2) as usize);
+        assert_eq!(normal_tile[0], 0);
+        assert_eq!(normal_tile[1], 0);
+        assert_eq!(normal_tile[(255 * 256 + 255) * 2], 255);
+        assert_eq!(normal_tile[(255 * 256 + 255) * 2 + 1], 255);
     }
 }

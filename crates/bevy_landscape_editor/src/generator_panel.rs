@@ -6,7 +6,10 @@ use bevy_egui::{
     EguiContexts, EguiPrimaryContextPass,
 };
 use bevy_landscape::{MaterialLibrary, ReloadTerrainRequest, TerrainConfig, TerrainSourceDesc};
-use bevy_landscape_generator::{export::ExportHandle, GeneratorParams, HeightfieldImage};
+use bevy_landscape_generator::{
+    export::{GeneratorExportState, StartGeneratorExport, MAX_EXPORT_RESOLUTION},
+    GeneratorParams, HeightfieldImage,
+};
 
 #[derive(Resource)]
 pub struct GeneratorPanelState {
@@ -14,8 +17,7 @@ pub struct GeneratorPanelState {
     preview_id: Option<TextureId>,
     preview_handle: Option<Handle<Image>>,
     output_dir: String,
-    export: Option<ExportHandle>,
-    log: Vec<String>,
+    last_completed_generation: u64,
 }
 
 impl Default for GeneratorPanelState {
@@ -25,8 +27,7 @@ impl Default for GeneratorPanelState {
             preview_id: None,
             preview_handle: None,
             output_dir: "assets/tiles_generated".into(),
-            export: None,
-            log: Vec::new(),
+            last_completed_generation: 0,
         }
     }
 }
@@ -44,43 +45,27 @@ fn generator_panel_system(
     mut contexts: EguiContexts,
     mut panel: ResMut<GeneratorPanelState>,
     mut params: ResMut<GeneratorParams>,
+    export_state: Res<GeneratorExportState>,
     gen_image: Option<Res<HeightfieldImage>>,
     active_config: Res<TerrainConfig>,
     active_library: Res<MaterialLibrary>,
     mut reload_tx: MessageWriter<ReloadTerrainRequest>,
+    mut export_tx: MessageWriter<StartGeneratorExport>,
 ) -> Result {
-    // Drain export log messages; detect completion.
-    {
-        let mut new_msgs: Vec<String> = Vec::new();
-        let mut finished = false;
-        let mut succeeded = false;
-        let mut out_dir = PathBuf::new();
+    params.export_resolution = params.export_resolution.min(MAX_EXPORT_RESOLUTION);
 
-        if let Some(ref handle) = panel.export {
-            while let Ok(msg) = handle.log_rx.lock().unwrap().try_recv() {
-                new_msgs.push(msg);
-            }
-            finished = handle.done.load(std::sync::atomic::Ordering::Acquire);
-            succeeded = handle.succeeded.load(std::sync::atomic::Ordering::Acquire);
-            out_dir = handle.output_dir.clone();
-        }
-
-        panel.log.extend(new_msgs);
-
-        if finished {
-            if succeeded {
-                panel
-                    .log
-                    .push("Reloading terrain from generated tiles…".into());
+    if export_state.completed_generation != panel.last_completed_generation {
+        panel.last_completed_generation = export_state.completed_generation;
+        if export_state.succeeded {
+            if let Some(out_dir) = export_state.output_dir.as_deref() {
                 trigger_reload(
-                    &out_dir,
+                    out_dir,
                     &params,
                     &active_config,
                     &active_library,
                     &mut reload_tx,
                 );
             }
-            panel.export = None;
         }
     }
 
@@ -255,7 +240,6 @@ fn generator_panel_system(
                             (4096, "4k"),
                             (8192, "8k"),
                             (16384, "16k"),
-                            (32768, "32k"),
                         ];
                         let selected_label = export_res_options
                             .iter()
@@ -307,17 +291,14 @@ fn generator_panel_system(
                 ui.label("Output directory:");
                 ui.text_edit_singleline(&mut panel.output_dir);
 
-                let exporting = panel.export.is_some();
+                let exporting = export_state.active;
                 ui.add_space(4.0);
                 ui.add_enabled_ui(!exporting, |ui| {
                     if ui.button("Generate & Load").clicked() {
-                        let p = params.clone();
-                        let dir = PathBuf::from(&panel.output_dir);
-                        panel.log.clear();
-                        panel
-                            .log
-                            .push(format!("Export started → {}", dir.display()));
-                        panel.export = Some(bevy_landscape_generator::export::start_export(p, dir));
+                        export_tx.write(StartGeneratorExport {
+                            params: params.clone(),
+                            output_dir: PathBuf::from(&panel.output_dir),
+                        });
                     }
                 });
 
@@ -325,14 +306,14 @@ fn generator_panel_system(
                     ui.spinner();
                 }
 
-                if !panel.log.is_empty() {
+                if !export_state.log.is_empty() {
                     ui.add_space(4.0);
                     egui::ScrollArea::vertical()
                         .id_salt("gen_log")
                         .max_height(120.0)
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
-                            for line in &panel.log {
+                            for line in &export_state.log {
                                 ui.label(line);
                             }
                         });

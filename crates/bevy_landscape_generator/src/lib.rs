@@ -2,12 +2,12 @@ mod compute;
 pub mod export;
 pub mod images;
 pub mod params;
-mod terrain_fn;
 mod uniforms;
 
 use bevy::prelude::*;
 
 use compute::GeneratorComputePlugin;
+use export::GeneratorExportPlugin;
 use images::{build_generator_image, GeneratorImage};
 use uniforms::GeneratorUniform;
 
@@ -20,7 +20,7 @@ impl Plugin for LandscapeGeneratorPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GeneratorParams>()
             .init_resource::<GeneratorUniform>()
-            .add_plugins(GeneratorComputePlugin)
+            .add_plugins((GeneratorComputePlugin, GeneratorExportPlugin))
             .add_systems(Startup, setup_generator)
             .add_systems(PostUpdate, (sync_generator_image, sync_uniform).chain());
     }

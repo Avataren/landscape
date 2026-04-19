@@ -20,8 +20,8 @@ use bevy::{
     window::PrimaryWindow,
 };
 use bevy_landscape::{
-    level::load_level, MaterialLibrary, TerrainCamera, TerrainConfig, TerrainDebugPlugin,
-    TerrainPlugin, TerrainSourceDesc,
+    level::load_level, TerrainCamera, TerrainConfig, TerrainDebugPlugin, TerrainPlugin,
+    TerrainSourceDesc,
 };
 use bevy_landscape_clouds::{CloudsConfig, VolumetricCloudsPlugin};
 use bevy_landscape_editor::{AppPreferences, LandscapeEditorPlugin};
