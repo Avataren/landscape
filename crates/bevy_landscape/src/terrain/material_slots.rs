@@ -60,8 +60,8 @@ impl Default for MaterialLibrary {
         ground.procedural.altitude_range_m = Vec2::new(-10_000.0, 10_000.0);
         ground.procedural.slope_range_deg = Vec2::new(0.0, 25.0);
         ground.albedo_path = Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_diff_4k.jpg".into());
-        ground.normal_path = Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_nor_gl_4k.exr".into());
-        ground.orm_path    = Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_rough_4k.exr".into());
+        ground.normal_path = Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_nor_gl_4k.png".into());
+        ground.orm_path    = Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_rough_4k.png".into());
         ground.height_path = Some("textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_disp_4k.png".into());
 
         // Mid-slope: mossy/pitted rock transition zone.
@@ -72,8 +72,8 @@ impl Default for MaterialLibrary {
         mid_rock.procedural.altitude_range_m = Vec2::new(-10_000.0, 10_000.0);
         mid_rock.procedural.slope_range_deg = Vec2::new(18.0, 45.0);
         mid_rock.albedo_path = Some("textures/rock_boulder_cracked_4k.blend/textures/rock_boulder_cracked_diff_4k.jpg".into());
-        mid_rock.normal_path = Some("textures/rock_boulder_cracked_4k.blend/textures/rock_boulder_cracked_nor_gl_4k.exr".into());
-        mid_rock.orm_path    = Some("textures/rock_boulder_cracked_4k.blend/textures/rock_boulder_cracked_rough_4k.exr".into());
+        mid_rock.normal_path = Some("textures/rock_boulder_cracked_4k.blend/textures/rock_boulder_cracked_nor_gl_4k.png".into());
+        mid_rock.orm_path    = Some("textures/rock_boulder_cracked_4k.blend/textures/rock_boulder_cracked_rough_4k.png".into());
         mid_rock.height_path = Some("textures/rock_boulder_cracked_4k.blend/textures/rock_boulder_cracked_disp_4k.png".into());
 
         // Steep cliff faces.
@@ -84,7 +84,7 @@ impl Default for MaterialLibrary {
         cliff.procedural.altitude_range_m = Vec2::new(-10_000.0, 10_000.0);
         cliff.procedural.slope_range_deg = Vec2::new(38.0, 90.0);
         cliff.albedo_path = Some("textures/rock_wall_02_4k.blend/textures/rock_wall_02_diff_4k.jpg".into());
-        cliff.normal_path = Some("textures/rock_wall_02_4k.blend/textures/rock_wall_02_nor_gl_4k.exr".into());
+        cliff.normal_path = Some("textures/rock_wall_02_4k.blend/textures/rock_wall_02_nor_gl_4k.png".into());
         cliff.orm_path    = Some("textures/rock_wall_02_4k.blend/textures/rock_wall_02_rough_4k.jpg".into());
         cliff.height_path = Some("textures/rock_wall_02_4k.blend/textures/rock_wall_02_disp_4k.png".into());
 
@@ -95,8 +95,8 @@ impl Default for MaterialLibrary {
         snow.procedural.altitude_range_m = Vec2::new(600.0, 10_000.0);
         snow.procedural.slope_range_deg = Vec2::new(0.0, 50.0);
         snow.albedo_path = Some("textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_diff_4k.jpg".into());
-        snow.normal_path = Some("textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_nor_gl_4k.exr".into());
-        snow.orm_path    = Some("textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_rough_4k.exr".into());
+        snow.normal_path = Some("textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_nor_gl_4k.png".into());
+        snow.orm_path    = Some("textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_rough_4k.png".into());
         snow.height_path = Some("textures/rock_pitted_mossy_4k.blend/textures/rock_pitted_mossy_disp_4k.png".into());
 
         Self {

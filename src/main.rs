@@ -146,11 +146,11 @@ fn setup_scene(
         // X rotates the light down from horizontal; Y sets the azimuth.
         Transform::from_rotation(Quat::from_euler(EulerRot::XYZ, -0.25, 0.8, 0.0)),
         CascadeShadowConfigBuilder {
-            num_cascades: 4,
+            num_cascades: 3,
             minimum_distance: 1.0,
-            first_cascade_far_bound: 500.0,
-            maximum_distance: 8_000.0,
-            overlap_proportion: 0.2,
+            first_cascade_far_bound: 400.0,
+            maximum_distance: 5_000.0,
+            overlap_proportion: 0.3,
         }
         .build(),
         VolumetricLight,
@@ -266,15 +266,23 @@ fn camera_look(
 
 fn toggle_shadows(
     keys: Res<ButtonInput<KeyCode>>,
+    mut commands: Commands,
     mut enabled: ResMut<ShadowsEnabled>,
-    mut lights: Query<&mut DirectionalLight>,
+    mut lights: Query<(Entity, &mut DirectionalLight)>,
 ) {
     if !keys.just_pressed(KeyCode::F7) {
         return;
     }
     enabled.0 = !enabled.0;
-    for mut light in &mut lights {
+    for (entity, mut light) in &mut lights {
         light.shadows_enabled = enabled.0;
+        // VolumetricLight requires the shadow map to be active; remove it when
+        // shadows are disabled so Bevy doesn't keep the shadow pass alive.
+        if enabled.0 {
+            commands.entity(entity).insert(VolumetricLight);
+        } else {
+            commands.entity(entity).remove::<VolumetricLight>();
+        }
     }
     info!("Shadows {}", if enabled.0 { "ON (F7)" } else { "OFF (F7)" });
 }

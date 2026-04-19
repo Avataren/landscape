@@ -19,12 +19,16 @@ pub fn snap_camera_to_level_grid(camera_xz: Vec2, level_scale: f32) -> IVec2 {
     IVec2::new(gx, gy)
 }
 
-/// Snap the finest clipmap center to a grid that preserves exact L0/L1 nesting.
+/// Snap the finest clipmap center to a grid that preserves exact nesting for
+/// all active LOD levels.
 ///
-/// Without this, the finest level can move by one texel while the next-coarser
-/// hole only moves every two texels, which shifts the center seam by one world
-/// unit on odd positions and can present as a moving "bad chunk" or wall near
-/// the innermost LOD transition.
+/// Each coarser level's center is derived by right-shifting the fine center by
+/// L bits: `centers[L] = fine_center >> L`.  For that to produce the same
+/// world-space position at every level (`centers[L] * scale_L = fine * scale_0`),
+/// the fine center must be a multiple of `2^(active_levels - 1)`.
+///
+/// Masking only bit 0 (`& !1`) is sufficient for 2 levels but leaves residual
+/// seams at deeper LOD ring boundaries when more levels are active.
 pub fn snap_camera_to_nested_clipmap_grid(
     camera_xz: Vec2,
     base_level_scale: f32,
@@ -34,7 +38,6 @@ pub fn snap_camera_to_nested_clipmap_grid(
     if active_levels <= 1 {
         return fine;
     }
-
     IVec2::new(fine.x & !1, fine.y & !1)
 }
 
@@ -174,16 +177,22 @@ mod tests {
     }
 
     #[test]
-    fn nested_snap_preserves_l0_l1_alignment() {
+    fn nested_snap_preserves_all_level_alignment() {
+        // With 4 active levels the fine center must be a multiple of 2^3 = 8.
         let c0 = snap_camera_to_nested_clipmap_grid(Vec2::new(0.1, 0.1), 1.0, 4);
-        let c1 = snap_camera_to_nested_clipmap_grid(Vec2::new(1.9, 1.9), 1.0, 4);
-        let c2 = snap_camera_to_nested_clipmap_grid(Vec2::new(2.1, 2.1), 1.0, 4);
+        let c1 = snap_camera_to_nested_clipmap_grid(Vec2::new(7.9, 7.9), 1.0, 4);
+        let c2 = snap_camera_to_nested_clipmap_grid(Vec2::new(8.1, 8.1), 1.0, 4);
 
         assert_eq!(c0, IVec2::ZERO);
         assert_eq!(c1, IVec2::ZERO);
-        assert_eq!(c2, IVec2::splat(2));
-        assert_eq!(c2.x.rem_euclid(2), 0);
-        assert_eq!(c2.y.rem_euclid(2), 0);
+        assert_eq!(c2, IVec2::splat(8));
+
+        // Right-shifting by L must give the same world-space position at every L.
+        let scale_0 = 1.0_f32;
+        for l in 0..4_i32 {
+            let world_c2 = (c2.x >> l) as f32 * scale_0 * (1 << l) as f32;
+            assert_eq!(world_c2, 8.0, "level {l} world center mismatch");
+        }
     }
 
     #[test]

@@ -124,9 +124,17 @@ fn value_noise(p: vec2<f32>) -> f32 {
     );
 }
 
-// Stochastic (no-tile) texture sample — blends 4 hash-offset copies per grid
-// cell to break up visible tiling without any extra assets.
-fn sample_no_tile(
+// 2×2 rotation matrix (column-major).
+fn rot2(a: f32) -> mat2x2<f32> {
+    let s = sin(a); let c = cos(a);
+    return mat2x2<f32>(c, s, -s, c);
+}
+
+// Stochastic (no-tile) colour sample via per-cell random rotation + offset.
+// Bilinear blend over 4 grid corners; each corner rotates the local UV and
+// applies a random translation so adjacent cells sample different orientations.
+// Gradient vectors are rotated to give correct mip LOD (textureSampleGrad).
+fn sample_color_notile(
     tex:   texture_2d_array<f32>,
     samp:  sampler,
     uv:    vec2<f32>,
@@ -135,15 +143,127 @@ fn sample_no_tile(
     let i  = floor(uv);
     let f  = fract(uv);
     let bl = f * f * (3.0 - 2.0 * f);
-    let c00 = textureSample(tex, samp, uv + hash2(i),                       layer);
-    let c10 = textureSample(tex, samp, uv + hash2(i + vec2<f32>(1.0, 0.0)), layer);
-    let c01 = textureSample(tex, samp, uv + hash2(i + vec2<f32>(0.0, 1.0)), layer);
-    let c11 = textureSample(tex, samp, uv + hash2(i + vec2<f32>(1.0, 1.0)), layer);
-    return mix(mix(c00, c10, bl.x), mix(c01, c11, bl.x), bl.y);
+    let dx = dpdx(uv); let dy = dpdy(uv);
+
+    let c00 = i;
+    let c10 = i + vec2<f32>(1.0, 0.0);
+    let c01 = i + vec2<f32>(0.0, 1.0);
+    let c11 = i + vec2<f32>(1.0, 1.0);
+
+    let R00 = rot2(hash1(c00) * 6.2831853);
+    let R10 = rot2(hash1(c10) * 6.2831853);
+    let R01 = rot2(hash1(c01) * 6.2831853);
+    let R11 = rot2(hash1(c11) * 6.2831853);
+
+    // Rotation-only: no translation offset. Large random offsets (hash2) jump to
+    // completely different texture regions per cell → blotchy colour patches on
+    // high-contrast textures. Rotation alone breaks the periodic grid without
+    // sampling discontinuous colour regions across cell boundaries.
+    let uv00 = R00 * (uv - c00) + c00;
+    let uv10 = R10 * (uv - c10) + c10;
+    let uv01 = R01 * (uv - c01) + c01;
+    let uv11 = R11 * (uv - c11) + c11;
+
+    let s00 = textureSampleGrad(tex, samp, uv00, layer, R00 * dx, R00 * dy);
+    let s10 = textureSampleGrad(tex, samp, uv10, layer, R10 * dx, R10 * dy);
+    let s01 = textureSampleGrad(tex, samp, uv01, layer, R01 * dx, R01 * dy);
+    let s11 = textureSampleGrad(tex, samp, uv11, layer, R11 * dx, R11 * dy);
+
+    let w00 = (1.0 - bl.x) * (1.0 - bl.y);
+    let w10 = bl.x          * (1.0 - bl.y);
+    let w01 = (1.0 - bl.x) * bl.y;
+    let w11 = bl.x          * bl.y;
+    return s00 * w00 + s10 * w10 + s01 * w01 + s11 * w11;
+}
+
+// Stochastic normal-map sample with inverse rotation applied to tangent-space XY.
+// Blending normals sampled at large random offsets causes ts_xy vectors from
+// different surface regions to cancel.  Rotation-based blending avoids this:
+// each cell samples the same local detail at a random orientation, then ts_xy
+// is rotated back by the inverse (= transpose) rotation before accumulation,
+// so all four contributions are in a consistent tangent-space frame.
+fn sample_normal_notile(uv: vec2<f32>, layer: i32) -> vec3<f32> {
+    let i  = floor(uv);
+    let f  = fract(uv);
+    let bl = f * f * (3.0 - 2.0 * f);
+    let dx = dpdx(uv); let dy = dpdy(uv);
+
+    let c00 = i;
+    let c10 = i + vec2<f32>(1.0, 0.0);
+    let c01 = i + vec2<f32>(0.0, 1.0);
+    let c11 = i + vec2<f32>(1.0, 1.0);
+
+    let R00 = rot2(hash1(c00) * 6.2831853);
+    let R10 = rot2(hash1(c10) * 6.2831853);
+    let R01 = rot2(hash1(c01) * 6.2831853);
+    let R11 = rot2(hash1(c11) * 6.2831853);
+
+    let uv00 = R00 * (uv - c00) + c00;
+    let uv10 = R10 * (uv - c10) + c10;
+    let uv01 = R01 * (uv - c01) + c01;
+    let uv11 = R11 * (uv - c11) + c11;
+
+    let w00 = (1.0 - bl.x) * (1.0 - bl.y);
+    let w10 = bl.x          * (1.0 - bl.y);
+    let w01 = (1.0 - bl.x) * bl.y;
+    let w11 = bl.x          * bl.y;
+
+    let rg00 = textureSampleGrad(pbr_normal_arr, pbr_normal_samp, uv00, layer, R00*dx, R00*dy).rg;
+    let rg10 = textureSampleGrad(pbr_normal_arr, pbr_normal_samp, uv10, layer, R10*dx, R10*dy).rg;
+    let rg01 = textureSampleGrad(pbr_normal_arr, pbr_normal_samp, uv01, layer, R01*dx, R01*dy).rg;
+    let rg11 = textureSampleGrad(pbr_normal_arr, pbr_normal_samp, uv11, layer, R11*dx, R11*dy).rg;
+
+    let xy00 = transpose(R00) * (rg00 * 2.0 - 1.0);
+    let xy10 = transpose(R10) * (rg10 * 2.0 - 1.0);
+    let xy01 = transpose(R01) * (rg01 * 2.0 - 1.0);
+    let xy11 = transpose(R11) * (rg11 * 2.0 - 1.0);
+
+    let ts00 = vec3<f32>(xy00, sqrt(max(0.0, 1.0 - dot(xy00, xy00))));
+    let ts10 = vec3<f32>(xy10, sqrt(max(0.0, 1.0 - dot(xy10, xy10))));
+    let ts01 = vec3<f32>(xy01, sqrt(max(0.0, 1.0 - dot(xy01, xy01))));
+    let ts11 = vec3<f32>(xy11, sqrt(max(0.0, 1.0 - dot(xy11, xy11))));
+
+    return normalize(ts00 * w00 + ts10 * w10 + ts01 * w01 + ts11 * w11);
+}
+
+// Triplanar normal-map sample blended in world space.
+// Top (Y) projection uses plain textureSample: on steep faces it has near-
+// zero weight, and XZ stochastic cells stretch into tall vertical strips on
+// near-vertical surfaces. Side (X, Z) projections use stochastic sampling
+// because their UVs lie in the plane of the cliff face — no stretch — so
+// stochastic cells cover the surface uniformly and break tiling properly.
+// Sign-correct the face-normal component so ±X and ±Z faces both work.
+fn sample_triplanar_normal(
+    wpos:  vec3<f32>,
+    n:     vec3<f32>,
+    layer: i32,
+    scale: f32,
+) -> vec3<f32> {
+    var w = pow(abs(n), vec3<f32>(4.0));
+    w /= w.x + w.y + w.z + 1e-6;
+
+    // Top (Y): plain on XZ. tangent=+X, bitangent=+Z → world=(ts.x, ts.z, ts.y)
+    let rg_y = textureSample(pbr_normal_arr, pbr_normal_samp, wpos.xz / scale, layer).rg * 2.0 - 1.0;
+    let b_y  = sqrt(max(0.0, 1.0 - dot(rg_y, rg_y)));
+    let n_y  = normalize(vec3<f32>(rg_y.x, b_y, rg_y.y));
+
+    // Side X: stochastic on ZY. Flip U by sign(n.x) for ±X faces.
+    // tangent=+Z, bitangent=+Y → world=(ts.z·sign, ts.y, ts.x)
+    let ts_x = sample_normal_notile(wpos.zy / scale * vec2<f32>(sign(n.x), 1.0), layer);
+    let n_x  = normalize(vec3<f32>(ts_x.z * sign(n.x), ts_x.y, ts_x.x));
+
+    // Side Z: stochastic on XY. Flip U by sign(n.z) for ±Z faces.
+    // tangent=+X, bitangent=+Y → world=(ts.x, ts.y, ts.z·sign)
+    let ts_z = sample_normal_notile(wpos.xy / scale * vec2<f32>(sign(n.z), 1.0), layer);
+    let n_z  = normalize(vec3<f32>(ts_z.x, ts_z.y, ts_z.z * sign(n.z)));
+
+    return normalize(n_y * w.y + n_x * w.x + n_z * w.z);
 }
 
 // Triplanar albedo sample — no UV stretching on vertical cliff faces.
-// Each face is stochastically sampled to also eliminate repetition on cliffs.
+// Top (Y) projection uses plain textureSample (low weight on steep faces;
+// stochastic XZ cells stretch badly on near-vertical surfaces).
+// Side (X, Z) projections use stochastic sampling to break tiling on cliffs.
 fn sample_triplanar(
     tex:   texture_2d_array<f32>,
     samp:  sampler,
@@ -154,9 +274,9 @@ fn sample_triplanar(
 ) -> vec4<f32> {
     var w = pow(abs(n), vec3<f32>(4.0));
     w /= w.x + w.y + w.z + 1e-6;
-    let cy = sample_no_tile(tex, samp, wpos.xz / scale, layer);
-    let cx = sample_no_tile(tex, samp, wpos.zy / scale, layer);
-    let cz = sample_no_tile(tex, samp, wpos.xy / scale, layer);
+    let cy = textureSample(tex, samp, wpos.xz / scale, layer);
+    let cx = sample_color_notile(tex, samp, wpos.zy / scale, layer);
+    let cz = sample_color_notile(tex, samp, wpos.xy / scale, layer);
     return cy * w.y + cx * w.x + cz * w.z;
 }
 
@@ -198,6 +318,12 @@ fn apply_normal_detail(
     let tangent   = normalize(cross(ref_up, base_n));
     let bitangent = cross(base_n, tangent);
 
+    // Blend from XZ-planar to triplanar on steep slopes.
+    // Triplanar samples all three world-axis projections so vertical cliff
+    // faces get proper detail normals instead of degenerate stretched UVs.
+    let tri_t = smoothstep(25.0, 50.0, slope_deg);
+    let wpos  = vec3<f32>(world_xz.x, world_y, world_xz.y);
+
     var sum_n      = vec3<f32>(0.0);
     var sum_weight = 0.0;
 
@@ -213,19 +339,19 @@ fn apply_normal_detail(
 
         var perturbed: vec3<f32>;
         if slot.uv_scale.z > 0.5 {
-            let fine_scale = max(slot.uv_scale.x, 0.01);
-            let uv  = world_xz / fine_scale;
-            // Plain sample — no-tile blending averages normals from random offsets,
-            // cancelling high-frequency detail. Simple repeat is correct here.
-            let smp = textureSample(pbr_normal_arr, pbr_normal_samp, uv, i32(i)).rgb;
-            // Decode tangent-space XY from Rgba8Unorm [0,1] → signed [-1,1].
-            let ts_xy = smp.rg * 2.0 - 1.0;
-            let ts_z  = sqrt(max(0.0, 1.0 - dot(ts_xy, ts_xy)));
-            // Safe strength amplification: scale ts_xy then re-normalize so ts_z
-            // never reaches 0 (avoids the hemisphere-inversion artifact from the
-            // previous `ts_xy * 2.0` approach which drove ts_z to 0 on steep normals).
-            let ts_n  = normalize(vec3<f32>(ts_xy * 2.0, ts_z));
-            perturbed = normalize(tangent * ts_n.x + bitangent * ts_n.y + base_n * ts_n.z);
+            let fine_scale   = max(slot.uv_scale.x, 0.01);
+            let coarse_scale = fine_scale * max(slot.uv_scale.y, 2.0);
+            let uv   = world_xz / fine_scale;
+            let ts_n = sample_normal_notile(uv, i32(i));
+            let ts_n_amp = normalize(vec3<f32>(ts_n.xy * 2.0, ts_n.z));
+            let n_planar = normalize(tangent * ts_n_amp.x + bitangent * ts_n_amp.y + base_n * ts_n_amp.z);
+
+            if tri_t > 0.001 {
+                let n_tri = sample_triplanar_normal(wpos, base_n, i32(i), fine_scale);
+                perturbed = normalize(mix(n_planar, n_tri, tri_t));
+            } else {
+                perturbed = n_planar;
+            }
         } else {
             perturbed = base_n;
         }
@@ -274,9 +400,10 @@ fn sample_roughness(
 
         var r: f32;
         if slot.uv_scale.z > 0.5 {
-            let fine_scale = max(slot.uv_scale.x, 0.01);
-            let uv = world_xz / fine_scale;
-            r = sample_no_tile(pbr_orm_arr, pbr_orm_samp, uv, i32(i)).g;
+            let fine_scale   = max(slot.uv_scale.x, 0.01);
+            let coarse_scale = fine_scale * max(slot.uv_scale.y, 2.0);
+            let uv = world_xz / coarse_scale;
+            r = sample_color_notile(pbr_orm_arr, pbr_orm_samp, uv, i32(i)).g;
         } else {
             r = 0.5;
         }
@@ -333,14 +460,12 @@ fn sample_pbr_albedo(
             let coarse_scale = fine_scale * max(slot.uv_scale.y, 2.0);
             let uv_fine   = world_xz / fine_scale;
             let uv_coarse = world_xz / coarse_scale;
-            // Fine scale: stochastic sampling eliminates visible repetition.
-            let c_fine   = sample_no_tile(pbr_albedo_arr, pbr_albedo_samp, uv_fine, i32(i)).rgb;
-            let c_coarse = textureSample(pbr_albedo_arr, pbr_albedo_samp, uv_coarse, i32(i)).rgb;
+            let c_fine   = sample_color_notile(pbr_albedo_arr, pbr_albedo_samp, uv_fine, i32(i)).rgb;
+            let c_coarse = sample_color_notile(pbr_albedo_arr, pbr_albedo_samp, uv_coarse, i32(i)).rgb;
             let col_uv   = c_fine * 0.7 + c_coarse * 0.3;
-            // On steep slopes blend in triplanar to avoid UV stretch on cliffs.
             if tri_t > 0.001 {
                 let c_tri = sample_triplanar(pbr_albedo_arr, pbr_albedo_samp,
-                                             wpos, n_macro, i32(i), fine_scale).rgb;
+                                             wpos, n_macro, i32(i), coarse_scale).rgb;
                 col = mix(col_uv, c_tri, tri_t);
             } else {
                 col = col_uv;
@@ -450,10 +575,14 @@ fn baked_normal_at(lod: u32, xz: vec2<f32>) -> vec3<f32> {
 }
 
 fn shading_normal(lod: u32, xz: vec2<f32>) -> vec3<f32> {
+    // Baked normals are computed from full-res f32 data before R16Unorm
+    // quantization, avoiding the staircase artifacts that FD produces on
+    // steep slopes. Unloaded tiles return (0,0) → reconstructs to (0,1,0).
+    // debug_flags.y: show FD normals for comparison.
     if terrain.debug_flags.y > 0.5 {
-        return baked_normal_at(lod, xz);
+        return pixel_normal(lod, xz);
     }
-    return pixel_normal(lod, xz);
+    return baked_normal_at(lod, xz);
 }
 
 // ---------------------------------------------------------------------------
