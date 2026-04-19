@@ -16,12 +16,8 @@ impl Plugin for CloudPanelPlugin {
     }
 }
 
-fn vec4_to_rgba(color: Vec4) -> [f32; 4] {
-    [color.x, color.y, color.z, color.w]
-}
-
-fn rgba_to_vec4(color: [f32; 4]) -> Vec4 {
-    Vec4::from_array(color)
+fn vec4_to_rgb(color: Vec4) -> [f32; 3] {
+    [color.x, color.y, color.z]
 }
 
 pub(crate) fn cloud_panel_system(
@@ -49,18 +45,37 @@ pub(crate) fn cloud_panel_system(
                 .num_columns(2)
                 .spacing([10.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label("Bottom height");
-                    ui.add(egui::Slider::new(
-                        &mut config.cloud_bottom_height,
-                        200.0..=4000.0,
-                    ));
+                    // "Layer base altitude" moves both heights together, preserving
+                    // layer thickness — lets the user lift clouds above tall terrain.
+                    ui.label("Layer base altitude");
+                    let thickness =
+                        (config.cloud_top_height - config.cloud_bottom_height).max(50.0);
+                    let mut base = config.cloud_bottom_height;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut base, 0.0..=16000.0)
+                                .suffix(" m")
+                                .fixed_decimals(0),
+                        )
+                        .changed()
+                    {
+                        config.cloud_bottom_height = base;
+                        config.cloud_top_height = base + thickness;
+                    }
                     ui.end_row();
 
-                    ui.label("Top height");
-                    ui.add(egui::Slider::new(
-                        &mut config.cloud_top_height,
-                        400.0..=6000.0,
-                    ));
+                    ui.label("Layer thickness");
+                    let mut thick = thickness;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut thick, 50.0..=4000.0)
+                                .suffix(" m")
+                                .fixed_decimals(0),
+                        )
+                        .changed()
+                    {
+                        config.cloud_top_height = config.cloud_bottom_height + thick;
+                    }
                     ui.end_row();
 
                     ui.label("Planet radius");
@@ -184,20 +199,16 @@ pub(crate) fn cloud_panel_system(
 
             ui.separator();
             ui.label("Ambient top");
-            let mut ambient_top = vec4_to_rgba(config.cloud_ambient_color_top);
-            if ui
-                .color_edit_button_rgba_unmultiplied(&mut ambient_top)
-                .changed()
-            {
-                config.cloud_ambient_color_top = rgba_to_vec4(ambient_top);
+            let mut ambient_top = vec4_to_rgb(config.cloud_ambient_color_top);
+            if ui.color_edit_button_rgb(&mut ambient_top).changed() {
+                config.cloud_ambient_color_top =
+                    Vec4::new(ambient_top[0], ambient_top[1], ambient_top[2], 0.0);
             }
             ui.label("Ambient bottom");
-            let mut ambient_bottom = vec4_to_rgba(config.cloud_ambient_color_bottom);
-            if ui
-                .color_edit_button_rgba_unmultiplied(&mut ambient_bottom)
-                .changed()
-            {
-                config.cloud_ambient_color_bottom = rgba_to_vec4(ambient_bottom);
+            let mut ambient_bottom = vec4_to_rgb(config.cloud_ambient_color_bottom);
+            if ui.color_edit_button_rgb(&mut ambient_bottom).changed() {
+                config.cloud_ambient_color_bottom =
+                    Vec4::new(ambient_bottom[0], ambient_bottom[1], ambient_bottom[2], 0.0);
             }
         });
     state.open = open;

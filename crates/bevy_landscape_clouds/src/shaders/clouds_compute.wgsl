@@ -244,26 +244,63 @@ fn get_normalized_height(pos: vec3<f32>) -> f32 {
     return (length(pos) - (config.planet_radius + config.cloud_heights.x)) / max(clouds_height, EPSILON);
 }
 
-fn intersect_planet_sphere(ray_dir: vec3<f32>, sample_radius: f32) -> f32 {
-    let y = config.planet_radius * ray_dir.y;
-    let d = y * y + sample_radius * sample_radius + 2.0 * config.planet_radius * sample_radius;
-    return sqrt(max(d, 0.0)) - y;
-}
-
 fn sky_ray_origin() -> vec3<f32> {
     return config.camera_translation - config.wind_displacement + vec3<f32>(0.0, config.planet_radius, 0.0);
 }
 
-fn get_ray(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Ray {
-    var start = intersect_planet_sphere(ray_dir, config.cloud_heights.x);
-    var end = intersect_planet_sphere(ray_dir, config.cloud_heights.y);
-    let inside = intersect_planet_sphere(ray_dir, ray_origin.y - config.planet_radius);
+// Distance from a point at planet-center radius `r` along `ray_dir` to a shell
+// at altitude `alt` above the surface (shell radius = planet_radius + alt).
+// Returns the nearest positive intersection distance, or -1.0 if none exists.
+fn intersect_shell(r: f32, ray_dir_y: f32, alt: f32) -> f32 {
+    let R   = config.planet_radius + alt;
+    let mu  = r * ray_dir_y;
+    let disc = mu * mu + R * R - r * r;
+    if disc < 0.0 { return -1.0; }
+    let sq = sqrt(disc);
+    let t1 = -mu - sq;
+    let t2 = -mu + sq;
+    if t1 >= 0.0 { return t1; }
+    if t2 >= 0.0 { return t2; }
+    return -1.0;
+}
 
-    if start <= inside && inside <= end {
-        if ray_dir.y < 0.0 {
-            end = inside;
+fn get_ray(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Ray {
+    // ray_origin.y approximates the camera's distance from the planet centre
+    // (valid because x,z << planet_radius for any terrain-scale position).
+    let r       = ray_origin.y;
+    let cam_alt = r - config.planet_radius;
+    let miss    = Ray(0.0, 0.0, MAX_CLOUD_DISTANCE + 1.0);
+
+    var start: f32;
+    var end: f32;
+
+    if cam_alt < config.cloud_heights.x {
+        // Camera is below the cloud layer — only upward rays can hit it.
+        if ray_dir.y <= 0.0 { return miss; }
+        let d_bot = intersect_shell(r, ray_dir.y, config.cloud_heights.x);
+        let d_top = intersect_shell(r, ray_dir.y, config.cloud_heights.y);
+        if d_bot < 0.0 || d_top < 0.0 { return miss; }
+        start = d_bot;
+        end   = d_top;
+    } else if cam_alt > config.cloud_heights.y {
+        // Camera is above the cloud layer — only downward rays can hit it.
+        if ray_dir.y >= 0.0 { return miss; }
+        let d_top = intersect_shell(r, ray_dir.y, config.cloud_heights.y);
+        let d_bot = intersect_shell(r, ray_dir.y, config.cloud_heights.x);
+        if d_top < 0.0 || d_bot < 0.0 { return miss; }
+        start = d_top; // top shell is closer when descending
+        end   = d_bot;
+    } else {
+        // Camera is inside the cloud layer — start right here.
+        start = 0.0;
+        if ray_dir.y >= 0.0 {
+            let d_top = intersect_shell(r, ray_dir.y, config.cloud_heights.y);
+            if d_top < 0.0 { return miss; }
+            end = d_top;
         } else {
-            start = inside;
+            let d_bot = intersect_shell(r, ray_dir.y, config.cloud_heights.x);
+            if d_bot < 0.0 { return miss; }
+            end = d_bot;
         }
     }
 
@@ -273,9 +310,11 @@ fn get_ray(ray_origin: vec3<f32>, ray_dir: vec3<f32>) -> Ray {
         smoothstep(-0.02, 0.18, ray_dir.y),
     );
     end = min(end, horizon_limit);
+    if end <= start { return miss; }
+
     let step_distance = (end - start) / f32(max(config.march.x, 1u));
     let hashed_offset = hash13(ray_dir + fract(config.time));
-    let dir_length = start - step_distance * hashed_offset;
+    let dir_length    = start - step_distance * hashed_offset;
     return Ray(step_distance, dir_length, start);
 }
 
