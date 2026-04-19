@@ -136,9 +136,9 @@
   "clouds": {
     "backward_scattering_g": -0.44999998807907104,
     "cloud_ambient_color_bottom": [
-      0.3199999928474426,
-      0.41999998688697815,
-      0.5799999833106995,
+      0.0,
+      0.0,
+      0.0,
       0.0
     ],
     "cloud_ambient_color_top": [
@@ -147,28 +147,28 @@
       0.9200000166893005,
       0.0
     ],
-    "cloud_base_edge_softness": 0.10000000149011612,
-    "cloud_base_scale": 1.5,
-    "cloud_bottom_height": 2500.0,
-    "cloud_bottom_softness": 0.25,
-    "cloud_coverage": 0.4699999988079071,
-    "cloud_density": 0.03999999910593033,
-    "cloud_detail_scale": 20.0,
-    "cloud_detail_strength": 0.4300000071525574,
+    "cloud_base_edge_softness": 0.10999999940395355,
+    "cloud_base_scale": 0.3499999940395355,
+    "cloud_bottom_height": 6000.0,
+    "cloud_bottom_softness": 0.33000001311302185,
+    "cloud_coverage": 0.44999998807907104,
+    "cloud_density": 0.006000000052154064,
+    "cloud_detail_scale": 11.0,
+    "cloud_detail_strength": 0.6200000047683716,
     "cloud_history_blend": 0.8999999761581421,
-    "cloud_min_transmittance": 0.23999999463558197,
+    "cloud_min_transmittance": 0.12999999523162842,
     "cloud_shadow_step_multiply": 1.2999999523162842,
-    "cloud_shadow_step_size": 10.0,
+    "cloud_shadow_step_size": 7.5,
     "cloud_shadow_steps": 6,
-    "cloud_top_height": 3600.0,
+    "cloud_top_height": 8900.0,
     "cloud_view_steps": 64,
     "forward_scattering_g": 0.7200000286102295,
-    "planet_radius": 1050000.0,
+    "planet_radius": 2500000.0,
     "render_resolution": [
       960,
       540
     ],
-    "scattering_lerp": 0.6499999761581421,
+    "scattering_lerp": 0.9800000190734863,
     "sun_color": [
       1.0,
       0.9599999785423279,
@@ -178,7 +178,7 @@
     "wind_velocity": [
       20.0,
       0.0,
-      1.2999999523162842
+      10.5
     ]
   }
 }

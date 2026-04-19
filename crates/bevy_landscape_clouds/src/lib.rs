@@ -65,6 +65,25 @@ fn setup_cloud_layer(
     ));
 }
 
+/// Approximate Rayleigh+Mie atmospheric transmittance for the sun at a given
+/// elevation. `sin_elevation` is the Y component of the normalised sun direction
+/// (= sin of the geometric elevation angle).
+///
+/// Returns an RGB multiplier: near-white at zenith, orange-red at the horizon.
+fn atmospheric_sun_tint(sin_elevation: f32) -> Vec3 {
+    // Optical air mass: how many atmosphere thicknesses the sunlight traverses.
+    // Increases rapidly toward the horizon (1 at zenith, ~38 at horizon).
+    let air_mass = (1.0 / sin_elevation.max(0.025)).min(40.0);
+
+    // Rayleigh extinction coefficients per air-mass unit (λ^-4 dependence).
+    // Tuned to produce visually plausible white→yellow→orange→red progression.
+    Vec3::new(
+        (-0.010 * air_mass).exp(), // red   — least scattered
+        (-0.026 * air_mass).exp(), // green
+        (-0.085 * air_mass).exp(), // blue  — most scattered
+    )
+}
+
 fn sync_cloud_uniforms(
     time: Res<Time>,
     config: Res<CloudsConfig>,
@@ -102,7 +121,7 @@ fn sync_cloud_uniforms(
         config.cloud_detail_strength,
         config.cloud_base_edge_softness,
     );
-    uniform.softness = Vec4::new(config.cloud_bottom_softness, 0.0, 0.0, 0.0);
+    uniform.softness = Vec4::new(config.cloud_bottom_softness, config.cloud_evolution_speed, 0.0, 0.0);
     uniform.ambient_top = config.cloud_ambient_color_top;
     uniform.ambient_bottom = config.cloud_ambient_color_bottom;
     uniform.phase_steps = Vec4::new(
@@ -122,13 +141,20 @@ fn sync_cloud_uniforms(
 
     if let Ok((sun_transform, light)) = sun.single() {
         let toward_sun: Vec3 = (-sun_transform.forward()).into();
-        uniform.sun_direction = toward_sun.normalize_or_zero().extend(0.0);
+        let toward_sun = toward_sun.normalize_or_zero();
+        uniform.sun_direction = toward_sun.extend(0.0);
         let linear = light.color.to_linear();
         let day_factor = (light.illuminance / lux::RAW_SUNLIGHT).clamp(0.0, 1.0);
+
+        // Bevy's DirectionalLight.color is always white; the red/orange sunset
+        // tint lives only in the atmosphere GPU shader. Approximate Rayleigh+Mie
+        // scattering here so cloud lighting matches the sky at low sun angles.
+        let atm = atmospheric_sun_tint(toward_sun.y);
+
         uniform.sun_color = Vec4::new(
-            config.sun_color.x * linear.red * day_factor,
-            config.sun_color.y * linear.green * day_factor,
-            config.sun_color.z * linear.blue * day_factor,
+            config.sun_color.x * linear.red * day_factor * atm.x,
+            config.sun_color.y * linear.green * day_factor * atm.y,
+            config.sun_color.z * linear.blue * day_factor * atm.z,
             day_factor,
         );
         uniform.shadow_params.z = day_factor;

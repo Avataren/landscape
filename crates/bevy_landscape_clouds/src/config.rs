@@ -27,6 +27,8 @@ pub struct CloudsConfig {
     pub scattering_lerp: f32,
     pub wind_velocity: Vec3,
     pub sun_color: Vec4,
+    /// Speed at which cloud shapes morph/evolve over time (0 = frozen, 1 = default).
+    pub cloud_evolution_speed: f32,
 }
 
 impl Default for CloudsConfig {
@@ -56,6 +58,7 @@ impl Default for CloudsConfig {
             scattering_lerp: 0.18,
             wind_velocity: Vec3::new(4.0, 0.0, 1.3),
             sun_color: Vec4::new(1.0, 0.96, 0.92, 1.25),
+            cloud_evolution_speed: 1.0,
         }
     }
 }

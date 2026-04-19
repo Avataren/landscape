@@ -40,12 +40,13 @@ pub(crate) fn sky_panel_system(
     egui::Window::new("Sky / Time of Day")
         .open(&mut state.open)
         .resizable(false)
-        .min_width(300.0)
+        .default_width(640.0)
         .show(ctx, |ui| {
             let h = tod.hours;
             let hh = h as u32;
             let mm = ((h - hh as f32) * 60.0) as u32;
             ui.label(format!("Time: {:02}:{:02}", hh, mm));
+            ui.spacing_mut().slider_width = 580.0;
             ui.add(
                 egui::Slider::new(&mut tod.hours, 0.0_f32..=24.0)
                     .show_value(false)

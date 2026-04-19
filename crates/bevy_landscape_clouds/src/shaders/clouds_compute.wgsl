@@ -201,7 +201,12 @@ fn cloud_map_base(p: vec3<f32>, normalized_height: f32) -> f32 {
 }
 
 fn cloud_map_detail(position: vec3<f32>) -> f32 {
-    let p = position * (0.0016 * config.noise_scales.x * config.noise_scales.y);
+    // Scroll only the Y axis of the 3D Worley lookup: at any fixed world XZ
+    // position the sampled noise slice changes over time, making cloud edges
+    // erode and grow without any horizontal translation.
+    let evo_y = config.softness.y * config.time * 0.4;
+    let p = position * (0.0016 * config.noise_scales.x * config.noise_scales.y)
+          + vec3<f32>(0.0, evo_y, 0.0);
     let p1 = wrap_worley(p);
     let a = textureLoad(
         cloud_worley_texture,
@@ -234,7 +239,16 @@ fn get_cloud_map_density(pos: vec3<f32>, normalized_height: f32, detail_weight: 
         m -= cloud_map_detail(pos) * detail_strength * config.noise_scales.z * detail_weight;
     }
 
-    m = smoothstep(0.0, config.noise_scales.w, m + config.cloud_heights.z - 1.0);
+    // 4D coverage evolution: hash_based_noise(x, t, z) treats time as a
+    // pure independent axis.  Sampling at each world XZ independently means
+    // clouds form/dissipate locally without any directional drift.
+    // The *2-1 centres on zero so there is no mean coverage bias.
+    let evo = config.softness.y;
+    let evo_noise = (hash_based_noise(
+        vec3<f32>(pos.x * 0.00008, config.time * evo * 0.008, pos.z * 0.00007), 4.0,
+    ) * 2.0 - 1.0) * evo * 0.10;
+
+    m = smoothstep(0.0, config.noise_scales.w, m + config.cloud_heights.z - 1.0 + evo_noise);
     m *= linearstep0(config.softness.x, normalized_height);
     return clamp(m * config.cloud_heights.w, 0.0, 1.0);
 }

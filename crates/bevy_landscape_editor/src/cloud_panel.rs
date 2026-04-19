@@ -188,12 +188,19 @@ pub(crate) fn cloud_panel_system(
                     ));
                     ui.end_row();
 
+                    ui.label("Evolution speed");
+                    ui.add(
+                        egui::Slider::new(&mut config.cloud_evolution_speed, 0.0..=10.0)
+                            .fixed_decimals(2),
+                    );
+                    ui.end_row();
+
                     ui.label("Wind X");
-                    ui.add(egui::Slider::new(&mut config.wind_velocity.x, -20.0..=20.0));
+                    ui.add(egui::Slider::new(&mut config.wind_velocity.x, -200.0..=200.0));
                     ui.end_row();
 
                     ui.label("Wind Z");
-                    ui.add(egui::Slider::new(&mut config.wind_velocity.z, -20.0..=20.0));
+                    ui.add(egui::Slider::new(&mut config.wind_velocity.z, -200.0..=200.0));
                     ui.end_row();
                 });
 
