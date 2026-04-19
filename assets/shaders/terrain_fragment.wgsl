@@ -443,6 +443,8 @@ fn sample_pbr_albedo(
 
     var sum_col    = vec3<f32>(0.0);
     var sum_weight = 0.0;
+    var best_col   = fallback;
+    var best_w     = -1.0;
 
     for (var i: u32 = 0u; i < count; i = i + 1u) {
         let slot = terrain.slots[i];
@@ -466,12 +468,17 @@ fn sample_pbr_albedo(
             if tri_t > 0.001 {
                 let c_tri = sample_triplanar(pbr_albedo_arr, pbr_albedo_samp,
                                              wpos, n_macro, i32(i), coarse_scale).rgb;
-                col = mix(col_uv, c_tri, tri_t);
+                col = mix(col_uv, c_tri, tri_t) * slot.tint_vis.rgb;
             } else {
-                col = col_uv;
+                col = col_uv * slot.tint_vis.rgb;
             }
         } else {
             col = slot.tint_vis.rgb;
+        }
+
+        if w > best_w {
+            best_w = w;
+            best_col = col;
         }
 
         sum_col    = sum_col + col * w;
@@ -479,7 +486,7 @@ fn sample_pbr_albedo(
     }
 
     if sum_weight < 1e-4 {
-        return fallback;
+        return best_col;
     }
     return sum_col / sum_weight;
 }
