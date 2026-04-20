@@ -36,6 +36,15 @@ struct NormalParams {
 @group(0) @binding(0) var<uniform> params: GeneratorParams;
 @group(1) @binding(0) var preview_output: texture_storage_2d<rgba32float, read_write>;
 
+// === Preview normalization resources (used by the 3-pass normalized preview) ===
+// binding 6: [min_bits, max_bits] as u32 (IEEE 754 — valid for positive floats)
+// binding 7: raw scalar heights before normalization
+@group(1) @binding(6) var<storage, read_write> minmax_buf: array<atomic<u32>, 2>;
+@group(1) @binding(7) var raw_heights: texture_storage_2d<r32float, read_write>;
+
+var<workgroup> wg_min: atomic<u32>;
+var<workgroup> wg_max: atomic<u32>;
+
 @group(0) @binding(1) var<uniform> export_params: GeneratorParams;
 @group(1) @binding(1) var export_output: texture_storage_2d<r32float, write>;
 
@@ -284,6 +293,97 @@ fn generate(@builtin(global_invocation_id) id: vec3<u32>) {
         color = vec3<f32>(h, h, h);
     } else {
         color = preview_color(uv);
+    }
+
+    textureStore(preview_output, vec2<i32>(id.xy), vec4<f32>(color, 1.0));
+}
+
+// === Normalized preview — 3-pass pipeline ===
+
+// Pass 1: write one raw height value per texel into raw_heights.
+@compute @workgroup_size(8, 8, 1)
+fn preview_generate_raw(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= params.resolution.x || id.y >= params.resolution.y {
+        return;
+    }
+    let res = vec2<f32>(f32(params.resolution.x), f32(params.resolution.y));
+    let uv = (vec2<f32>(f32(id.x), f32(id.y)) + 0.5) / res;
+    let h = terrain_height_for(params, uv);
+    textureStore(raw_heights, vec2<i32>(id.xy), vec4<f32>(h, 0.0, 0.0, 1.0));
+}
+
+// Pass 2: two-level parallel reduction — workgroup shared memory, then one global atomic
+// per workgroup.  minmax_buf must be pre-initialised to [0x7F7FFFFF, 0] on the CPU
+// before dispatch (done in prepare_normalization_bind_group each frame).
+@compute @workgroup_size(8, 8, 1)
+fn preview_reduce_minmax(
+    @builtin(global_invocation_id) id: vec3<u32>,
+    @builtin(local_invocation_index) local_idx: u32,
+) {
+    if local_idx == 0u {
+        atomicStore(&wg_min, 0x7F7FFFFFu);
+        atomicStore(&wg_max, 0u);
+    }
+    workgroupBarrier();
+
+    if id.x < params.resolution.x && id.y < params.resolution.y {
+        let h = textureLoad(raw_heights, vec2<i32>(id.xy)).x;
+        // IEEE 754: positive floats in [0,1] compare correctly as unsigned integers.
+        let bits = bitcast<u32>(h);
+        atomicMin(&wg_min, bits);
+        atomicMax(&wg_max, bits);
+    }
+    workgroupBarrier();
+
+    if local_idx == 0u {
+        atomicMin(&minmax_buf[0], atomicLoad(&wg_min));
+        atomicMax(&minmax_buf[1], atomicLoad(&wg_max));
+    }
+}
+
+// Pass 3: read raw heights, normalise to [0,1] using the global min/max, then write
+// the final display colour (hillshade palette or greyscale) to preview_output.
+@compute @workgroup_size(8, 8, 1)
+fn preview_normalize_display(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= params.resolution.x || id.y >= params.resolution.y {
+        return;
+    }
+
+    let min_h = bitcast<f32>(atomicLoad(&minmax_buf[0]));
+    let max_h = bitcast<f32>(atomicLoad(&minmax_buf[1]));
+    let range = max_h - min_h;
+
+    let h_raw = textureLoad(raw_heights, vec2<i32>(id.xy)).x;
+    let h = select(h_raw, (h_raw - min_h) / range, range > 1e-6);
+
+    var color: vec3<f32>;
+    if params.grayscale != 0u {
+        color = vec3<f32>(h, h, h);
+    } else {
+        // Re-compute finite-difference neighbours for hillshading using raw (unnormalised)
+        // heights so the gradient magnitude is unchanged; use normalised h for palette only.
+        let res = vec2<f32>(f32(params.resolution.x), f32(params.resolution.y));
+        let texel = 1.0 / res;
+        let uv = (vec2<f32>(f32(id.x), f32(id.y)) + 0.5) / res;
+
+        let hx0 = terrain_height_for(params, uv - vec2<f32>(texel.x, 0.0));
+        let hx1 = terrain_height_for(params, uv + vec2<f32>(texel.x, 0.0));
+        let hy0 = terrain_height_for(params, uv - vec2<f32>(0.0, texel.y));
+        let hy1 = terrain_height_for(params, uv + vec2<f32>(0.0, texel.y));
+
+        let dx = (hx1 - hx0) * 4.6;
+        let dy = (hy1 - hy0) * 4.6;
+        let normal = normalize(vec3<f32>(-dx, 0.48, -dy));
+        let light_dir = normalize(vec3<f32>(-0.62, 0.74, 0.28));
+
+        let diffuse = max(dot(normal, light_dir), 0.0);
+        let ambient = 0.24 + 0.34 * (1.0 - normal.y);
+        let ridge_boost = smoothstep(0.12, 0.78, 1.0 - normal.y) * 0.30;
+        let shade = pow(saturate(ambient + diffuse * 0.78 + ridge_boost), 0.88);
+
+        let base = preview_palette(h);
+        let height_boost = smoothstep(0.22, 0.92, h) * 0.12;
+        color = clamp(base * shade + vec3<f32>(height_boost), vec3<f32>(0.0), vec3<f32>(1.0));
     }
 
     textureStore(preview_output, vec2<i32>(id.xy), vec4<f32>(color, 1.0));
