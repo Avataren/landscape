@@ -55,10 +55,14 @@ fn remap01(v: f32) -> f32 {
     return saturate(v * 0.5 + 0.5);
 }
 
-fn hash22(p: vec2<f32>) -> vec2<f32> {
-    var p3 = fract(vec3<f32>(p.xyx) * vec3<f32>(0.1031, 0.1030, 0.0973));
-    p3 += dot(p3, p3.yzx + 33.33);
-    return fract(vec2<f32>(p3.x + p3.y, p3.x + p3.z) * p3.zy);
+// IQ-style gradient hash: symmetric treatment of both x and y.
+// Uses sin() for reliable cross-platform consistency.
+fn hash2(p: vec2<f32>) -> vec2<f32> {
+    let q = vec2<f32>(
+        dot(p, vec2<f32>(127.1, 311.7)),
+        dot(p, vec2<f32>(269.5, 183.3)),
+    );
+    return fract(sin(q) * 43758.5453) * 2.0 - 1.0;
 }
 
 fn gradient_noise(p: vec2<f32>) -> f32 {
@@ -66,17 +70,18 @@ fn gradient_noise(p: vec2<f32>) -> f32 {
     let f = fract(p);
     let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
 
-    let ga = hash22(i + vec2<f32>(0.0, 0.0)) * 2.0 - 1.0;
-    let gb = hash22(i + vec2<f32>(1.0, 0.0)) * 2.0 - 1.0;
-    let gc = hash22(i + vec2<f32>(0.0, 1.0)) * 2.0 - 1.0;
-    let gd = hash22(i + vec2<f32>(1.0, 1.0)) * 2.0 - 1.0;
+    let a = dot(hash2(i + vec2<f32>(0.0, 0.0)), f - vec2<f32>(0.0, 0.0));
+    let b = dot(hash2(i + vec2<f32>(1.0, 0.0)), f - vec2<f32>(1.0, 0.0));
+    let c = dot(hash2(i + vec2<f32>(0.0, 1.0)), f - vec2<f32>(0.0, 1.0));
+    let d = dot(hash2(i + vec2<f32>(1.0, 1.0)), f - vec2<f32>(1.0, 1.0));
 
-    let va = dot(ga, f - vec2<f32>(0.0, 0.0));
-    let vb = dot(gb, f - vec2<f32>(1.0, 0.0));
-    let vc = dot(gc, f - vec2<f32>(0.0, 1.0));
-    let vd = dot(gd, f - vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
 
-    return mix(mix(va, vb, u.x), mix(vc, vd, u.x), u.y);
+// Domain rotation between fBM octaves breaks axis-aligned grid patterns.
+// ~36.87° rotation (3-4-5 triangle), as recommended by IQ.
+fn rot2(p: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(0.8 * p.x - 0.6 * p.y, 0.6 * p.x + 0.8 * p.y);
 }
 
 fn fbm(base: vec2<f32>, octaves: u32, lac: f32, g: f32) -> f32 {
@@ -86,15 +91,11 @@ fn fbm(base: vec2<f32>, octaves: u32, lac: f32, g: f32) -> f32 {
 
     for (var i = 0u; i < octaves; i++) {
         value += amplitude * gradient_noise(pos);
-        pos *= lac;
+        pos = rot2(pos) * lac;
         amplitude *= g;
     }
 
     return value;
-}
-
-fn ridged_noise(p: vec2<f32>) -> f32 {
-    return 1.0 - abs(gradient_noise(p));
 }
 
 fn ridged_fbm(base: vec2<f32>, octaves: u32, lac: f32, g: f32) -> f32 {
@@ -104,9 +105,9 @@ fn ridged_fbm(base: vec2<f32>, octaves: u32, lac: f32, g: f32) -> f32 {
     var pos = base;
 
     for (var i = 0u; i < octaves; i++) {
-        value += amplitude * ridged_noise(pos);
+        value += amplitude * (1.0 - abs(gradient_noise(pos)));
         total += amplitude;
-        pos *= lac;
+        pos = rot2(pos) * lac;
         amplitude *= g;
     }
 
@@ -141,7 +142,7 @@ fn erosion_shaped_fbm(base: vec2<f32>, octaves: u32, lac: f32, g: f32, erosion: 
         );
         value += amplitude * n * attenuation;
 
-        pos *= lac;
+        pos = rot2(pos) * lac;
         amplitude *= g;
     }
 
@@ -183,9 +184,7 @@ fn terrain_height_for(params_ref: GeneratorParams, uv: vec2<f32>) -> f32 {
     let detail = erosion_shaped_fbm(detail_pos, octaves, lacunarity, gain, erosion);
 
     var ridge_octaves = 1u;
-    if octaves > 1u {
-        ridge_octaves = octaves - 1u;
-    }
+    if octaves > 1u { ridge_octaves = octaves - 1u; }
     let ridges = ridged_fbm(
         detail_pos * 0.85 + vec2<f32>(17.13, 17.13),
         ridge_octaves,
