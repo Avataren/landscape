@@ -19,6 +19,7 @@ struct GeneratorParams {
     warp_frequency:      f32,
     warp_strength:       f32,
     erosion_strength:    f32,
+    grayscale:           u32,
 }
 
 struct DownsampleParams {
@@ -277,7 +278,14 @@ fn generate(@builtin(global_invocation_id) id: vec3<u32>) {
 
     let res = vec2<f32>(f32(params.resolution.x), f32(params.resolution.y));
     let uv = (vec2<f32>(f32(id.x), f32(id.y)) + vec2<f32>(0.5, 0.5)) / res;
-    let color = preview_color(uv);
+
+    var color: vec3<f32>;
+    if params.grayscale != 0u {
+        let h = terrain_height_for(params, uv);
+        color = vec3<f32>(h, h, h);
+    } else {
+        color = preview_color(uv);
+    }
 
     textureStore(preview_output, vec2<i32>(id.xy), vec4<f32>(color, 1.0));
 }

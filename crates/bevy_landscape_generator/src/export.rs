@@ -31,6 +31,8 @@ use bevy::{
 
 use crate::params::GeneratorParams;
 
+use image::{ImageBuffer, Luma};
+
 const TILE_SIZE: u32 = 256;
 const WORKGROUP_SIZE: u32 = 8;
 pub const MAX_EXPORT_RESOLUTION: u32 = 16_384;
@@ -117,6 +119,9 @@ struct ExportGeneratorUniform {
     warp_frequency: f32,
     warp_strength: f32,
     erosion_strength: f32,
+    /// Must be present to match the WGSL `GeneratorParams` struct layout.
+    /// Always 0 for the export pipeline — grayscale is a preview-only concept.
+    grayscale: u32,
 }
 
 impl ExportGeneratorUniform {
@@ -136,6 +141,7 @@ impl ExportGeneratorUniform {
             warp_frequency: params.warp_frequency,
             warp_strength: params.warp_strength,
             erosion_strength: params.erosion_strength,
+            grayscale: 0,
         }
     }
 }
@@ -1044,8 +1050,38 @@ fn write_export_tiles(
         .ok();
     }
 
+    save_height_png(
+        &heights[0],
+        params.export_resolution as usize,
+        &output_dir.join("heightmap_L0.png"),
+        log,
+    );
+
     log.send(format!("Done → '{}'", output_dir.display())).ok();
     Ok(())
+}
+
+fn save_height_png(level_bytes: &[u8], resolution: usize, path: &Path, log: &mpsc::Sender<String>) {
+    let pixels: Vec<u16> = level_bytes
+        .chunks_exact(4)
+        .map(|b| {
+            let h = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            (h.clamp(0.0, 1.0) * 65535.0).round() as u16
+        })
+        .collect();
+
+    let img = ImageBuffer::<Luma<u16>, Vec<u16>>::from_raw(
+        resolution as u32,
+        resolution as u32,
+        pixels,
+    );
+    match img {
+        Some(buf) => match buf.save(path) {
+            Ok(()) => log.send(format!("Saved heightmap PNG → '{}'", path.display())).ok(),
+            Err(e) => log.send(format!("Warning: failed to save heightmap PNG: {e}")).ok(),
+        },
+        None => log.send("Warning: could not create heightmap PNG buffer".into()).ok(),
+    };
 }
 
 fn prepare_output_dir(output_dir: &Path) -> Result<(), String> {

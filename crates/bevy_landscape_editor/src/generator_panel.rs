@@ -86,9 +86,11 @@ fn generator_panel_system(
 
     let ctx = contexts.ctx_mut()?;
 
+    let mut open = panel.open;
     egui::Window::new("Terrain Generator")
         .resizable(true)
         .default_size([520.0, 700.0])
+        .open(&mut open)
         .show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Noise Parameters");
@@ -277,9 +279,21 @@ fn generator_panel_system(
                 ui.separator();
 
                 if let Some(tex_id) = panel.preview_id {
+                    ui.horizontal(|ui| {
+                        let mut grayscale = params.grayscale != 0;
+                        if ui.toggle_value(&mut grayscale, "🔲 Grayscale").on_hover_text(
+                            "Switch between pure heightmap (grayscale) and colour hillshade to inspect for banding artefacts."
+                        ).changed() {
+                            params.grayscale = grayscale as u32;
+                        }
+                    });
                     let avail = ui.available_width().min(480.0);
                     ui.add(egui::Image::new((tex_id, egui::Vec2::splat(avail))));
-                    ui.small("Contrast-enhanced hillshade preview");
+                    if params.grayscale != 0 {
+                        ui.small("Raw heightmap — linear [0, 1]");
+                    } else {
+                        ui.small("Contrast-enhanced hillshade preview");
+                    }
                 } else {
                     ui.label("(waiting for GPU texture…)");
                 }
@@ -321,6 +335,7 @@ fn generator_panel_system(
                 }
             });
         });
+    panel.open = open;
 
     Ok(())
 }

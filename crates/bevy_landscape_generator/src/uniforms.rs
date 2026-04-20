@@ -9,11 +9,12 @@ use bevy::{
 use crate::params::GeneratorParams;
 
 /// GPU-side uniform mirroring the WGSL `GeneratorParams` struct.
-/// Layout (64 bytes, 4 × 16-byte rows):
+/// Layout (80 bytes, 5 × 16-byte rows):
 ///   row 0: resolution(8) + octaves(4) + seed(4)
 ///   row 1: offset(8) + frequency(4) + lacunarity(4)
 ///   row 2: gain(4) + height_scale(4) + continent_frequency(4) + continent_strength(4)
 ///   row 3: ridge_strength(4) + warp_frequency(4) + warp_strength(4) + erosion_strength(4)
+///   row 4: grayscale(4) + pad(12)
 #[derive(Clone, Resource, ExtractResource, ShaderType)]
 pub(crate) struct GeneratorUniform {
     pub resolution: UVec2,
@@ -30,6 +31,7 @@ pub(crate) struct GeneratorUniform {
     pub warp_frequency: f32,
     pub warp_strength: f32,
     pub erosion_strength: f32,
+    pub grayscale: u32,
 }
 
 impl Default for GeneratorUniform {
@@ -55,6 +57,7 @@ impl GeneratorUniform {
             warp_frequency: p.warp_frequency,
             warp_strength: p.warp_strength,
             erosion_strength: p.erosion_strength,
+            grayscale: p.grayscale,
         }
     }
 }

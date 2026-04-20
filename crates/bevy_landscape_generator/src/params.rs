@@ -22,6 +22,10 @@ pub struct GeneratorParams {
     pub world_scale: f32,
     pub offset: Vec2,
     pub seed: u32,
+    /// When non-zero the GPU preview renders a pure grayscale heightmap instead
+    /// of the colour hillshade, making banding / artefacts easier to spot.
+    #[serde(default)]
+    pub grayscale: u32,
 }
 
 impl Default for GeneratorParams {
@@ -43,6 +47,7 @@ impl Default for GeneratorParams {
             world_scale: 2.0,
             offset: Vec2::ZERO,
             seed: 42,
+            grayscale: 0,
         }
     }
 }
