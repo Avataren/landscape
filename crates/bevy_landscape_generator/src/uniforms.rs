@@ -6,6 +6,11 @@ use bevy::{
     },
 };
 
+/// Monotonically increasing counter, incremented each time `GeneratorParams` changes.
+/// Extracted to the render world so nodes can skip re-dispatch when nothing changed.
+#[derive(Clone, Default, Resource, ExtractResource)]
+pub(crate) struct GeneratorParamGeneration(pub u64);
+
 use crate::params::GeneratorParams;
 
 /// GPU-side uniform mirroring the WGSL `GeneratorParams` struct.

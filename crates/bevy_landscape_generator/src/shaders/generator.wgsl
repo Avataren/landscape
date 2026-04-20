@@ -190,7 +190,7 @@ fn terrain_height_for(params_ref: GeneratorParams, uv: vec2<f32>) -> f32 {
     let gain = clamp(params_ref.gain, 0.05, 0.95);
     let erosion = saturate(params_ref.erosion_strength);
 
-    let detail = erosion_shaped_fbm(detail_pos, octaves, lacunarity, gain, erosion);
+    let detail = fbm(detail_pos, octaves, lacunarity, gain);
 
     var ridge_octaves = 1u;
     if octaves > 1u { ridge_octaves = octaves - 1u; }
@@ -214,17 +214,6 @@ fn terrain_height_for(params_ref: GeneratorParams, uv: vec2<f32>) -> f32 {
         continental_height,
         saturate(params_ref.continent_strength),
     );
-
-    let channels = ridged_fbm(
-        (detail_uv + vec2<f32>(-13.5, 21.4)) * (params_ref.frequency * 0.55 + 0.35),
-        CHANNEL_OCTAVES,
-        2.05,
-        0.55,
-    );
-    let channel_mask = channels * channels;
-    let channel_mask_pow4 = channel_mask * channel_mask;
-    let highlands = smoothstep(0.28, 0.82, mountainous);
-    height -= erosion * channel_mask_pow4 * highlands * (0.03 + 0.11 * continent);
 
     return saturate(height);
 }
@@ -415,6 +404,49 @@ fn downsample_height(@builtin(global_invocation_id) id: vec3<u32>) {
     let h11 = sample_height_texel(downsample_src, base + vec2<i32>(1, 1), downsample_params.src_resolution);
     let h = (h00 + h10 + h01 + h11) * 0.25;
 
+    textureStore(downsample_dst, vec2<i32>(id.xy), vec4<f32>(h, 0.0, 0.0, 1.0));
+}
+
+// 3×3 box blur — applied N times to L0 before the downsample chain.
+// Uses downsample bind group layout: src_resolution == dst_resolution.
+@compute @workgroup_size(8, 8, 1)
+fn smooth_height(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= downsample_params.src_resolution.x || id.y >= downsample_params.src_resolution.y {
+        return;
+    }
+    let coord = vec2<i32>(id.xy);
+    let res = downsample_params.src_resolution;
+    var sum = 0.0;
+    for (var dy = -1i; dy <= 1i; dy++) {
+        for (var dx = -1i; dx <= 1i; dx++) {
+            sum += sample_height_texel(downsample_src, coord + vec2<i32>(dx, dy), res);
+        }
+    }
+    textureStore(downsample_dst, coord, vec4<f32>(sum / 9.0, 0.0, 0.0, 1.0));
+}
+
+// Bilinear resample of eroded raw_heights into the export L0 image.
+// Handles any src/dst resolution ratio: 1:1 copy, downsample, or upsample.
+// Uses the same downsample bind group layout (bindings 2/3).
+@compute @workgroup_size(8, 8, 1)
+fn blit_eroded(@builtin(global_invocation_id) id: vec3<u32>) {
+    if id.x >= downsample_params.dst_resolution.x || id.y >= downsample_params.dst_resolution.y {
+        return;
+    }
+    // Map output texel centre to source space.
+    let src_pos = (vec2<f32>(f32(id.x), f32(id.y)) + 0.5)
+        * vec2<f32>(f32(downsample_params.src_resolution.x), f32(downsample_params.src_resolution.y))
+        / vec2<f32>(f32(downsample_params.dst_resolution.x), f32(downsample_params.dst_resolution.y))
+        - 0.5;
+    let x0 = i32(floor(src_pos.x));
+    let y0 = i32(floor(src_pos.y));
+    let fx = fract(src_pos.x);
+    let fy = fract(src_pos.y);
+    let h00 = sample_height_texel(downsample_src, vec2<i32>(x0,     y0    ), downsample_params.src_resolution);
+    let h10 = sample_height_texel(downsample_src, vec2<i32>(x0 + 1, y0    ), downsample_params.src_resolution);
+    let h01 = sample_height_texel(downsample_src, vec2<i32>(x0,     y0 + 1), downsample_params.src_resolution);
+    let h11 = sample_height_texel(downsample_src, vec2<i32>(x0 + 1, y0 + 1), downsample_params.src_resolution);
+    let h = mix(mix(h00, h10, fx), mix(h01, h11, fx), fy);
     textureStore(downsample_dst, vec2<i32>(id.xy), vec4<f32>(h, 0.0, 0.0, 1.0));
 }
 

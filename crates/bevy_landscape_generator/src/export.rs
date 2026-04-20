@@ -29,6 +29,8 @@ use bevy::{
     },
 };
 
+use crate::erosion_params::ErosionParams;
+use crate::images::NormalizationImage;
 use crate::params::GeneratorParams;
 
 use image::{ImageBuffer, Luma};
@@ -101,6 +103,9 @@ struct ActiveGeneratorExport {
     height_images: Vec<Handle<Image>>,
     normal_images: Vec<Handle<Image>>,
     gpu_dispatched: Arc<AtomicBool>,
+    use_eroded: bool,
+    /// Ping-pong buffer for smooth passes (same resolution as L0, None if smooth_passes==0).
+    smooth_tmp: Option<Handle<Image>>,
 }
 
 #[derive(Clone, ShaderType)]
@@ -182,7 +187,12 @@ struct NormalPassResources {
 #[derive(Resource)]
 struct GeneratorExportRenderResources {
     generation: u64,
-    generate_pass: GeneratePassResources,
+    /// None when erosion is active (blit_eroded_pass fills L0 instead).
+    generate_pass: Option<GeneratePassResources>,
+    /// Some when use_eroded: copies raw_heights → height_images[0].
+    blit_eroded_pass: Option<DownsamplePassResources>,
+    /// Ping-pong smooth passes: alternates (h0→tmp, tmp→h0) × smooth_passes.
+    smooth_passes: Vec<[DownsamplePassResources; 2]>,
     downsample_passes: Vec<DownsamplePassResources>,
     normal_passes: Vec<NormalPassResources>,
 }
@@ -197,6 +207,8 @@ struct GeneratorExportPipeline {
     normal_image_layout: BindGroupLayoutDescriptor,
     generate_pipeline: CachedComputePipelineId,
     downsample_pipeline: CachedComputePipelineId,
+    blit_eroded_pipeline: CachedComputePipelineId,
+    smooth_pipeline: CachedComputePipelineId,
     normal_pipeline: CachedComputePipelineId,
 }
 
@@ -332,6 +344,30 @@ impl FromWorld for GeneratorExportPipeline {
                 entry_point: Some("downsample_height".into()),
                 ..default()
             });
+        let blit_eroded_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("landscape_generator_export_blit_eroded".into()),
+                layout: vec![
+                    downsample_uniform_layout.clone(),
+                    downsample_image_layout.clone(),
+                ],
+                shader: shader.clone(),
+                shader_defs: vec![],
+                entry_point: Some("blit_eroded".into()),
+                ..default()
+            });
+        let smooth_pipeline =
+            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+                label: Some("landscape_generator_export_smooth".into()),
+                layout: vec![
+                    downsample_uniform_layout.clone(),
+                    downsample_image_layout.clone(),
+                ],
+                shader: shader.clone(),
+                shader_defs: vec![],
+                entry_point: Some("smooth_height".into()),
+                ..default()
+            });
         let normal_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("landscape_generator_export_normals".into()),
             layout: vec![normal_uniform_layout.clone(), normal_image_layout.clone()],
@@ -350,6 +386,8 @@ impl FromWorld for GeneratorExportPipeline {
             normal_image_layout,
             generate_pipeline,
             downsample_pipeline,
+            blit_eroded_pipeline,
+            smooth_pipeline,
             normal_pipeline,
         }
     }
@@ -381,19 +419,16 @@ impl Node for GeneratorExportNode {
     fn update(&mut self, world: &mut World) {
         let pipeline = world.resource::<GeneratorExportPipeline>();
         let pipeline_cache = world.resource::<PipelineCache>();
+        let ok = |id| matches!(
+            pipeline_cache.get_compute_pipeline_state(id),
+            CachedPipelineState::Ok(_)
+        );
         if matches!(self.state, GeneratorExportNodeState::Loading)
-            && matches!(
-                pipeline_cache.get_compute_pipeline_state(pipeline.generate_pipeline),
-                CachedPipelineState::Ok(_)
-            )
-            && matches!(
-                pipeline_cache.get_compute_pipeline_state(pipeline.downsample_pipeline),
-                CachedPipelineState::Ok(_)
-            )
-            && matches!(
-                pipeline_cache.get_compute_pipeline_state(pipeline.normal_pipeline),
-                CachedPipelineState::Ok(_)
-            )
+            && ok(pipeline.generate_pipeline)
+            && ok(pipeline.downsample_pipeline)
+            && ok(pipeline.blit_eroded_pipeline)
+            && ok(pipeline.smooth_pipeline)
+            && ok(pipeline.normal_pipeline)
         {
             self.state = GeneratorExportNodeState::Ready;
         }
@@ -444,8 +479,10 @@ impl Node for GeneratorExportNode {
         // gives no visibility guarantee between dispatches — the downsample
         // for L1 could read stale L0 data, causing height discontinuities at
         // LOD ring boundaries (the "chunk seam" crack).
-        let resolution = active_export.params.export_resolution;
-        {
+        let resolution = active_export.params.resolution;
+
+        // When erosion is inactive, generate the heightmap from scratch.
+        if let Some(gen) = &resources.generate_pass {
             let mut pass =
                 render_context
                     .command_encoder()
@@ -454,13 +491,65 @@ impl Node for GeneratorExportNode {
                         ..default()
                     });
             pass.set_pipeline(generate_pipeline);
-            pass.set_bind_group(0, &resources.generate_pass.uniform_bind_group, &[]);
-            pass.set_bind_group(1, &resources.generate_pass.image_bind_group, &[]);
+            pass.set_bind_group(0, &gen.uniform_bind_group, &[]);
+            pass.set_bind_group(1, &gen.image_bind_group, &[]);
             pass.dispatch_workgroups(
                 resolution.div_ceil(WORKGROUP_SIZE),
                 resolution.div_ceil(WORKGROUP_SIZE),
                 1,
             );
+        }
+
+        // When erosion is active, blit raw_heights → height_images[0].
+        if let Some(blit) = &resources.blit_eroded_pass {
+            let Some(blit_pipeline) =
+                pipeline_cache.get_compute_pipeline(pipeline.blit_eroded_pipeline)
+            else {
+                return Ok(());
+            };
+            let mut pass =
+                render_context
+                    .command_encoder()
+                    .begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("generator_export_blit_eroded"),
+                        ..default()
+                    });
+            pass.set_pipeline(blit_pipeline);
+            pass.set_bind_group(0, &blit.uniform_bind_group, &[]);
+            pass.set_bind_group(1, &blit.image_bind_group, &[]);
+            pass.dispatch_workgroups(
+                resolution.div_ceil(WORKGROUP_SIZE),
+                resolution.div_ceil(WORKGROUP_SIZE),
+                1,
+            );
+        }
+
+        // N smooth passes: each pair is (h0→tmp, tmp→h0) so h0 always holds the result.
+        if !resources.smooth_passes.is_empty() {
+            let Some(smooth_pipeline) =
+                pipeline_cache.get_compute_pipeline(pipeline.smooth_pipeline)
+            else {
+                return Ok(());
+            };
+            for pair in &resources.smooth_passes {
+                for smooth in pair {
+                    let mut pass =
+                        render_context
+                            .command_encoder()
+                            .begin_compute_pass(&ComputePassDescriptor {
+                                label: Some("generator_export_smooth"),
+                                ..default()
+                            });
+                    pass.set_pipeline(smooth_pipeline);
+                    pass.set_bind_group(0, &smooth.uniform_bind_group, &[]);
+                    pass.set_bind_group(1, &smooth.image_bind_group, &[]);
+                    pass.dispatch_workgroups(
+                        resolution.div_ceil(WORKGROUP_SIZE),
+                        resolution.div_ceil(WORKGROUP_SIZE),
+                        1,
+                    );
+                }
+            }
         }
 
         // One pass per downsample level: each reads the previous level's output
@@ -538,6 +627,10 @@ impl Plugin for GeneratorExportPlugin {
 
         let mut render_graph = render_app.world_mut().resource_mut::<RenderGraph>();
         render_graph.add_node(GeneratorExportLabel, GeneratorExportNode::default());
+        // Ensure the export node runs AFTER the full Raw → Erosion → Norm chain so
+        // that raw_heights contains the current eroded heights (not the just-regenerated
+        // uneroded values written by GeneratorRawLabel at the start of each frame).
+        render_graph.add_node_edge(crate::compute::GeneratorNormLabel, GeneratorExportLabel);
         render_graph.add_node_edge(GeneratorExportLabel, bevy::render::graph::CameraDriverLabel);
     }
 
@@ -553,6 +646,7 @@ fn start_generator_export(
     mut runtime: ResMut<GeneratorExportRuntime>,
     mut state: ResMut<GeneratorExportState>,
     mut images: ResMut<Assets<Image>>,
+    erosion_params: Option<Res<ErosionParams>>,
 ) {
     for request in requests.read() {
         if runtime.job.is_some() {
@@ -564,15 +658,15 @@ fn start_generator_export(
 
         state.log.clear();
         let mut params = request.params.clone();
-        if params.export_resolution > MAX_EXPORT_RESOLUTION {
+        if params.resolution > MAX_EXPORT_RESOLUTION {
             state.log.push(format!(
                 "Export resolution {} exceeds the current 16k cap; clamping to {}.",
-                params.export_resolution, MAX_EXPORT_RESOLUTION
+                params.resolution, MAX_EXPORT_RESOLUTION
             ));
-            params.export_resolution = MAX_EXPORT_RESOLUTION;
+            params.resolution = MAX_EXPORT_RESOLUTION;
         }
 
-        let levels = match baked_level_count(params.export_resolution) {
+        let levels = match baked_level_count(params.resolution) {
             Ok(levels) => levels,
             Err(err) => {
                 state.log.push(format!("Export failed: {err}"));
@@ -588,20 +682,25 @@ fn start_generator_export(
         let generation = runtime.next_generation;
         let gpu_dispatched = Arc::new(AtomicBool::new(false));
 
+        let use_eroded = erosion_params.as_ref().map(|p| p.enabled).unwrap_or(false);
+
         let mut height_images = Vec::with_capacity(levels as usize);
         let mut normal_images = Vec::with_capacity(levels as usize);
         for lod in 0..levels {
-            let resolution = params.export_resolution >> lod;
-            height_images.push(build_export_image(
-                &mut images,
-                resolution,
-                TextureFormat::R32Float,
-            ));
-            normal_images.push(build_export_image(
-                &mut images,
-                resolution,
-                TextureFormat::Rgba8Snorm,
-            ));
+            let resolution = params.resolution >> lod;
+            height_images.push(build_export_image(&mut images, resolution, TextureFormat::R32Float));
+            normal_images.push(build_export_image(&mut images, resolution, TextureFormat::Rgba8Snorm));
+        }
+
+        // Ping-pong buffer for smooth passes (same resolution as L0).
+        let smooth_tmp = if params.smooth_passes > 0 {
+            Some(build_export_image(&mut images, params.resolution, TextureFormat::R32Float))
+        } else {
+            None
+        };
+
+        if use_eroded {
+            state.log.push("Erosion active — exporting eroded terrain.".into());
         }
 
         state.log.push(format!(
@@ -620,6 +719,8 @@ fn start_generator_export(
             height_images: height_images.clone(),
             normal_images: normal_images.clone(),
             gpu_dispatched: gpu_dispatched.clone(),
+            use_eroded,
+            smooth_tmp: smooth_tmp.clone(),
         });
 
         runtime.job = Some(GeneratorExportJob {
@@ -656,7 +757,7 @@ fn begin_generator_readback(
         .push("GPU bake finished; reading back baked levels…".into());
 
     for lod in 0..job.levels {
-        let resolution = job.params.export_resolution >> lod;
+        let resolution = job.params.resolution >> lod;
         commands.spawn((
             PendingGeneratorReadback {
                 generation: job.generation,
@@ -774,6 +875,7 @@ fn prepare_export_bind_groups(
     render_device: Res<RenderDevice>,
     render_queue: Res<RenderQueue>,
     gpu_images: Res<RenderAssets<GpuImage>>,
+    norm_image: Option<Res<NormalizationImage>>,
 ) {
     let Some(active_export) = active_export else {
         if existing.is_some() {
@@ -793,21 +895,116 @@ fn prepare_export_bind_groups(
         return;
     };
 
-    let mut generate_uniform = UniformBuffer::from(ExportGeneratorUniform::from_params(
-        &active_export.params,
-        active_export.params.export_resolution,
-    ));
-    generate_uniform.write_buffer(&render_device, &render_queue);
-    let generate_uniform_bind_group = render_device.create_bind_group(
-        None,
-        &pipeline_cache.get_bind_group_layout(&pipeline.generate_uniform_layout),
-        &BindGroupEntries::with_indices(((1, generate_uniform.binding().unwrap()),)),
-    );
-    let generate_image_bind_group = render_device.create_bind_group(
-        None,
-        &pipeline_cache.get_bind_group_layout(&pipeline.generate_image_layout),
-        &BindGroupEntries::with_indices(((1, &l0_height.texture_view),)),
-    );
+    // === blit_eroded pass: raw_heights → height_images[0] ===
+    let blit_eroded_pass = if active_export.use_eroded {
+        let Some(norm) = norm_image.as_ref() else {
+            return;
+        };
+        let Some(raw_gpu) = gpu_images.get(&norm.raw_heights) else {
+            return;
+        };
+        let resolution = active_export.params.resolution;
+        let mut uniform = UniformBuffer::from(DownsampleUniform {
+            src_resolution: UVec2::splat(resolution),
+            dst_resolution: UVec2::splat(resolution),
+        });
+        uniform.write_buffer(&render_device, &render_queue);
+        let uniform_bind_group = render_device.create_bind_group(
+            None,
+            &pipeline_cache.get_bind_group_layout(&pipeline.downsample_uniform_layout),
+            &BindGroupEntries::with_indices(((2, uniform.binding().unwrap()),)),
+        );
+        let image_bind_group = render_device.create_bind_group(
+            None,
+            &pipeline_cache.get_bind_group_layout(&pipeline.downsample_image_layout),
+            &BindGroupEntries::with_indices(((2, &raw_gpu.texture_view), (3, &l0_height.texture_view))),
+        );
+        Some(DownsamplePassResources {
+            _uniform: uniform,
+            uniform_bind_group,
+            image_bind_group,
+            dst_resolution: resolution,
+        })
+    } else {
+        None
+    };
+
+    // === smooth passes: N × (h0→tmp, tmp→h0) ===
+    let smooth_count = active_export.params.smooth_passes as usize;
+    let mut smooth_passes: Vec<[DownsamplePassResources; 2]> = Vec::with_capacity(smooth_count);
+    if smooth_count > 0 {
+        let Some(tmp_handle) = &active_export.smooth_tmp else {
+            return;
+        };
+        let Some(tmp_gpu) = gpu_images.get(tmp_handle) else {
+            return;
+        };
+        let resolution = active_export.params.resolution;
+        for _ in 0..smooth_count {
+            // h0 → tmp
+            let mut u0 = UniformBuffer::from(DownsampleUniform {
+                src_resolution: UVec2::splat(resolution),
+                dst_resolution: UVec2::splat(resolution),
+            });
+            u0.write_buffer(&render_device, &render_queue);
+            let ub0 = render_device.create_bind_group(
+                None,
+                &pipeline_cache.get_bind_group_layout(&pipeline.downsample_uniform_layout),
+                &BindGroupEntries::with_indices(((2, u0.binding().unwrap()),)),
+            );
+            let ib0 = render_device.create_bind_group(
+                None,
+                &pipeline_cache.get_bind_group_layout(&pipeline.downsample_image_layout),
+                &BindGroupEntries::with_indices(((2, &l0_height.texture_view), (3, &tmp_gpu.texture_view))),
+            );
+            // tmp → h0
+            let mut u1 = UniformBuffer::from(DownsampleUniform {
+                src_resolution: UVec2::splat(resolution),
+                dst_resolution: UVec2::splat(resolution),
+            });
+            u1.write_buffer(&render_device, &render_queue);
+            let ub1 = render_device.create_bind_group(
+                None,
+                &pipeline_cache.get_bind_group_layout(&pipeline.downsample_uniform_layout),
+                &BindGroupEntries::with_indices(((2, u1.binding().unwrap()),)),
+            );
+            let ib1 = render_device.create_bind_group(
+                None,
+                &pipeline_cache.get_bind_group_layout(&pipeline.downsample_image_layout),
+                &BindGroupEntries::with_indices(((2, &tmp_gpu.texture_view), (3, &l0_height.texture_view))),
+            );
+            smooth_passes.push([
+                DownsamplePassResources { _uniform: u0, uniform_bind_group: ub0, image_bind_group: ib0, dst_resolution: resolution },
+                DownsamplePassResources { _uniform: u1, uniform_bind_group: ub1, image_bind_group: ib1, dst_resolution: resolution },
+            ]);
+        }
+    }
+
+    // When eroded, height_images[0] will be filled by blit_eroded — skip generate.
+    let generate_pass = if active_export.use_eroded {
+        None
+    } else {
+        let mut generate_uniform = UniformBuffer::from(ExportGeneratorUniform::from_params(
+            &active_export.params,
+            active_export.params.resolution,
+        ));
+        generate_uniform.write_buffer(&render_device, &render_queue);
+        let generate_uniform_bind_group = render_device.create_bind_group(
+            None,
+            &pipeline_cache.get_bind_group_layout(&pipeline.generate_uniform_layout),
+            &BindGroupEntries::with_indices(((1, generate_uniform.binding().unwrap()),)),
+        );
+        let generate_image_bind_group = render_device.create_bind_group(
+            None,
+            &pipeline_cache.get_bind_group_layout(&pipeline.generate_image_layout),
+            &BindGroupEntries::with_indices(((1, &l0_height.texture_view),)),
+        );
+        Some(GeneratePassResources {
+            _uniform: generate_uniform,
+            uniform_bind_group: generate_uniform_bind_group,
+            image_bind_group: generate_image_bind_group,
+        })
+    };
 
     let mut downsample_passes = Vec::with_capacity(active_export.levels.saturating_sub(1) as usize);
     for lod in 1..active_export.levels {
@@ -817,9 +1014,9 @@ fn prepare_export_bind_groups(
         let Some(dst) = gpu_images.get(&active_export.height_images[lod as usize]) else {
             return;
         };
-        let dst_resolution = active_export.params.export_resolution >> lod;
+        let dst_resolution = active_export.params.resolution >> lod;
         let mut uniform = UniformBuffer::from(DownsampleUniform {
-            src_resolution: UVec2::splat(active_export.params.export_resolution >> (lod - 1)),
+            src_resolution: UVec2::splat(active_export.params.resolution >> (lod - 1)),
             dst_resolution: UVec2::splat(dst_resolution),
         });
         uniform.write_buffer(&render_device, &render_queue);
@@ -845,7 +1042,7 @@ fn prepare_export_bind_groups(
     let effective_height_scale =
         active_export.params.height_scale * active_export.params.world_scale;
     for lod in 0..active_export.levels {
-        let resolution = active_export.params.export_resolution >> lod;
+        let resolution = active_export.params.resolution >> lod;
         let Some(src) = gpu_images.get(&active_export.height_images[lod as usize]) else {
             return;
         };
@@ -878,11 +1075,9 @@ fn prepare_export_bind_groups(
 
     commands.insert_resource(GeneratorExportRenderResources {
         generation: active_export.generation,
-        generate_pass: GeneratePassResources {
-            _uniform: generate_uniform,
-            uniform_bind_group: generate_uniform_bind_group,
-            image_bind_group: generate_image_bind_group,
-        },
+        generate_pass,
+        blit_eroded_pass,
+        smooth_passes,
         downsample_passes,
         normal_passes,
     });
@@ -908,30 +1103,27 @@ fn build_export_image(
     images.add(image)
 }
 
-fn baked_level_count(export_resolution: u32) -> Result<u32, String> {
-    if export_resolution > MAX_EXPORT_RESOLUTION {
+fn baked_level_count(resolution: u32) -> Result<u32, String> {
+    if resolution > MAX_EXPORT_RESOLUTION {
         return Err(format!(
-            "export_resolution {export_resolution} exceeds the current maximum of {MAX_EXPORT_RESOLUTION}"
+            "resolution {resolution} exceeds the maximum of {MAX_EXPORT_RESOLUTION}"
         ));
     }
-    if !export_resolution.is_power_of_two() {
+    if !resolution.is_power_of_two() {
+        return Err(format!("resolution {resolution} must be a power of two"));
+    }
+    if resolution < TILE_SIZE {
         return Err(format!(
-            "export_resolution {export_resolution} must be a power of two"
+            "resolution {resolution} is too small (min {TILE_SIZE})"
         ));
     }
-    if export_resolution < TILE_SIZE * 2 {
+    if resolution % TILE_SIZE != 0 {
         return Err(format!(
-            "export_resolution {export_resolution} is too small (min {})",
-            TILE_SIZE * 2
-        ));
-    }
-    if export_resolution % TILE_SIZE != 0 {
-        return Err(format!(
-            "export_resolution {export_resolution} must be a multiple of {TILE_SIZE}"
+            "resolution {resolution} must be a multiple of {TILE_SIZE}"
         ));
     }
 
-    let mut sz = export_resolution as usize;
+    let mut sz = resolution as usize;
     let mut levels = 0u32;
     while sz / TILE_SIZE as usize >= 2 {
         levels += 1;
@@ -1006,7 +1198,7 @@ fn write_export_tiles(
 
     for (lod, (height_level, normal_level)) in heights.iter().zip(normals.iter()).enumerate() {
         let lod = lod as u32;
-        let resolution = params.export_resolution >> lod;
+        let resolution = params.resolution >> lod;
         let tiles_per_side = (resolution / TILE_SIZE) as i32;
         let tile_start = -(tiles_per_side / 2);
 
@@ -1052,7 +1244,7 @@ fn write_export_tiles(
 
     save_height_png(
         &heights[0],
-        params.export_resolution as usize,
+        params.resolution as usize,
         &output_dir.join("heightmap_L0.png"),
         log,
     );
@@ -1167,8 +1359,9 @@ mod tests {
 
     #[test]
     fn baked_level_count_known_resolutions() {
-        assert_eq!(baked_level_count(512).unwrap(), 1);
-        assert_eq!(baked_level_count(1024).unwrap(), 2);
+        // Stops when tiles_per_side drops below 2 (need ≥2 tiles for correct centering).
+        assert_eq!(baked_level_count(512).unwrap(), 1);   // L0=512 (2 tiles/side), L1=256 (1 tile/side → stop)
+        assert_eq!(baked_level_count(1024).unwrap(), 2);  // L0=1024, L1=512
         assert_eq!(baked_level_count(2048).unwrap(), 3);
         assert_eq!(baked_level_count(4096).unwrap(), 4);
         assert_eq!(baked_level_count(8192).unwrap(), 5);
@@ -1178,7 +1371,7 @@ mod tests {
     fn baked_level_count_rejects_invalid() {
         assert!(baked_level_count(32768).is_err()); // exceeds MAX_EXPORT_RESOLUTION
         assert!(baked_level_count(3000).is_err()); // not a power-of-two
-        assert!(baked_level_count(256).is_err()); // < TILE_SIZE * 2
+        assert!(baked_level_count(128).is_err());  // < TILE_SIZE
         assert!(baked_level_count(0).is_err());
     }
 

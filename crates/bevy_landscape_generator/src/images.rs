@@ -36,8 +36,10 @@ pub fn build_normalization_image(images: &mut Assets<Image>, resolution: u32) ->
         TextureFormat::R32Float,
         RenderAssetUsages::RENDER_WORLD,
     );
-    image.texture_descriptor.usage =
-        TextureUsages::COPY_DST | TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING;
+    image.texture_descriptor.usage = TextureUsages::COPY_DST
+        | TextureUsages::COPY_SRC
+        | TextureUsages::STORAGE_BINDING
+        | TextureUsages::TEXTURE_BINDING;
     images.add(image)
 }
 

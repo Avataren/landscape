@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::num::NonZeroU64;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bevy::{
     asset::{embedded_asset, load_embedded_asset},
@@ -23,7 +24,7 @@ use bevy::{
 };
 
 use crate::images::{GeneratorImage, NormalizationImage};
-use crate::uniforms::{GeneratorUniform, GeneratorUniformBuffer};
+use crate::uniforms::{GeneratorParamGeneration, GeneratorUniform, GeneratorUniformBuffer};
 
 const WORKGROUP_SIZE: u32 = 8;
 
@@ -35,13 +36,10 @@ struct GeneratorUniformBindGroup(BindGroup);
 struct GeneratorImageBindGroup(BindGroup);
 
 /// GPU buffer holding two u32 values: [min_bits, max_bits].
-/// Reinterpreted as IEEE 754 floats for the normalization pass.
-/// Reset to [0x7F7FFFFF, 0x00000000] each frame before the reduction pass.
 #[derive(Resource)]
 struct MinmaxBuffer(Buffer);
 
-/// Combined bind group covering all three preview normalization passes.
-/// Bindings: 0 = preview_output (Rgba32Float), 6 = minmax_buf, 7 = raw_heights (R32Float).
+/// Combined bind group for the preview normalization passes.
 #[derive(Resource)]
 struct NormalizationBindGroup(BindGroup);
 
@@ -55,9 +53,7 @@ fn prepare_uniform_bind_group(
     render_device: Res<RenderDevice>,
 ) {
     *uniform_buffer.buffer.get_mut() = uniform.clone();
-    uniform_buffer
-        .buffer
-        .write_buffer(&render_device, &render_queue);
+    uniform_buffer.buffer.write_buffer(&render_device, &render_queue);
 
     let bind_group = render_device.create_bind_group(
         None,
@@ -75,12 +71,8 @@ fn prepare_image_bind_group(
     generator_image: Option<Res<GeneratorImage>>,
     render_device: Res<RenderDevice>,
 ) {
-    let Some(gen_img) = generator_image else {
-        return;
-    };
-    let Some(view) = gpu_images.get(&gen_img.heightfield) else {
-        return;
-    };
+    let Some(gen_img) = generator_image else { return; };
+    let Some(view) = gpu_images.get(&gen_img.heightfield) else { return; };
 
     let bind_group = render_device.create_bind_group(
         None,
@@ -106,16 +98,10 @@ fn prepare_normalization_bind_group(
     else {
         return;
     };
-    let Some(preview_view) = gpu_images.get(&gen_img.heightfield) else {
-        return;
-    };
-    let Some(raw_view) = gpu_images.get(&norm_img.raw_heights) else {
-        return;
-    };
+    let Some(preview_view) = gpu_images.get(&gen_img.heightfield) else { return; };
+    let Some(raw_view) = gpu_images.get(&norm_img.raw_heights) else { return; };
 
-    // Reset the min/max buffer before each frame's reduction pass.
-    // min init = largest finite f32 bits (0x7F7FFFFF); max init = 0.0 bits.
-    // IEEE 754 positive floats preserve ordering as u32, so atomicMin/Max work correctly.
+    // Reset min/max buffer before each frame's reduction pass.
     let mut init_bytes = [0u8; 8];
     init_bytes[0..4].copy_from_slice(&0x7F7F_FFFFu32.to_le_bytes());
     init_bytes[4..8].copy_from_slice(&0u32.to_le_bytes());
@@ -171,10 +157,6 @@ impl FromWorld for GeneratorPipeline {
         let uniform_layout =
             BindGroupLayoutDescriptor::new("generator_uniform_bind_group_layout", &uniform_entries);
 
-        // Group 1 layout shared by all three normalization passes.
-        // Entry 0 = preview_output (Rgba32Float, ReadWrite)
-        // Entry 6 = minmax_buf (storage buffer, read_write for atomics)
-        // Entry 7 = raw_heights (R32Float, ReadWrite)
         let norm_image_layout = BindGroupLayoutDescriptor::new(
             "generator_norm_image_layout",
             &[
@@ -266,24 +248,28 @@ impl FromWorld for GeneratorPipeline {
     }
 }
 
-enum GeneratorState {
-    Loading,
-    Ready,
-}
+// ---------------------------------------------------------------------------
+// Node: GeneratorRawNode — runs preview_generate_raw only
+// ---------------------------------------------------------------------------
 
-struct GeneratorNode {
+enum GeneratorState { Loading, Ready }
+
+/// Generates raw heights into `raw_heights`. Erosion (if enabled) runs after this.
+struct GeneratorRawNode {
     state: GeneratorState,
+    /// Tracks which generation was last dispatched. Uses AtomicU64 for interior
+    /// mutability since `Node::run` takes `&self`. Starts at MAX so the first
+    /// generation (0) is always treated as new.
+    dispatched_generation: AtomicU64,
 }
 
-impl Default for GeneratorNode {
+impl Default for GeneratorRawNode {
     fn default() -> Self {
-        Self {
-            state: GeneratorState::Loading,
-        }
+        Self { state: GeneratorState::Loading, dispatched_generation: AtomicU64::new(u64::MAX) }
     }
 }
 
-impl Node for GeneratorNode {
+impl Node for GeneratorRawNode {
     fn update(&mut self, world: &mut World) {
         let pipeline = world.resource::<GeneratorPipeline>();
         let pipeline_cache = world.resource::<PipelineCache>();
@@ -293,6 +279,93 @@ impl Node for GeneratorNode {
                 pipeline_cache.get_compute_pipeline_state(pipeline.gen_raw_pipeline),
                 CachedPipelineState::Ok(_)
             )
+        {
+            self.state = GeneratorState::Ready;
+        }
+    }
+
+    fn run(
+        &self,
+        _graph: &mut RenderGraphContext,
+        render_context: &mut RenderContext,
+        world: &World,
+    ) -> Result<(), NodeRunError> {
+        if matches!(self.state, GeneratorState::Loading) { return Ok(()); }
+
+        let gen = world
+            .get_resource::<GeneratorParamGeneration>()
+            .map(|g| g.0)
+            .unwrap_or(0);
+        if gen == self.dispatched_generation.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+
+        let Some(uniform_bg) = world.get_resource::<GeneratorUniformBindGroup>() else {
+            return Ok(());
+        };
+        let Some(norm_bg) = world.get_resource::<NormalizationBindGroup>() else {
+            return Ok(());
+        };
+
+        let pipeline_cache = world.resource::<PipelineCache>();
+        let pipeline_res = world.resource::<GeneratorPipeline>();
+        let uniform = world.resource::<GeneratorUniform>();
+
+        let Some(gen_raw_pl) =
+            pipeline_cache.get_compute_pipeline(pipeline_res.gen_raw_pipeline)
+        else {
+            return Ok(());
+        };
+
+        let wg_x = uniform.resolution.x.div_ceil(WORKGROUP_SIZE);
+        let wg_y = uniform.resolution.y.div_ceil(WORKGROUP_SIZE);
+
+        let mut pass = render_context.command_encoder().begin_compute_pass(
+            &ComputePassDescriptor {
+                label: Some("generator_preview_raw"),
+                ..default()
+            },
+        );
+        pass.set_bind_group(0, &uniform_bg.0, &[]);
+        pass.set_bind_group(1, &norm_bg.0, &[]);
+        pass.set_pipeline(gen_raw_pl);
+        pass.dispatch_workgroups(wg_x, wg_y, 1);
+        drop(pass);
+
+        self.dispatched_generation.store(gen, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Node: GeneratorNormNode — runs reduce + normalize
+// ---------------------------------------------------------------------------
+
+/// Reads raw_heights (which may have been processed by erosion), normalises, writes display output.
+struct GeneratorNormNode {
+    state: GeneratorState,
+    /// Last GeneratorParamGeneration value we normalised for.
+    dispatched_params_gen: AtomicU64,
+    /// Last erosion tick count we normalised for (proxy for copy_out having run).
+    dispatched_erosion_ticks: AtomicU64,
+}
+
+impl Default for GeneratorNormNode {
+    fn default() -> Self {
+        Self {
+            state: GeneratorState::Loading,
+            dispatched_params_gen: AtomicU64::new(u64::MAX),
+            dispatched_erosion_ticks: AtomicU64::new(u64::MAX),
+        }
+    }
+}
+
+impl Node for GeneratorNormNode {
+    fn update(&mut self, world: &mut World) {
+        let pipeline = world.resource::<GeneratorPipeline>();
+        let pipeline_cache = world.resource::<PipelineCache>();
+
+        if matches!(self.state, GeneratorState::Loading)
             && matches!(
                 pipeline_cache.get_compute_pipeline_state(pipeline.reduce_pipeline),
                 CachedPipelineState::Ok(_)
@@ -312,7 +385,20 @@ impl Node for GeneratorNode {
         render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {
-        if matches!(self.state, GeneratorState::Loading) {
+        if matches!(self.state, GeneratorState::Loading) { return Ok(()); }
+
+        let param_gen = world
+            .get_resource::<GeneratorParamGeneration>()
+            .map(|g| g.0)
+            .unwrap_or(0);
+        let erosion_ticks = world
+            .get_resource::<crate::erosion_params::ErosionControlState>()
+            .map(|c| c.ticks_done() as u64)
+            .unwrap_or(0);
+
+        let last_gen   = self.dispatched_params_gen.load(Ordering::Relaxed);
+        let last_ticks = self.dispatched_erosion_ticks.load(Ordering::Relaxed);
+        if param_gen == last_gen && erosion_ticks == last_ticks {
             return Ok(());
         }
 
@@ -326,69 +412,60 @@ impl Node for GeneratorNode {
         let pipeline_cache = world.resource::<PipelineCache>();
         let pipeline_res = world.resource::<GeneratorPipeline>();
         let uniform = world.resource::<GeneratorUniform>();
-        let resolution = uniform.resolution;
 
-        let (Some(gen_raw_pl), Some(reduce_pl), Some(norm_pl)) = (
-            pipeline_cache.get_compute_pipeline(pipeline_res.gen_raw_pipeline),
+        let (Some(reduce_pl), Some(norm_pl)) = (
             pipeline_cache.get_compute_pipeline(pipeline_res.reduce_pipeline),
             pipeline_cache.get_compute_pipeline(pipeline_res.normalize_pipeline),
         ) else {
             return Ok(());
         };
 
-        let wg_x = resolution.x.div_ceil(WORKGROUP_SIZE);
-        let wg_y = resolution.y.div_ceil(WORKGROUP_SIZE);
+        let wg_x = uniform.resolution.x.div_ceil(WORKGROUP_SIZE);
+        let wg_y = uniform.resolution.y.div_ceil(WORKGROUP_SIZE);
 
-        // Pass 1: write raw heights to raw_heights texture.
         {
-            let mut pass = render_context
-                .command_encoder()
-                .begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("generator_preview_raw"),
-                    ..default()
-                });
-            pass.set_bind_group(0, &uniform_bg.0, &[]);
-            pass.set_bind_group(1, &norm_bg.0, &[]);
-            pass.set_pipeline(gen_raw_pl);
-            pass.dispatch_workgroups(wg_x, wg_y, 1);
-        }
-
-        // Pass 2: parallel min/max reduction (separate pass = implicit memory barrier).
-        {
-            let mut pass = render_context
-                .command_encoder()
-                .begin_compute_pass(&ComputePassDescriptor {
+            let mut pass = render_context.command_encoder().begin_compute_pass(
+                &ComputePassDescriptor {
                     label: Some("generator_preview_reduce"),
                     ..default()
-                });
+                },
+            );
             pass.set_bind_group(0, &uniform_bg.0, &[]);
             pass.set_bind_group(1, &norm_bg.0, &[]);
             pass.set_pipeline(reduce_pl);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
 
-        // Pass 3: normalize heights and write display output.
         {
-            let mut pass = render_context
-                .command_encoder()
-                .begin_compute_pass(&ComputePassDescriptor {
+            let mut pass = render_context.command_encoder().begin_compute_pass(
+                &ComputePassDescriptor {
                     label: Some("generator_preview_normalize"),
                     ..default()
-                });
+                },
+            );
             pass.set_bind_group(0, &uniform_bg.0, &[]);
             pass.set_bind_group(1, &norm_bg.0, &[]);
             pass.set_pipeline(norm_pl);
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
 
+        self.dispatched_params_gen.store(param_gen, Ordering::Relaxed);
+        self.dispatched_erosion_ticks.store(erosion_ticks, Ordering::Relaxed);
         Ok(())
     }
 }
 
+// ---------------------------------------------------------------------------
+// Plugin
+// ---------------------------------------------------------------------------
+
 pub(crate) struct GeneratorComputePlugin;
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
-struct GeneratorLabel;
+pub(crate) struct GeneratorRawLabel;
+
+#[derive(Debug, Hash, PartialEq, Eq, Clone, RenderLabel)]
+pub(crate) struct GeneratorNormLabel;
 
 impl Plugin for GeneratorComputePlugin {
     fn build(&self, app: &mut App) {
@@ -396,6 +473,7 @@ impl Plugin for GeneratorComputePlugin {
 
         app.add_plugins(ExtractResourcePlugin::<GeneratorImage>::default())
             .add_plugins(ExtractResourcePlugin::<GeneratorUniform>::default())
+            .add_plugins(ExtractResourcePlugin::<GeneratorParamGeneration>::default())
             .add_plugins(ExtractResourcePlugin::<NormalizationImage>::default());
 
         let render_app = app.sub_app_mut(RenderApp);
@@ -413,8 +491,12 @@ impl Plugin for GeneratorComputePlugin {
         );
 
         let mut render_graph = render_app.world_mut().resource_mut::<RenderGraph>();
-        render_graph.add_node(GeneratorLabel, GeneratorNode::default());
-        render_graph.add_node_edge(GeneratorLabel, bevy::render::graph::CameraDriverLabel);
+        render_graph.add_node(GeneratorRawLabel, GeneratorRawNode::default());
+        render_graph.add_node(GeneratorNormLabel, GeneratorNormNode::default());
+        // Default ordering: Raw → Norm → CameraDriver.
+        // ErosionComputePlugin inserts itself between Raw and Norm.
+        render_graph.add_node_edge(GeneratorRawLabel, GeneratorNormLabel);
+        render_graph.add_node_edge(GeneratorNormLabel, bevy::render::graph::CameraDriverLabel);
     }
 
     fn finish(&self, app: &mut App) {
@@ -431,8 +513,6 @@ impl Plugin for GeneratorComputePlugin {
                 mapped_at_creation: false,
             })
         };
-        render_app
-            .world_mut()
-            .insert_resource(MinmaxBuffer(minmax_buf));
+        render_app.world_mut().insert_resource(MinmaxBuffer(minmax_buf));
     }
 }

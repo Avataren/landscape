@@ -7,8 +7,8 @@ use bevy_egui::{
 };
 use bevy_landscape::{MaterialLibrary, ReloadTerrainRequest, TerrainConfig, TerrainSourceDesc};
 use bevy_landscape_generator::{
-    export::{GeneratorExportState, StartGeneratorExport, MAX_EXPORT_RESOLUTION},
-    GeneratorParams, HeightfieldImage,
+    export::{GeneratorExportState, StartGeneratorExport},
+    GeneratorErosionControlState, GeneratorErosionParams, GeneratorParams, HeightfieldImage,
 };
 
 #[derive(Resource)]
@@ -45,6 +45,8 @@ fn generator_panel_system(
     mut contexts: EguiContexts,
     mut panel: ResMut<GeneratorPanelState>,
     mut params: ResMut<GeneratorParams>,
+    mut erosion: ResMut<GeneratorErosionParams>,
+    erosion_ctrl: Res<GeneratorErosionControlState>,
     export_state: Res<GeneratorExportState>,
     gen_image: Option<Res<HeightfieldImage>>,
     active_config: Res<TerrainConfig>,
@@ -52,15 +54,13 @@ fn generator_panel_system(
     mut reload_tx: MessageWriter<ReloadTerrainRequest>,
     mut export_tx: MessageWriter<StartGeneratorExport>,
 ) -> Result {
-    params.export_resolution = params.export_resolution.min(MAX_EXPORT_RESOLUTION);
-
     if export_state.completed_generation != panel.last_completed_generation {
         panel.last_completed_generation = export_state.completed_generation;
         if export_state.succeeded {
             if let Some(out_dir) = export_state.output_dir.as_deref() {
                 trigger_reload(
                     out_dir,
-                    &params,
+                    params.bypass_change_detection(),
                     &active_config,
                     &active_library,
                     &mut reload_tx,
@@ -86,256 +86,397 @@ fn generator_panel_system(
 
     let ctx = contexts.ctx_mut()?;
 
+    // Use bypass_change_detection so that merely rendering the UI doesn't mark
+    // GeneratorParams as changed. We call params.set_changed() below only if a
+    // widget actually reports a modification.
+    let p = params.bypass_change_detection();
+    let mut params_changed = false;
+
     let mut open = panel.open;
     egui::Window::new("Terrain Generator")
         .resizable(true)
-        .default_size([520.0, 700.0])
+        .default_size([860.0, 700.0])
         .open(&mut open)
         .show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading("Noise Parameters");
-                ui.separator();
-
-                egui::Grid::new("gen_params")
-                    .num_columns(2)
-                    .spacing([8.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.label("Resolution");
-                        let resolutions = [512u32, 1024, 2048];
-                        let mut res_idx = resolutions
-                            .iter()
-                            .position(|&r| r == params.resolution)
-                            .unwrap_or(1);
-                        egui::ComboBox::from_id_salt("gen_res")
-                            .selected_text(format!("{}×{}", params.resolution, params.resolution))
-                            .show_ui(ui, |ui| {
-                                for (i, &r) in resolutions.iter().enumerate() {
-                                    if ui
-                                        .selectable_label(res_idx == i, format!("{}×{}", r, r))
-                                        .clicked()
-                                    {
-                                        res_idx = i;
-                                        params.resolution = r;
-                                    }
-                                }
-                            });
-                        ui.end_row();
-
-                        ui.label("Seed");
-                        let mut seed_i = params.seed as i32;
-                        if ui.add(egui::DragValue::new(&mut seed_i).speed(1)).changed() {
-                            params.seed = seed_i.max(0) as u32;
-                        }
-                        ui.end_row();
-
-                        ui.label("Octaves");
-                        let mut oct = params.octaves as i32;
-                        if ui.add(egui::Slider::new(&mut oct, 1..=10)).changed() {
-                            params.octaves = oct as u32;
-                        }
-                        ui.end_row();
-
-                        ui.label("Frequency");
-                        ui.add(
-                            egui::Slider::new(&mut params.frequency, 0.1..=16.0).logarithmic(true),
-                        );
-                        ui.end_row();
-
-                        ui.label("Lacunarity");
-                        ui.add(egui::Slider::new(&mut params.lacunarity, 1.1..=4.0));
-                        ui.end_row();
-
-                        ui.label("Gain");
-                        ui.add(egui::Slider::new(&mut params.gain, 0.1..=0.9));
-                        ui.end_row();
-
-                        ui.label("Offset X");
-                        ui.add(egui::DragValue::new(&mut params.offset.x).speed(0.01));
-                        ui.end_row();
-
-                        ui.label("Offset Z");
-                        ui.add(egui::DragValue::new(&mut params.offset.y).speed(0.01));
-                        ui.end_row();
-                    });
-
-                ui.add_space(6.0);
-                ui.heading("Landform Shaping");
-                ui.separator();
-
-                egui::Grid::new("gen_landform")
-                    .num_columns(2)
-                    .spacing([8.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.label("Continent Frequency");
-                        ui.add(
-                            egui::Slider::new(&mut params.continent_frequency, 0.1..=4.0)
-                                .logarithmic(true),
-                        );
-                        ui.end_row();
-
-                        ui.label("Continent Strength");
-                        ui.add(egui::Slider::new(&mut params.continent_strength, 0.0..=1.0));
-                        ui.end_row();
-
-                        ui.label("Ridge Strength");
-                        ui.add(egui::Slider::new(&mut params.ridge_strength, 0.0..=1.0));
-                        ui.end_row();
-
-                        ui.label("Warp Frequency");
-                        ui.add(
-                            egui::Slider::new(&mut params.warp_frequency, 0.1..=8.0)
-                                .logarithmic(true),
-                        );
-                        ui.end_row();
-
-                        ui.label("Warp Strength");
-                        ui.add(egui::Slider::new(&mut params.warp_strength, 0.0..=2.0));
-                        ui.end_row();
-
-                        ui.label("Erosion Strength");
-                        ui.add(egui::Slider::new(&mut params.erosion_strength, 0.0..=1.0));
-                        ui.end_row();
-                    });
-
-                ui.add_space(6.0);
-                ui.heading("World Scale");
-                ui.separator();
-
-                egui::Grid::new("gen_world")
-                    .num_columns(2)
-                    .spacing([8.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.label("Height Scale (base m)");
-                        ui.add(
-                            egui::DragValue::new(&mut params.height_scale)
-                                .speed(16.0)
-                                .range(64.0..=8192.0),
-                        )
-                        .on_hover_text(
-                            "Base world-space Y range before world_scale is applied."
-                        );
-                        ui.end_row();
-
-                        ui.label("World Scale (m/px)");
-                        ui.add(
-                            egui::DragValue::new(&mut params.world_scale)
-                                .speed(0.1)
-                                .range(0.25..=32.0),
-                        )
-                        .on_hover_text(
-                            "Uniform X/Y/Z scale. Final terrain height span is height_scale × world_scale."
-                        );
-                        ui.end_row();
-
-                        ui.label("Final Height Span");
-                        ui.label(format!(
-                            "{:.1} m",
-                            params.height_scale * params.world_scale
-                        ));
-                        ui.end_row();
-
-                        ui.label("Export Resolution");
-                        let export_res_options: &[(u32, &str)] = &[
-                            (512, "512"),
-                            (1024, "1k"),
-                            (2048, "2k"),
-                            (4096, "4k"),
-                            (8192, "8k"),
-                            (16384, "16k"),
-                        ];
-                        let selected_label = export_res_options
-                            .iter()
-                            .find(|&&(r, _)| r == params.export_resolution)
-                            .map(|&(_, lbl)| lbl)
-                            .unwrap_or("?");
-                        egui::ComboBox::from_id_salt("gen_export_res")
-                            .selected_text(selected_label)
-                            .show_ui(ui, |ui| {
-                                for &(r, lbl) in export_res_options {
-                                    if ui
-                                        .selectable_label(params.export_resolution == r, lbl)
-                                        .clicked()
-                                    {
-                                        params.export_resolution = r;
-                                    }
-                                }
-                            });
-                        ui.end_row();
-
-                        ui.label("Baked Rings");
-                        let baked_levels = baked_clipmap_levels(params.export_resolution);
-                        ui.label(format!("{baked_levels}"));
-                        ui.end_row();
-                    });
-
-                let baked_levels = baked_clipmap_levels(params.export_resolution);
-                ui.label(format!(
-                    "Current export resolution bakes {baked_levels} mip levels before the runtime starts reusing the coarsest level."
-                ));
-
-                // Preview
-                ui.add_space(8.0);
-                ui.heading("Preview");
-                ui.separator();
-
-                if let Some(tex_id) = panel.preview_id {
-                    ui.horizontal(|ui| {
-                        let mut grayscale = params.grayscale != 0;
-                        if ui.toggle_value(&mut grayscale, "🔲 Grayscale").on_hover_text(
-                            "Switch between pure heightmap (grayscale) and colour hillshade to inspect for banding artefacts."
-                        ).changed() {
-                            params.grayscale = grayscale as u32;
-                        }
-                    });
-                    let avail = ui.available_width().min(480.0);
-                    ui.add(egui::Image::new((tex_id, egui::Vec2::splat(avail))));
-                    if params.grayscale != 0 {
-                        ui.small("Raw heightmap — linear [0, 1]");
-                    } else {
-                        ui.small("Contrast-enhanced hillshade preview");
-                    }
-                } else {
-                    ui.label("(waiting for GPU texture…)");
-                }
-
-                // Export
-                ui.add_space(8.0);
-                ui.heading("Export & Load");
-                ui.separator();
-
-                ui.label("Output directory:");
-                ui.text_edit_singleline(&mut panel.output_dir);
-
-                let exporting = export_state.active;
-                ui.add_space(4.0);
-                ui.add_enabled_ui(!exporting, |ui| {
-                    if ui.button("Generate & Load").clicked() {
-                        export_tx.write(StartGeneratorExport {
-                            params: params.clone(),
-                            output_dir: PathBuf::from(&panel.output_dir),
-                        });
-                    }
-                });
-
-                if exporting {
-                    ui.spinner();
-                }
-
-                if !export_state.log.is_empty() {
-                    ui.add_space(4.0);
+            ui.horizontal_top(|ui| {
+                // ── Left column: all parameter sections ──────────────────────
+                ui.vertical(|ui| {
+                    ui.set_min_width(420.0);
+                    ui.set_max_width(420.0);
                     egui::ScrollArea::vertical()
-                        .id_salt("gen_log")
-                        .max_height(120.0)
-                        .stick_to_bottom(true)
+                        .id_salt("params_scroll")
                         .show(ui, |ui| {
-                            for line in &export_state.log {
-                                ui.label(line);
+                        ui.heading("Noise Parameters");
+                        ui.separator();
+
+                        egui::Grid::new("gen_params")
+                            .num_columns(2)
+                            .spacing([8.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("Resolution");
+                                let resolutions = [512u32, 1024, 2048, 4096, 8192, 16384];
+                                let mut res_idx = resolutions
+                                    .iter()
+                                    .position(|&r| r == p.resolution)
+                                    .unwrap_or(1);
+                                egui::ComboBox::from_id_salt("gen_res")
+                                    .selected_text(format!("{}×{}", p.resolution, p.resolution))
+                                    .show_ui(ui, |ui| {
+                                        for (i, &r) in resolutions.iter().enumerate() {
+                                            if ui
+                                                .selectable_label(res_idx == i, format!("{}×{}", r, r))
+                                                .clicked()
+                                            {
+                                                res_idx = i;
+                                                p.resolution = r;
+                                                params_changed = true;
+                                            }
+                                        }
+                                    });
+                                ui.end_row();
+
+                                ui.label("Seed");
+                                let mut seed_i = p.seed as i32;
+                                if ui.add(egui::DragValue::new(&mut seed_i).speed(1)).changed() {
+                                    p.seed = seed_i.max(0) as u32;
+                                    params_changed = true;
+                                }
+                                ui.end_row();
+
+                                ui.label("Octaves");
+                                let mut oct = p.octaves as i32;
+                                if ui.add(egui::Slider::new(&mut oct, 1..=10)).changed() {
+                                    p.octaves = oct as u32;
+                                    params_changed = true;
+                                }
+                                ui.end_row();
+
+                                ui.label("Frequency");
+                                params_changed |= ui.add(
+                                    egui::Slider::new(&mut p.frequency, 0.1..=16.0).logarithmic(true),
+                                ).changed();
+                                ui.end_row();
+
+                                ui.label("Lacunarity");
+                                params_changed |= ui.add(egui::Slider::new(&mut p.lacunarity, 1.1..=4.0)).changed();
+                                ui.end_row();
+
+                                ui.label("Gain");
+                                params_changed |= ui.add(egui::Slider::new(&mut p.gain, 0.1..=0.9)).changed();
+                                ui.end_row();
+
+                                ui.label("Offset X");
+                                params_changed |= ui.add(egui::DragValue::new(&mut p.offset.x).speed(0.01)).changed();
+                                ui.end_row();
+
+                                ui.label("Offset Z");
+                                params_changed |= ui.add(egui::DragValue::new(&mut p.offset.y).speed(0.01)).changed();
+                                ui.end_row();
+                            });
+
+                        ui.add_space(6.0);
+                        ui.heading("Landform Shaping");
+                        ui.separator();
+
+                        egui::Grid::new("gen_landform")
+                            .num_columns(2)
+                            .spacing([8.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("Continent Frequency");
+                                params_changed |= ui.add(
+                                    egui::Slider::new(&mut p.continent_frequency, 0.1..=4.0)
+                                        .logarithmic(true),
+                                ).changed();
+                                ui.end_row();
+
+                                ui.label("Continent Strength");
+                                params_changed |= ui.add(egui::Slider::new(&mut p.continent_strength, 0.0..=1.0)).changed();
+                                ui.end_row();
+
+                                ui.label("Ridge Strength");
+                                params_changed |= ui.add(egui::Slider::new(&mut p.ridge_strength, 0.0..=1.0)).changed();
+                                ui.end_row();
+
+                                ui.label("Warp Frequency");
+                                params_changed |= ui.add(
+                                    egui::Slider::new(&mut p.warp_frequency, 0.1..=8.0)
+                                        .logarithmic(true),
+                                ).changed();
+                                ui.end_row();
+
+                                ui.label("Warp Strength");
+                                params_changed |= ui.add(egui::Slider::new(&mut p.warp_strength, 0.0..=2.0)).changed();
+                                ui.end_row();
+
+                                ui.label("Noise Erosion (legacy)");
+                                params_changed |= ui.add(egui::Slider::new(&mut p.erosion_strength, 0.0..=1.0)).changed();
+                                ui.end_row();
+                            });
+
+                        ui.add_space(6.0);
+                        ui.heading("World Scale");
+                        ui.separator();
+
+                        egui::Grid::new("gen_world")
+                            .num_columns(2)
+                            .spacing([8.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("Height Scale (base m)");
+                                params_changed |= ui.add(
+                                    egui::DragValue::new(&mut p.height_scale)
+                                        .speed(16.0)
+                                        .range(64.0..=8192.0),
+                                )
+                                .on_hover_text("Base world-space Y range before world_scale is applied.")
+                                .changed();
+                                ui.end_row();
+
+                                ui.label("World Scale (m/px)");
+                                params_changed |= ui.add(
+                                    egui::DragValue::new(&mut p.world_scale)
+                                        .speed(0.1)
+                                        .range(0.25..=32.0),
+                                )
+                                .on_hover_text(
+                                    "Uniform X/Y/Z scale. Final terrain height span is height_scale × world_scale.",
+                                )
+                                .changed();
+                                ui.end_row();
+
+                                ui.label("Final Height Span");
+                                ui.label(format!("{:.1} m", p.height_scale * p.world_scale));
+                                ui.end_row();
+
+                                ui.label("Baked Rings");
+                                ui.label(format!("{}", baked_clipmap_levels(p.resolution)));
+                                ui.end_row();
+
+                                ui.label("Export Smooth Passes")
+                                    .on_hover_text("Box-blur passes applied to L0 before downsampling. Reduces high-freq noise that aliases at coarser mip levels.");
+                                let mut sp = p.smooth_passes as i32;
+                                if ui.add(egui::Slider::new(&mut sp, 0..=8)).changed() {
+                                    p.smooth_passes = sp as u32;
+                                    params_changed = true;
+                                }
+                                ui.end_row();
+                            });
+
+                        // Erosion
+                        ui.add_space(6.0);
+                        ui.heading("Hydraulic Erosion");
+                        ui.separator();
+
+                        let ticks_done = erosion_ctrl.ticks_done();
+                        let running = erosion_ctrl.is_dirty() && erosion.enabled;
+                        let done    = !erosion_ctrl.is_dirty() && erosion.enabled;
+
+                        ui.horizontal(|ui| {
+                            if running {
+                                ui.spinner();
+                                ui.label(format!("Running: {}/{}", ticks_done, erosion.iterations));
+                                if ui.button("Stop").clicked() {
+                                    erosion.enabled = false;
+                                    erosion_ctrl.dirty.store(
+                                        false,
+                                        std::sync::atomic::Ordering::Release,
+                                    );
+                                }
+                            } else if done {
+                                ui.label(format!("Done ({} iters)", erosion.iterations));
+                                if ui.button("Re-run").clicked() {
+                                    erosion_ctrl.mark_dirty();
+                                }
+                                if ui.button("Clear").clicked() {
+                                    erosion.enabled = false;
+                                }
+                            } else if ui.button("Run Erosion").clicked() {
+                                erosion.enabled = true;
+                                erosion_ctrl.mark_dirty();
                             }
                         });
-                }
-            });
+
+                        ui.add_space(4.0);
+                        egui::Grid::new("erosion_main")
+                            .num_columns(2)
+                            .spacing([8.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("Iterations");
+                                let mut iter = erosion.iterations as i32;
+                                if ui.add(egui::Slider::new(&mut iter, 10..=2000)).changed() {
+                                    erosion.iterations = iter as u32;
+                                }
+                                ui.end_row();
+
+                                ui.label("dt");
+                                ui.add(egui::Slider::new(&mut erosion.dt, 0.001..=0.1));
+                                ui.end_row();
+
+                                ui.label("Pipe Area (A)");
+                                ui.add(egui::Slider::new(&mut erosion.pipe_area, 0.1..=50.0).logarithmic(true));
+                                ui.end_row();
+
+                                ui.label("Gravity");
+                                ui.add(egui::Slider::new(&mut erosion.gravity, 0.1..=20.0));
+                                ui.end_row();
+
+                                ui.label("Rain Rate");
+                                ui.add(egui::Slider::new(&mut erosion.rain_rate, 0.001..=0.1));
+                                ui.end_row();
+
+                                ui.label("Evaporation");
+                                ui.add(egui::Slider::new(&mut erosion.evaporation_rate, 0.001..=0.1));
+                                ui.end_row();
+
+                                ui.label("Sediment Capacity");
+                                ui.add(egui::Slider::new(&mut erosion.sediment_capacity, 0.1..=10.0));
+                                ui.end_row();
+
+                                ui.label("Erosion Rate");
+                                ui.add(egui::Slider::new(&mut erosion.erosion_rate, 0.01..=5.0));
+                                ui.end_row();
+
+                                ui.label("Deposition Rate");
+                                ui.add(egui::Slider::new(&mut erosion.deposition_rate, 0.01..=5.0));
+                                ui.end_row();
+
+                                ui.label("Erosion Depth Max");
+                                ui.add(egui::Slider::new(&mut erosion.erosion_depth_max, 0.001..=1.0).logarithmic(true));
+                                ui.end_row();
+
+                                ui.label("Min Slope");
+                                ui.add(egui::Slider::new(&mut erosion.min_slope, 0.0001..=0.1).logarithmic(true));
+                                ui.end_row();
+
+                                ui.label("Hardness Influence");
+                                ui.add(egui::Slider::new(&mut erosion.hardness_influence, 0.0..=1.0));
+                                ui.end_row();
+                            });
+
+                        ui.add_space(4.0);
+                        ui.label("Thermal Erosion");
+                        egui::Grid::new("erosion_thermal")
+                            .num_columns(2)
+                            .spacing([8.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("Enable Thermal");
+                                ui.checkbox(&mut erosion.thermal_enabled, "");
+                                ui.end_row();
+
+                                ui.label("Repose Angle (deg)");
+                                ui.add(egui::Slider::new(&mut erosion.repose_angle, 5.0..=60.0));
+                                ui.end_row();
+
+                                ui.label("Talus Rate");
+                                ui.add(egui::Slider::new(&mut erosion.talus_rate, 0.01..=1.0));
+                                ui.end_row();
+
+                                ui.label("Thermal Iters/Tick");
+                                let mut ti = erosion.thermal_iterations as i32;
+                                if ui.add(egui::Slider::new(&mut ti, 1..=20)).changed() {
+                                    erosion.thermal_iterations = ti as u32;
+                                }
+                                ui.end_row();
+                            });
+
+                        ui.add_space(4.0);
+                        ui.label("Particle Erosion");
+                        egui::Grid::new("erosion_particle")
+                            .num_columns(2)
+                            .spacing([8.0, 4.0])
+                            .show(ui, |ui| {
+                                ui.label("Enable Particles");
+                                ui.checkbox(&mut erosion.particle_enabled, "");
+                                ui.end_row();
+
+                                ui.label("Num Particles");
+                                let mut np = erosion.num_particles as i32;
+                                if ui.add(egui::Slider::new(&mut np, 1000..=2_000_000).logarithmic(true)).changed() {
+                                    erosion.num_particles = np as u32;
+                                }
+                                ui.end_row();
+
+                                ui.label("Max Steps");
+                                let mut ms = erosion.particle_max_steps as i32;
+                                if ui.add(egui::Slider::new(&mut ms, 8..=256)).changed() {
+                                    erosion.particle_max_steps = ms as u32;
+                                }
+                                ui.end_row();
+
+                                ui.label("Inertia");
+                                ui.add(egui::Slider::new(&mut erosion.particle_inertia, 0.0..=0.99));
+                                ui.end_row();
+                            });
+                    }); // end ScrollArea
+                }); // end left vertical
+
+                ui.separator();
+
+                // ── Right column: preview + export ───────────────────────────
+                ui.vertical(|ui| {
+                    ui.heading("Preview");
+                    ui.separator();
+
+                    if let Some(tex_id) = panel.preview_id {
+                        let mut grayscale = p.grayscale != 0;
+                        if ui.toggle_value(&mut grayscale, "Grayscale").on_hover_text(
+                            "Switch between pure heightmap (grayscale) and colour hillshade.",
+                        ).changed() {
+                            p.grayscale = grayscale as u32;
+                            params_changed = true;
+                        }
+                        let avail = ui.available_width();
+                        ui.add(egui::Image::new((tex_id, egui::Vec2::splat(avail))));
+                        if p.grayscale != 0 {
+                            ui.small("Raw heightmap — linear [0, 1]");
+                        } else {
+                            ui.small("Contrast-enhanced hillshade preview");
+                        }
+                    } else {
+                        ui.label("(waiting for GPU texture…)");
+                    }
+
+                    ui.add_space(8.0);
+                    ui.heading("Export & Load");
+                    ui.separator();
+
+                    ui.label("Output directory:");
+                    ui.text_edit_singleline(&mut panel.output_dir);
+
+                    let exporting = export_state.active;
+                    ui.add_space(4.0);
+                    ui.add_enabled_ui(!exporting, |ui| {
+                        if ui.button("Generate & Load").clicked() {
+                            export_tx.write(StartGeneratorExport {
+                                params: p.clone(),
+                                output_dir: PathBuf::from(&panel.output_dir),
+                            });
+                        }
+                    });
+
+                    if exporting {
+                        ui.spinner();
+                    }
+
+                    if !export_state.log.is_empty() {
+                        ui.add_space(4.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt("gen_log")
+                            .max_height(120.0)
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                for line in &export_state.log {
+                                    ui.label(line);
+                                }
+                            });
+                    }
+                }); // end right vertical
+            }); // end horizontal_top
         });
     panel.open = open;
+
+    if params_changed {
+        params.set_changed();
+    }
 
     Ok(())
 }
@@ -435,10 +576,9 @@ fn derive_clipmap_levels(requested: u32, max_mip: u8) -> u32 {
     requested.max(max_mip as u32 + 1).max(1)
 }
 
-fn baked_clipmap_levels(export_resolution: u32) -> u32 {
+fn baked_clipmap_levels(resolution: u32) -> u32 {
     const TILE_SIZE: u32 = 256;
-
-    let mut sz = export_resolution;
+    let mut sz = resolution;
     let mut levels = 0u32;
     while sz / TILE_SIZE >= 2 {
         levels += 1;

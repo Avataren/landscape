@@ -4,10 +4,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Resource, Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GeneratorParams {
-    /// Resolution of the GPU preview texture (must be power of two, ≤2048).
+    /// Resolution of the simulation and export (must be power of two, multiple of 256).
     pub resolution: u32,
-    /// Resolution of the exported tile hierarchy (must be power of two, multiple of 256).
-    pub export_resolution: u32,
     pub octaves: u32,
     pub frequency: f32,
     pub lacunarity: f32,
@@ -26,13 +24,17 @@ pub struct GeneratorParams {
     /// of the colour hillshade, making banding / artefacts easier to spot.
     #[serde(default)]
     pub grayscale: u32,
+    /// Number of 3×3 box-blur passes applied to the L0 heightmap before
+    /// downsampling. Reduces high-frequency erosion noise that aliases at
+    /// coarser mip levels. 0 = no smoothing.
+    #[serde(default)]
+    pub smooth_passes: u32,
 }
 
 impl Default for GeneratorParams {
     fn default() -> Self {
         Self {
             resolution: 1024,
-            export_resolution: 4096,
             octaves: 6,
             frequency: 2.5,
             lacunarity: 2.0,
@@ -48,6 +50,7 @@ impl Default for GeneratorParams {
             offset: Vec2::ZERO,
             seed: 42,
             grayscale: 0,
+            smooth_passes: 0,
         }
     }
 }
