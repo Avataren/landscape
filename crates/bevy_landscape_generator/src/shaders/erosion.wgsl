@@ -239,36 +239,40 @@ fn hydro_erode_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     let tilt  = max(length(grad), params.min_slope);
 
     // lmax: erosion ramp — zero when dry, full when d >= erosion_depth_max (eq. 10).
-    var d = textureLoad(water_tex, coord).r;
+    let d = textureLoad(water_tex, coord).r;
     let lmax = clamp(d / max(params.erosion_depth_max, 1e-6), 0.0, 1.0);
 
     let C = params.sediment_capacity * tilt * speed * lmax;
 
     let hard     = textureLoad(hardness_tex, coord).r;
-    let softness = 1.0 - hard * params.hardness_influence;
+    // hard=0 → resistant (erodes less), hard=1 → soft (erodes fully)
+    let softness = 1.0 - (1.0 - hard) * params.hardness_influence;
 
-    var s = textureLoad(sediment_tex, coord).r;
-    var h = textureLoad(height_a,     coord).r;
+    var s    = textureLoad(sediment_tex, coord).r;
+    var h    = textureLoad(height_a,     coord).r;
+    var hard_w = hard;
 
     if s < C {
-        // Erode: dissolve soil into water (eq. 12a-c)
+        // Erode: dissolve soil into suspended sediment (eq. 12 Jakó & Tóth)
+        // Water depth unchanged — only bed height and sediment concentration change.
         let delta = params.erosion_rate * softness * (C - s) * params.dt;
         let clamped = min(delta, max(h, 0.0));
         h -= clamped;
         s += clamped;
-        d += clamped;
     } else {
-        // Deposit: settle sediment onto terrain (eq. 13a-c)
-        let delta = params.deposition_rate * (s - C) * params.dt;
+        // Deposit: settle sediment onto bed (eq. 13)
+        let excess = s - C;
+        let delta = params.deposition_rate * excess * params.dt;
         let clamped = min(delta, s);
         h += clamped;
         s -= clamped;
-        d  = max(0.0, d - clamped);
+        // Eq. 14: freshly deposited material is less resistant.
+        hard_w = max(0.05, hard - params.dt * params.hardness_influence * params.deposition_rate * excess);
     }
 
     textureStore(height_a,     coord, vec4<f32>(clamp(h, 0.0, 1.5), 0.0, 0.0, 0.0));
     textureStore(sediment_tex, coord, vec4<f32>(max(0.0, s),         0.0, 0.0, 0.0));
-    textureStore(water_tex,    coord, vec4<f32>(max(0.0, d),         0.0, 0.0, 0.0));
+    textureStore(hardness_tex, coord, vec4<f32>(clamp(hard_w, 0.0, 1.0), 0.0, 0.0, 0.0));
 }
 
 // ---------------------------------------------------------------------------
@@ -343,7 +347,8 @@ fn thermal_compute(@builtin(global_invocation_id) id: vec3<u32>) {
     let coord    = vec2<i32>(id.xy);
     let h_self   = load_ha(coord);
     let hard     = textureLoad(hardness_tex, coord).r;
-    let softness = 1.0 - hard * params.hardness_influence;
+    // hard=0 → resistant (erodes less), hard=1 → soft (erodes fully)
+    let softness = 1.0 - (1.0 - hard) * params.hardness_influence;
     let threshold = tan(params.repose_angle_radians);
     let l = params.pipe_length;
     let l_diag = l * 1.41421356; // sqrt(2)
@@ -529,10 +534,9 @@ fn particle_erode(@builtin(global_invocation_id) id: vec3<u32>) {
             carry -= deposit_clamped;
             splat_delta(pos, deposit_clamped);
         } else {
-            let erode = min(
-                params.erosion_rate * (capacity - carry),
-                (-h_delta) * 0.1,
-            );
+            // Cap erosion by the height drop per step — a particle can't excavate
+            // more than it descends in one move.
+            let erode = min(params.erosion_rate * (capacity - carry), -h_delta);
             carry += erode;
             splat_delta(pos, -erode);
         }

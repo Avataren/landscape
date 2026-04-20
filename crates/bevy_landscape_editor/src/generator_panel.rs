@@ -288,6 +288,7 @@ fn generator_panel_system(
                                 }
                                 if ui.button("Clear").clicked() {
                                     erosion.enabled = false;
+                                    params_changed = true; // re-run base noise to restore pre-erosion terrain
                                 }
                             } else if ui.button("Run Erosion").clicked() {
                                 erosion.enabled = true;

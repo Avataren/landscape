@@ -186,13 +186,18 @@ fn prepare_erosion_uniform_bind_group(
     render_queue: Res<RenderQueue>,
     render_device: Res<RenderDevice>,
     erosion_params: Option<Res<ErosionParams>>,
+    erosion_ctrl: Option<Res<ErosionControlState>>,
     gen_uniform: Option<Res<GeneratorUniform>>,
     mut buf: ResMut<ErosionUniformBuffer>,
 ) {
     let Some(ep) = erosion_params else { return; };
-    let (resolution, seed) = gen_uniform
+    let (resolution, base_seed) = gen_uniform
         .map(|u| (u.resolution.x, u.seed))
         .unwrap_or((1024, 42));
+    // Mix ticks_done into the particle seed so each frame's batch uses fresh
+    // starting positions rather than replaying the same paths every iteration.
+    let ticks = erosion_ctrl.map(|c| c.ticks_done()).unwrap_or(0);
+    let seed = base_seed.wrapping_add(ticks.wrapping_mul(2654435761));
     *buf.buffer.get_mut() = ErosionUniform::from_params(&ep, resolution, seed);
     buf.buffer.write_buffer(&render_device, &render_queue);
 

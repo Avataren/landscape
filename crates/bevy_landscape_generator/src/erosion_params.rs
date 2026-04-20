@@ -48,11 +48,11 @@ impl Default for ErosionParams {
     fn default() -> Self {
         Self {
             enabled: false,
-            iterations: 200,
+            iterations: 500,
             dt: 0.02,
             gravity: 9.81,
             pipe_length: 1.0,
-            pipe_area: 5.0,
+            pipe_area: 20.0,
             rain_rate: 0.012,
             evaporation_rate: 0.015,
             sediment_capacity: 1.0,
