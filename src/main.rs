@@ -55,8 +55,8 @@ fn main() {
                     (config, source, Some(library), loaded_clouds)
                 }
                 Err(e) => {
-                    eprintln!("Failed to load level '{path}': {e}");
-                    std::process::exit(1);
+                    eprintln!("Warning: failed to load level '{path}': {e}. Starting with empty editor.");
+                    (TerrainConfig::default(), TerrainSourceDesc::default(), None, None)
                 }
             }
         } else {

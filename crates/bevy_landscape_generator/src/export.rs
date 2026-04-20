@@ -431,26 +431,41 @@ impl Node for GeneratorExportNode {
             return Ok(());
         };
 
-        let mut pass =
-            render_context
-                .command_encoder()
-                .begin_compute_pass(&ComputePassDescriptor {
-                    label: Some("generator_export_pass"),
-                    ..default()
-                });
-
-        pass.set_pipeline(generate_pipeline);
-        pass.set_bind_group(0, &resources.generate_pass.uniform_bind_group, &[]);
-        pass.set_bind_group(1, &resources.generate_pass.image_bind_group, &[]);
+        // Each stage gets its own compute pass so the GPU's implicit pass
+        // boundary acts as a memory barrier. Within a single pass, WebGPU/wgpu
+        // gives no visibility guarantee between dispatches — the downsample
+        // for L1 could read stale L0 data, causing height discontinuities at
+        // LOD ring boundaries (the "chunk seam" crack).
         let resolution = active_export.params.export_resolution;
-        pass.dispatch_workgroups(
-            resolution.div_ceil(WORKGROUP_SIZE),
-            resolution.div_ceil(WORKGROUP_SIZE),
-            1,
-        );
+        {
+            let mut pass =
+                render_context
+                    .command_encoder()
+                    .begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("generator_export_generate"),
+                        ..default()
+                    });
+            pass.set_pipeline(generate_pipeline);
+            pass.set_bind_group(0, &resources.generate_pass.uniform_bind_group, &[]);
+            pass.set_bind_group(1, &resources.generate_pass.image_bind_group, &[]);
+            pass.dispatch_workgroups(
+                resolution.div_ceil(WORKGROUP_SIZE),
+                resolution.div_ceil(WORKGROUP_SIZE),
+                1,
+            );
+        }
 
-        pass.set_pipeline(downsample_pipeline);
+        // One pass per downsample level: each reads the previous level's output
+        // so every pass boundary guarantees the previous write is visible.
         for downsample in &resources.downsample_passes {
+            let mut pass =
+                render_context
+                    .command_encoder()
+                    .begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("generator_export_downsample"),
+                        ..default()
+                    });
+            pass.set_pipeline(downsample_pipeline);
             pass.set_bind_group(0, &downsample.uniform_bind_group, &[]);
             pass.set_bind_group(1, &downsample.image_bind_group, &[]);
             pass.dispatch_workgroups(
@@ -460,15 +475,27 @@ impl Node for GeneratorExportNode {
             );
         }
 
-        pass.set_pipeline(normal_pipeline);
-        for normal in &resources.normal_passes {
-            pass.set_bind_group(0, &normal.uniform_bind_group, &[]);
-            pass.set_bind_group(1, &normal.image_bind_group, &[]);
-            pass.dispatch_workgroups(
-                normal.resolution.div_ceil(WORKGROUP_SIZE),
-                normal.resolution.div_ceil(WORKGROUP_SIZE),
-                1,
-            );
+        // All normal derivations can share one pass: they each read from a
+        // different height level (all fully written above) and write to a
+        // different normal texture, so there are no cross-dispatch dependencies.
+        {
+            let mut pass =
+                render_context
+                    .command_encoder()
+                    .begin_compute_pass(&ComputePassDescriptor {
+                        label: Some("generator_export_normals"),
+                        ..default()
+                    });
+            pass.set_pipeline(normal_pipeline);
+            for normal in &resources.normal_passes {
+                pass.set_bind_group(0, &normal.uniform_bind_group, &[]);
+                pass.set_bind_group(1, &normal.image_bind_group, &[]);
+                pass.dispatch_workgroups(
+                    normal.resolution.div_ceil(WORKGROUP_SIZE),
+                    normal.resolution.div_ceil(WORKGROUP_SIZE),
+                    1,
+                );
+            }
         }
 
         active_export.gpu_dispatched.store(true, Ordering::Release);
