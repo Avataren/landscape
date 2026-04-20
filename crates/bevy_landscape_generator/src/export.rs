@@ -291,7 +291,9 @@ impl FromWorld for GeneratorExportPipeline {
                     visibility: ShaderStages::COMPUTE,
                     ty: BindingType::StorageTexture {
                         access: StorageTextureAccess::WriteOnly,
-                        format: TextureFormat::Rg8Snorm,
+                        // rg8snorm is NOT in the WGSL storage-texture format list;
+                        // rgba8snorm is.  We store XZ in RG and discard BA on readback.
+                        format: TextureFormat::Rgba8Snorm,
                         view_dimension: TextureViewDimension::D2,
                     },
                     count: None,
@@ -592,7 +594,7 @@ fn start_generator_export(
             normal_images.push(build_export_image(
                 &mut images,
                 resolution,
-                TextureFormat::Rg8Snorm,
+                TextureFormat::Rgba8Snorm,
             ));
         }
 
@@ -693,7 +695,7 @@ fn handle_generator_readback_complete(
 
     let bytes_per_pixel = match pending.kind {
         ReadbackKind::Height => 4,
-        ReadbackKind::Normal => 2,
+        ReadbackKind::Normal => 4, // Rgba8Snorm: 4 bytes/texel; RG extracted in build_normal_tile_bytes
     };
     let compact = strip_padded_rows(&event.data, pending.width, pending.height, bytes_per_pixel);
     let lod = pending.lod as usize;
@@ -1097,15 +1099,20 @@ fn build_normal_tile_bytes(
     tile_x: usize,
     tile_y: usize,
 ) -> Vec<u8> {
+    // Source format is Rgba8Snorm (4 bytes/texel). Extract only the RG bytes
+    // (XZ normal components) and discard BA, producing a compact Rg8Snorm tile.
     let mut out = Vec::with_capacity((TILE_SIZE * TILE_SIZE * 2) as usize);
     let start_x = tile_x * TILE_SIZE as usize;
     let start_y = tile_y * TILE_SIZE as usize;
 
     for row in 0..TILE_SIZE as usize {
         let src_row = start_y + row;
-        let start = (src_row * resolution + start_x) * 2;
-        let end = start + TILE_SIZE as usize * 2;
-        out.extend_from_slice(&level_bytes[start..end]);
+        for col in 0..TILE_SIZE as usize {
+            let src_col = start_x + col;
+            let offset = (src_row * resolution + src_col) * 4;
+            out.push(level_bytes[offset]);     // R = nx (X normal component)
+            out.push(level_bytes[offset + 1]); // G = nz (Z normal component)
+        }
     }
 
     out
@@ -1115,18 +1122,37 @@ fn build_normal_tile_bytes(
 mod tests {
     use super::{
         baked_level_count, build_height_tile_bytes, build_normal_tile_bytes, strip_padded_rows,
+        TILE_SIZE,
     };
 
+    // ---------------------------------------------------------------------------
+    // baked_level_count
+    // ---------------------------------------------------------------------------
+
     #[test]
-    fn export_requires_power_of_two_tile_multiple() {
-        assert!(baked_level_count(4096).is_ok());
-        assert!(baked_level_count(32768).is_err());
-        assert!(baked_level_count(3000).is_err());
-        assert!(baked_level_count(256).is_err());
+    fn baked_level_count_known_resolutions() {
+        assert_eq!(baked_level_count(512).unwrap(), 1);
+        assert_eq!(baked_level_count(1024).unwrap(), 2);
+        assert_eq!(baked_level_count(2048).unwrap(), 3);
+        assert_eq!(baked_level_count(4096).unwrap(), 4);
+        assert_eq!(baked_level_count(8192).unwrap(), 5);
     }
 
     #[test]
+    fn baked_level_count_rejects_invalid() {
+        assert!(baked_level_count(32768).is_err()); // exceeds MAX_EXPORT_RESOLUTION
+        assert!(baked_level_count(3000).is_err()); // not a power-of-two
+        assert!(baked_level_count(256).is_err()); // < TILE_SIZE * 2
+        assert!(baked_level_count(0).is_err());
+    }
+
+    // ---------------------------------------------------------------------------
+    // strip_padded_rows
+    // ---------------------------------------------------------------------------
+
+    #[test]
     fn strip_padded_rows_removes_copy_padding() {
+        // 1 pixel wide, 4 bytes/px → tight = 4, padded = 256
         let mut raw = vec![0u8; 512];
         raw[0..4].copy_from_slice(&[1, 2, 3, 4]);
         raw[256..260].copy_from_slice(&[5, 6, 7, 8]);
@@ -1135,29 +1161,256 @@ mod tests {
     }
 
     #[test]
-    fn height_and_normal_tiles_slice_expected_region() {
-        let resolution = 512usize;
-        let mut heights = vec![0u8; resolution * resolution * 4];
-        let mut normals = vec![0u8; resolution * resolution * 2];
+    fn strip_padded_rows_passthrough_when_already_aligned() {
+        // 64 pixels, 4 bytes/px → tight = 256 = padded (no stripping needed)
+        let data: Vec<u8> = (0u8..=255).collect();
+        let result = strip_padded_rows(&data, 64, 1, 4);
+        assert_eq!(result, data);
+    }
 
-        for y in 0..resolution {
-            for x in 0..resolution {
-                let idx = y * resolution + x;
-                let h = (idx as f32) / ((resolution * resolution - 1) as f32);
-                heights[idx * 4..idx * 4 + 4].copy_from_slice(&h.to_le_bytes());
-                normals[idx * 2] = (x & 0xff) as u8;
-                normals[idx * 2 + 1] = (y & 0xff) as u8;
+    #[test]
+    fn strip_padded_rows_snorm_narrow_width() {
+        // 1 pixel wide, 2 bytes/px (Rg8Snorm) → tight = 2, padded = 256
+        let mut raw = vec![0u8; 512];
+        raw[0] = 10;
+        raw[1] = 20;
+        raw[256] = 30;
+        raw[257] = 40;
+        let compact = strip_padded_rows(&raw, 1, 2, 2);
+        assert_eq!(compact, vec![10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn strip_padded_rows_power_of_two_widths_are_naturally_aligned() {
+        // For power-of-two widths used in export (512..4096) with R32Float (4 bpp)
+        // and Rgba8Snorm (4 bpp), tight rows are always multiples of 256.
+        for log2_w in 9u32..=12 {
+            let w = 1u32 << log2_w; // 512, 1024, 2048, 4096
+            for bpp in [2usize, 4] {
+                let tight = w as usize * bpp;
+                assert_eq!(
+                    tight % 256,
+                    0,
+                    "width={w} bpp={bpp} tight={tight} needs stripping"
+                );
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // build_height_tile_bytes — pixel-level correctness
+    // ---------------------------------------------------------------------------
+
+    fn make_height_image(resolution: usize) -> Vec<u8> {
+        let mut buf = vec![0u8; resolution * resolution * 4];
+        for row in 0..resolution {
+            for col in 0..resolution {
+                let h = (row * resolution + col) as f32 / (resolution * resolution) as f32;
+                let off = (row * resolution + col) * 4;
+                buf[off..off + 4].copy_from_slice(&h.to_le_bytes());
+            }
+        }
+        buf
+    }
+
+    /// Read back the f32 at position (col, row) inside a tile (u16 encoded).
+    fn tile_height_at(tile: &[u8], row: usize, col: usize) -> f32 {
+        let off = (row * TILE_SIZE as usize + col) * 2;
+        let q = u16::from_le_bytes([tile[off], tile[off + 1]]);
+        q as f32 / 65535.0
+    }
+
+    #[test]
+    fn height_tile_first_pixel_matches_source() {
+        let resolution = 512usize;
+        let img = make_height_image(resolution);
+
+        for tile_y in 0..2usize {
+            for tile_x in 0..2usize {
+                let tile = build_height_tile_bytes(&img, resolution, tile_x, tile_y);
+                assert_eq!(tile.len(), (TILE_SIZE * TILE_SIZE * 2) as usize);
+
+                let src_row = tile_y * TILE_SIZE as usize;
+                let src_col = tile_x * TILE_SIZE as usize;
+                let expected_h =
+                    (src_row * resolution + src_col) as f32 / (resolution * resolution) as f32;
+                let expected_q = (expected_h * 65535.0).round() as u16;
+                let actual_q = u16::from_le_bytes([tile[0], tile[1]]);
+                assert_eq!(actual_q, expected_q, "tile ({tile_x},{tile_y}) first pixel");
+            }
+        }
+    }
+
+    #[test]
+    fn height_tile_last_pixel_matches_source() {
+        let resolution = 512usize;
+        let img = make_height_image(resolution);
+
+        for tile_y in 0..2usize {
+            for tile_x in 0..2usize {
+                let tile = build_height_tile_bytes(&img, resolution, tile_x, tile_y);
+
+                // Last pixel = (tile_x*256+255, tile_y*256+255) in source
+                let src_row = tile_y * TILE_SIZE as usize + (TILE_SIZE as usize - 1);
+                let src_col = tile_x * TILE_SIZE as usize + (TILE_SIZE as usize - 1);
+                let expected_h =
+                    (src_row * resolution + src_col) as f32 / (resolution * resolution) as f32;
+                let expected_q = (expected_h * 65535.0).round() as u16;
+                let last = (TILE_SIZE as usize - 1) * TILE_SIZE as usize + (TILE_SIZE as usize - 1);
+                let off = last * 2;
+                let actual_q = u16::from_le_bytes([tile[off], tile[off + 1]]);
+                assert_eq!(actual_q, expected_q, "tile ({tile_x},{tile_y}) last pixel");
+            }
+        }
+    }
+
+    /// The last row of tile (tx, ty) and the first row of tile (tx, ty+1) must be
+    /// different — they're ADJACENT rows in the source, not the same row.
+    #[test]
+    fn adjacent_tiles_have_no_repeated_rows() {
+        let resolution = 512usize;
+        let img = make_height_image(resolution);
+
+        for tile_x in 0..2usize {
+            let tile0 = build_height_tile_bytes(&img, resolution, tile_x, 0);
+            let tile1 = build_height_tile_bytes(&img, resolution, tile_x, 1);
+
+            // Last row of tile0 (row 255 = source row 255)
+            let last_row_h = tile_height_at(&tile0, TILE_SIZE as usize - 1, 0);
+            // First row of tile1 (row 0 = source row 256)
+            let first_row_h = tile_height_at(&tile1, 0, 0);
+
+            // Values must differ (they come from consecutive but distinct rows)
+            assert_ne!(
+                last_row_h, first_row_h,
+                "tile_x={tile_x}: last row of tile 0 == first row of tile 1 (off-by-one?)"
+            );
+
+            // Verify each references the correct source row
+            let expected_last =
+                (255 * resolution + tile_x * TILE_SIZE as usize) as f32 / (resolution * resolution) as f32;
+            let expected_first =
+                (256 * resolution + tile_x * TILE_SIZE as usize) as f32 / (resolution * resolution) as f32;
+
+            assert!(
+                (last_row_h - expected_last).abs() < 2.0 / 65535.0,
+                "tile_x={tile_x}: last row height wrong"
+            );
+            assert!(
+                (first_row_h - expected_first).abs() < 2.0 / 65535.0,
+                "tile_x={tile_x}: first row of next tile height wrong"
+            );
+        }
+    }
+
+    /// Every pixel in the full image appears in exactly one tile.
+    #[test]
+    fn tiles_cover_source_without_gaps() {
+        let resolution = 512usize;
+        let tiles_per_side = resolution / TILE_SIZE as usize;
+        let img = make_height_image(resolution);
+        let mut covered = vec![false; resolution * resolution];
+
+        for tile_y in 0..tiles_per_side {
+            for tile_x in 0..tiles_per_side {
+                let tile = build_height_tile_bytes(&img, resolution, tile_x, tile_y);
+                for row in 0..TILE_SIZE as usize {
+                    for col in 0..TILE_SIZE as usize {
+                        let src_row = tile_y * TILE_SIZE as usize + row;
+                        let src_col = tile_x * TILE_SIZE as usize + col;
+                        let px = src_row * resolution + src_col;
+                        assert!(!covered[px], "pixel ({src_col},{src_row}) covered twice");
+                        covered[px] = true;
+
+                        // Also verify the actual value
+                        let expected_h = px as f32 / (resolution * resolution) as f32;
+                        let expected_q = (expected_h * 65535.0).round() as u16;
+                        let off = (row * TILE_SIZE as usize + col) * 2;
+                        let actual_q = u16::from_le_bytes([tile[off], tile[off + 1]]);
+                        assert_eq!(
+                            actual_q, expected_q,
+                            "wrong value at src ({src_col},{src_row})"
+                        );
+                    }
+                }
             }
         }
 
-        let height_tile = build_height_tile_bytes(&heights, resolution, 1, 1);
-        let normal_tile = build_normal_tile_bytes(&normals, resolution, 1, 1);
+        assert!(covered.iter().all(|&c| c), "some source pixels not covered");
+    }
 
-        assert_eq!(height_tile.len(), (256 * 256 * 2) as usize);
-        assert_eq!(normal_tile.len(), (256 * 256 * 2) as usize);
-        assert_eq!(normal_tile[0], 0);
-        assert_eq!(normal_tile[1], 0);
-        assert_eq!(normal_tile[(255 * 256 + 255) * 2], 255);
-        assert_eq!(normal_tile[(255 * 256 + 255) * 2 + 1], 255);
+    // ---------------------------------------------------------------------------
+    // build_normal_tile_bytes — RG extraction from Rgba8Snorm source
+    // ---------------------------------------------------------------------------
+
+    fn make_normal_image_rgba(resolution: usize) -> Vec<u8> {
+        // Rgba8Snorm: 4 bytes per pixel.  R = col & 0xff, G = row & 0xff, BA = 0.
+        let mut buf = vec![0u8; resolution * resolution * 4];
+        for row in 0..resolution {
+            for col in 0..resolution {
+                let off = (row * resolution + col) * 4;
+                buf[off] = (col & 0xff) as u8;
+                buf[off + 1] = (row & 0xff) as u8;
+                // B and A are zero (should be discarded)
+                buf[off + 2] = 0xff;
+                buf[off + 3] = 0xff;
+            }
+        }
+        buf
+    }
+
+    #[test]
+    fn normal_tile_extracts_rg_discards_ba() {
+        let resolution = 512usize;
+        let img = make_normal_image_rgba(resolution);
+
+        // Tile (1,1): source starts at (256, 256)
+        let tile = build_normal_tile_bytes(&img, resolution, 1, 1);
+        assert_eq!(tile.len(), (TILE_SIZE * TILE_SIZE * 2) as usize);
+
+        // First pixel of tile (1,1) = source pixel (col=256, row=256)
+        assert_eq!(tile[0], (256 & 0xff) as u8, "R of first pixel wrong");
+        assert_eq!(tile[1], (256 & 0xff) as u8, "G of first pixel wrong");
+
+        // Last pixel = (511, 511)
+        let last = ((TILE_SIZE as usize - 1) * TILE_SIZE as usize + (TILE_SIZE as usize - 1)) * 2;
+        assert_eq!(tile[last], (511 & 0xff) as u8, "R of last pixel wrong");
+        assert_eq!(tile[last + 1], (511 & 0xff) as u8, "G of last pixel wrong");
+    }
+
+    #[test]
+    fn normal_tile_ba_bytes_not_included() {
+        let resolution = 512usize;
+        let mut img = vec![0u8; resolution * resolution * 4];
+        // Mark BA with 0xAB so that if they leak into the output the test fails
+        for i in 0..resolution * resolution {
+            img[i * 4 + 2] = 0xAB;
+            img[i * 4 + 3] = 0xCD;
+        }
+        let tile = build_normal_tile_bytes(&img, resolution, 0, 0);
+        // All output bytes should be 0 (from R and G channels), never 0xAB or 0xCD
+        assert!(
+            tile.iter().all(|&b| b == 0),
+            "BA bytes leaked into normal tile output"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Height quantization round-trip
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn height_quantize_roundtrip_max_error_half_ulp() {
+        // Export: (h * 65535).round() as u16
+        // Reload: u16 as f32 / 65535.0
+        // Maximum round-trip error should be ≤ 0.5 / 65535
+        let max_err = 0.5_f32 / 65535.0 + f32::EPSILON * 4.0;
+        for i in 0u32..=65535 {
+            let original = i as f32 / 65535.0;
+            let quantized = (original.clamp(0.0, 1.0) * 65535.0).round() as u16;
+            let reloaded = quantized as f32 / 65535.0;
+            let err = (original - reloaded).abs();
+            assert!(err <= max_err, "roundtrip error at i={i}: {err} > {max_err}");
+        }
     }
 }

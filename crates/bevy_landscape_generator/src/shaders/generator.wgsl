@@ -44,7 +44,7 @@ struct NormalParams {
 
 @group(0) @binding(3) var<uniform> normal_params: NormalParams;
 @group(1) @binding(4) var normal_src: texture_2d<f32>;
-@group(1) @binding(5) var normal_dst: texture_storage_2d<rg8snorm, write>;
+@group(1) @binding(5) var normal_dst: texture_storage_2d<rgba8snorm, write>;
 
 fn saturate(v: f32) -> f32 {
     return clamp(v, 0.0, 1.0);
