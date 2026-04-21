@@ -60,10 +60,14 @@ fn surface_h(c: vec2<i32>) -> f32 {
     return load_ha(c) + load_water(c);
 }
 
-// For the flux update: out-of-bounds cells are open drains (surface height = 0).
-// This lets water leave the simulation at boundaries instead of piling up.
+// For the flux update: out-of-bounds cells are open drains.
+// Returns only the bed height (no water) so water always flows out at boundaries.
 fn surface_h_open(c: vec2<i32>) -> f32 {
-    if c.x < 0 || c.y < 0 || c.x >= rx() || c.y >= ry() { return 0.0; }
+    if c.x < 0 || c.y < 0 || c.x >= rx() || c.y >= ry() {
+        // Clamp to edge bed height so only the water layer drains, not a cliff.
+        let ec = clamp(c, vec2<i32>(0), vec2<i32>(rx() - 1, ry() - 1));
+        return load_ha(ec);
+    }
     return surface_h(c);
 }
 
