@@ -310,6 +310,9 @@ pub struct TerrainClipmapState {
     /// Clip centres at which resident tiles were last written into the texture.
     /// Sentinel IVec2::MAX on startup forces a full tile re-apply on the first frame.
     pub tile_apply_centers: Vec<IVec2>,
+    /// Incremented whenever height_cpu_data is written. Used by update_patch_aabbs
+    /// to skip the per-frame AABB scan when no new height data has arrived.
+    pub height_generation: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -1244,6 +1247,7 @@ pub fn update_clipmap_textures(
             compute_clip_levels(&config, &view.clip_centers, &view.level_scales);
     }
 
+    state.height_generation += 1;
     state.last_clip_centers = view.clip_centers.clone();
 }
 
@@ -1598,6 +1602,9 @@ pub fn apply_tiles_to_clipmap(
         );
     }
 
+    if !dirty_levels.is_empty() {
+        state.height_generation += 1;
+    }
     state.tile_apply_centers = view.clip_centers.clone();
     residency.evict_to_budget(config.max_resident_tiles);
 }

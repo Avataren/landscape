@@ -619,6 +619,7 @@ fn setup_terrain(
         last_clip_centers: vec![IVec2::ZERO; levels as usize],
         // Sentinel forces a full tile re-apply on the first frame.
         tile_apply_centers: vec![IVec2::new(i32::MAX, i32::MAX); levels as usize],
+        height_generation: 0,
     });
 
     respawn_patch_entities(
@@ -1053,11 +1054,18 @@ fn update_patch_aabbs(
     view: Res<TerrainViewState>,
     clipmap_state: Res<TerrainClipmapState>,
     patch_entities: Res<PatchEntities>,
+    mut last_gen: Local<u64>,
     mut query: Query<(&components::TerrainPatchInstance, &mut Aabb)>,
 ) {
     if clipmap_state.height_cpu_data.is_empty() || view.level_scales.is_empty() {
         return;
     }
+
+    // Skip if height data hasn't changed since our last run.
+    if clipmap_state.height_generation == *last_gen {
+        return;
+    }
+    *last_gen = clipmap_state.height_generation;
 
     let m = config.block_size();
     let res = config.clipmap_resolution();
@@ -1081,10 +1089,25 @@ fn update_patch_aabbs(
                 res,
             );
 
-            *aabb = Aabb::from_min_max(
-                Vec3::new(-PAD, h_min * height_scale, -PAD),
-                Vec3::new(m as f32 + PAD, (h_max * height_scale).max(1.0), m as f32 + PAD),
+            // Use conservative full-height AABB for blocks with no loaded data
+            // (all zeros → h_max = 0) to avoid culling blocks whose tiles haven't
+            // arrived yet.
+            let (y_min, y_max) = if h_max < 1e-6 {
+                (0.0_f32, height_scale)
+            } else {
+                (h_min * height_scale, (h_max * height_scale).max(1.0))
+            };
+
+            let new_aabb = Aabb::from_min_max(
+                Vec3::new(-PAD, y_min, -PAD),
+                Vec3::new(m as f32 + PAD, y_max, m as f32 + PAD),
             );
+
+            // Only write when the value changes — avoids triggering Bevy's
+            // change-detection which would re-extract all patches every frame.
+            if *aabb != new_aabb {
+                *aabb = new_aabb;
+            }
         }
     }
 }
