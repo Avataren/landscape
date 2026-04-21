@@ -138,10 +138,18 @@ fn sync_erosion_buffers(
 
 fn sync_uniform(
     params: Res<GeneratorParams>,
+    erosion_params: Res<ErosionParams>,
     mut uniform: ResMut<GeneratorUniform>,
     mut generation: ResMut<GeneratorParamGeneration>,
     mut display_generation: ResMut<GeneratorDisplayGeneration>,
+    mut was_erosion_enabled: Local<bool>,
 ) {
+    // Detect erosion being cleared (enabled → disabled) so we can restore the
+    // un-eroded noise preview. params_changed alone isn't enough because no
+    // noise/shape field changes on Clear — only erosion.enabled flips.
+    let erosion_just_cleared = *was_erosion_enabled && !erosion_params.enabled;
+    *was_erosion_enabled = erosion_params.enabled;
+
     if params.is_changed() {
         let new = GeneratorUniform::from_params(&params);
         // Check whether any *noise/shape* field changed, ignoring the display-only
@@ -170,6 +178,13 @@ fn sync_uniform(
         if raw_changed {
             generation.0 += 1;
         }
+    }
+
+    if erosion_just_cleared {
+        // Force preview_generate_raw to re-run so raw_heights is overwritten with
+        // fresh noise, replacing the eroded heights that copy_out left behind.
+        display_generation.0 += 1;
+        generation.0 += 1;
     }
 }
 
