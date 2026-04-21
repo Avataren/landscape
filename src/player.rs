@@ -37,7 +37,8 @@ const CAPSULE_RADIUS: f32 = 0.3;
 /// Cylinder section length.  Total height = 2 × RADIUS + LENGTH = 1.8 m.
 const CAPSULE_LENGTH: f32 = 1.2;
 /// Distance from body centre up to the camera (eye height from centre).
-const EYE_OFFSET: f32 = 0.7;
+/// Body centre sits 0.9 m above ground when settled → camera is 2 m above ground.
+const EYE_OFFSET: f32 = 1.1;
 const WALK_SPEED: f32 = 8.0;
 const JUMP_SPEED: f32 = 6.0;
 const MOUSE_SENSITIVITY: f32 = 0.002;
