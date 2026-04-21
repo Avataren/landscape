@@ -152,15 +152,8 @@ fn setup_scene(
         Exposure { ev100: 13.0 },
         Tonemapping::AcesFitted,
         Bloom::NATURAL,
-        // Position at a comfortable altitude and look at terrain centre so the
-        // view is correct from the first frame in freecam mode.
-        Transform::from_xyz(0.0, 800.0, 1200.0).looking_at(Vec3::ZERO, Vec3::Y),
-        // TerrainCamera drives terrain LOD/streaming. The forward-bias remains
-        // available via `forward_bias_ratio`, but the default keeps the finest
-        // ring centered on the camera for reliable near-field coverage.
         TerrainCamera::default(),
-        // VolumetricFog is added/removed by FogPanelPlugin when the user enables fog.
-        // Starting without it avoids any volumetric render pass overhead while fog is off.
+        Transform::from_xyz(0.0, 800.0, 1200.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
     commands.spawn((
