@@ -60,6 +60,13 @@ fn surface_h(c: vec2<i32>) -> f32 {
     return load_ha(c) + load_water(c);
 }
 
+// For the flux update: out-of-bounds cells are open drains (surface height = 0).
+// This lets water leave the simulation at boundaries instead of piling up.
+fn surface_h_open(c: vec2<i32>) -> f32 {
+    if c.x < 0 || c.y < 0 || c.x >= rx() || c.y >= ry() { return 0.0; }
+    return surface_h(c);
+}
+
 fn load_flux(c: vec2<i32>) -> vec4<f32> {
     return textureLoad(flux_tex, cc(c));
 }
@@ -166,10 +173,10 @@ fn hydro_flux_update(@builtin(global_invocation_id) id: vec3<u32>) {
     let c = coord;
 
     let hd   = surface_h(c);
-    let hd_L = surface_h(c + vec2<i32>(-1,  0));
-    let hd_R = surface_h(c + vec2<i32>( 1,  0));
-    let hd_T = surface_h(c + vec2<i32>( 0, -1));
-    let hd_B = surface_h(c + vec2<i32>( 0,  1));
+    let hd_L = surface_h_open(c + vec2<i32>(-1,  0));
+    let hd_R = surface_h_open(c + vec2<i32>( 1,  0));
+    let hd_T = surface_h_open(c + vec2<i32>( 0, -1));
+    let hd_B = surface_h_open(c + vec2<i32>( 0,  1));
 
     let f4 = load_flux(c);
     // k = dt * A * g / l  (eq. 2 from paper)
