@@ -10,9 +10,11 @@ use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 use bevy_landscape::{
     level::{save_level, LevelDesc},
-    load_level, MaterialLibrary, ReloadTerrainRequest, TerrainConfig, TerrainSourceDesc,
+    load_level, MaterialLibrary, ReloadTerrainRequest, TerrainConfig, TerrainMetadata,
+    TerrainSourceDesc,
 };
 use bevy_landscape_clouds::CloudsConfig;
+use bevy_landscape_generator::GeneratorParams;
 use std::path::PathBuf;
 use std::sync::{mpsc, Mutex};
 
@@ -94,6 +96,7 @@ fn level_io_system(
     library: Res<MaterialLibrary>,
     mut clouds_config: ResMut<CloudsConfig>,
     mut reload_tx: MessageWriter<ReloadTerrainRequest>,
+    generator_params: Option<Res<GeneratorParams>>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
 
@@ -113,6 +116,11 @@ fn level_io_system(
                 Some(LevelIoOp::Save) => {
                     let mut level_desc = LevelDesc::from_current(&config, &desc, &library);
                     level_desc.clouds = serde_json::to_value(&*clouds_config).ok();
+                    if let Some(gp) = &generator_params {
+                        level_desc.metadata = TerrainMetadata {
+                            water_level: if gp.water_level > 0.0 { Some(gp.water_level) } else { None },
+                        };
+                    }
                     match save_level(&path, &level_desc) {
                         Ok(()) => {
                             state.status = Some((format!("✓ Saved → {}", path.display()), false));
@@ -131,7 +139,7 @@ fn level_io_system(
                         {
                             *clouds_config = cc;
                         }
-                        let (new_config, new_source, new_library, _, _) = level_desc.into_runtime();
+                        let (new_config, new_source, new_library, _, _, _meta) = level_desc.into_runtime();
                         reload_tx.write(ReloadTerrainRequest {
                             config: new_config,
                             source: new_source,

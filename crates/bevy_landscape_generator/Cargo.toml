@@ -8,6 +8,7 @@ bevy = { version = "0.18" }
 bytemuck = { version = "1", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 
 [target.'cfg(unix)'.dependencies]
 bevy = { version = "0.18", features = ["dynamic_linking"] }

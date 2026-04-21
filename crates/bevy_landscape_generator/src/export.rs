@@ -1330,8 +1330,32 @@ fn write_export_tiles(
         log,
     );
 
+    write_metadata(params, output_dir, log);
+
     log.send(format!("Done → '{}'", output_dir.display())).ok();
     Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct ExportMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    water_level: Option<f32>,
+}
+
+fn write_metadata(params: &GeneratorParams, output_dir: &Path, log: &mpsc::Sender<String>) {
+    let meta = ExportMetadata {
+        water_level: if params.water_level > 0.0 { Some(params.water_level) } else { None },
+    };
+    match toml::to_string_pretty(&meta) {
+        Ok(text) => {
+            let path = output_dir.join("metadata.toml");
+            match std::fs::write(&path, text) {
+                Ok(()) => log.send(format!("Metadata → '{}'", path.display())).ok(),
+                Err(e) => log.send(format!("Warning: failed to write metadata.toml: {e}")).ok(),
+            };
+        }
+        Err(e) => { log.send(format!("Warning: failed to serialize metadata: {e}")).ok(); }
+    }
 }
 
 fn save_height_png(level_bytes: &[u8], resolution: usize, height_range: (f32, f32), path: &Path, log: &mpsc::Sender<String>) {

@@ -50,7 +50,7 @@ fn main() {
                         .clouds
                         .as_ref()
                         .and_then(|v| serde_json::from_value(v.clone()).ok());
-                    let (mut config, source, library, _wmin, _wmax) = desc.into_runtime();
+                    let (mut config, source, library, _wmin, _wmax, _meta) = desc.into_runtime();
                     config.height_scale *= 1.0; // into_runtime already multiplies
                     (config, source, Some(library), loaded_clouds)
                 }

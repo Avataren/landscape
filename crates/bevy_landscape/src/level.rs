@@ -17,6 +17,7 @@
 //! let (config, source_desc, material_library) = desc.into_runtime();
 //! ```
 
+use crate::metadata::TerrainMetadata;
 use crate::terrain::{
     config::{TerrainConfig, MAX_SUPPORTED_CLIPMAP_LEVELS},
     material_slots::MaterialLibrary,
@@ -61,6 +62,15 @@ pub struct LevelDesc {
     /// does not need to depend on `bevy_landscape_clouds`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clouds: Option<serde_json::Value>,
+    /// Metadata loaded from `{tile_root}/metadata.toml` (water level, etc.).
+    /// Merged from the sidecar file during `into_runtime`; also preserved here
+    /// so a saved level.json is self-contained even without the tile directory.
+    #[serde(default, skip_serializing_if = "is_default_metadata")]
+    pub metadata: TerrainMetadata,
+}
+
+fn is_default_metadata(m: &TerrainMetadata) -> bool {
+    m.water_level.is_none()
 }
 
 impl Default for LevelDesc {
@@ -77,6 +87,7 @@ impl Default for LevelDesc {
             clipmap_levels: default_config.clipmap_levels,
             material_library: MaterialLibrary::default(),
             clouds: None,
+            metadata: TerrainMetadata::default(),
         }
     }
 }
@@ -110,6 +121,7 @@ impl LevelDesc {
             clipmap_levels: config.clipmap_levels,
             material_library: library.clone(),
             clouds: None,
+            metadata: TerrainMetadata::default(),
         }
     }
 
@@ -126,6 +138,7 @@ impl LevelDesc {
         MaterialLibrary,
         Vec2,
         Vec2,
+        TerrainMetadata,
     ) {
         const TILE_SIZE: u32 = 256;
 
@@ -146,6 +159,17 @@ impl LevelDesc {
                 (Vec2::splat(-h), Vec2::splat(h))
             });
 
+        // Merge metadata: sidecar file takes precedence over level.json field
+        // so that re-exporting tiles always reflects the latest values.
+        let metadata = if let Some(root) = tile_root.as_deref() {
+            let sidecar = TerrainMetadata::load(root);
+            TerrainMetadata {
+                water_level: sidecar.water_level.or(self.metadata.water_level),
+            }
+        } else {
+            self.metadata
+        };
+
         let source = TerrainSourceDesc {
             tile_root,
             normal_root: self.normal_root,
@@ -157,7 +181,7 @@ impl LevelDesc {
             collision_mip_level: self.collision_mip_level,
         };
 
-        (config, source, self.material_library, world_min, world_max)
+        (config, source, self.material_library, world_min, world_max, metadata)
     }
 }
 
@@ -236,7 +260,7 @@ mod tests {
         desc.max_mip_level = 3;
         desc.clipmap_levels = 12;
 
-        let (config, _, _, _, _) = desc.into_runtime();
+        let (config, _, _, _, _, _) = desc.into_runtime();
 
         assert_eq!(config.clipmap_levels, 12);
     }
@@ -246,7 +270,7 @@ mod tests {
         let mut desc = LevelDesc::default();
         desc.clipmap_levels = 99;
 
-        let (config, _, _, _, _) = desc.into_runtime();
+        let (config, _, _, _, _, _) = desc.into_runtime();
 
         assert_eq!(config.clipmap_levels, MAX_SUPPORTED_CLIPMAP_LEVELS as u32);
     }

@@ -1220,6 +1220,7 @@ dependencies = [
  "image",
  "serde",
  "serde_json",
+ "toml",
 ]
 
 [[package]]
@@ -1253,6 +1254,7 @@ dependencies = [
  "bytemuck",
  "image",
  "serde",
+ "toml",
 ]
 
 [[package]]
