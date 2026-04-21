@@ -1048,8 +1048,22 @@ pub fn update_clipmap_textures(
             .copied()
             .unwrap_or_else(|| level_scale(config.world_scale, lod as u32));
 
+        // When procedural_fallback is off, the non-sentinel strip path would
+        // write height=0 into every newly exposed texel.  `apply_tiles_to_clipmap`
+        // overwrites with real tile data afterwards — but only for tiles already
+        // resident in CPU cache.  Tiles still in-flight from async IO leave the
+        // zeros intact, which the GPU renders as thin height-0 cracks (chasms to
+        // the floor).  Skipping the zero-write and GPU upload lets the toroidal
+        // texture retain its stale-but-non-zero data from the previous ring
+        // position until real tile data arrives.
+        //
+        // The sentinel path (full layer reset) is kept because it is always
+        // paired with `clipmap_needs_rebuild = true`, which makes
+        // `apply_tiles_to_clipmap` do a full tile re-apply on the same frame.
+        let is_full_reset = old_center.x == i32::MAX;
+
         let height_layer_offset = lod * height_bpl;
-        if old_center.x == i32::MAX {
+        if is_full_reset {
             let full =
                 generate_clipmap_layer(new_center, scale, 0, 0, res, config.procedural_fallback);
             if let Some(slice) = state
@@ -1058,7 +1072,7 @@ pub fn update_clipmap_textures(
             {
                 slice.copy_from_slice(&full);
             }
-        } else {
+        } else if config.procedural_fallback {
             write_new_strip(
                 &mut state.height_cpu_data,
                 height_layer_offset,
@@ -1069,19 +1083,21 @@ pub fn update_clipmap_textures(
                 config.procedural_fallback,
             );
         }
-        queue_new_strip_uploads(
-            &mut uploads,
-            &state.height_texture_handle,
-            lod as u32,
-            &state.height_cpu_data[height_layer_offset..height_layer_offset + height_bpl],
-            res,
-            HEIGHT_BYTES_PER_TEXEL,
-            new_center,
-            old_center,
-        );
+        if is_full_reset || config.procedural_fallback {
+            queue_new_strip_uploads(
+                &mut uploads,
+                &state.height_texture_handle,
+                lod as u32,
+                &state.height_cpu_data[height_layer_offset..height_layer_offset + height_bpl],
+                res,
+                HEIGHT_BYTES_PER_TEXEL,
+                new_center,
+                old_center,
+            );
+        }
 
         let normal_layer_offset = lod * normal_bpl;
-        if old_center.x == i32::MAX {
+        if is_full_reset {
             let full = generate_normal_clipmap_layer(
                 new_center,
                 scale,
@@ -1095,7 +1111,7 @@ pub fn update_clipmap_textures(
             {
                 slice.copy_from_slice(&full);
             }
-        } else {
+        } else if config.procedural_fallback {
             write_new_normal_strip(
                 &mut state.normal_cpu_data,
                 normal_layer_offset,
@@ -1107,16 +1123,18 @@ pub fn update_clipmap_textures(
                 config.procedural_fallback,
             );
         }
-        queue_new_strip_uploads(
-            &mut uploads,
-            &state.normal_texture_handle,
-            lod as u32,
-            &state.normal_cpu_data[normal_layer_offset..normal_layer_offset + normal_bpl],
-            res,
-            NORMAL_BYTES_PER_TEXEL,
-            new_center,
-            old_center,
-        );
+        if is_full_reset || config.procedural_fallback {
+            queue_new_strip_uploads(
+                &mut uploads,
+                &state.normal_texture_handle,
+                lod as u32,
+                &state.normal_cpu_data[normal_layer_offset..normal_layer_offset + normal_bpl],
+                res,
+                NORMAL_BYTES_PER_TEXEL,
+                new_center,
+                old_center,
+            );
+        }
     }
 
     // Refresh the per-level origin uniforms.

@@ -44,7 +44,10 @@ fn bounds_fade_at(xz: vec2<f32>) -> f32 {
         min(xz.x - world_min.x, world_max.x - xz.x),
         min(xz.y - world_min.y, world_max.y - xz.y),
     );
-    return smoothstep(0.0, fade_dist, edge_dist);
+    // Inside terrain (edge_dist >= 0): full height. Only fade vertices that
+    // land outside the terrain boundary (edge_dist < 0) due to patches
+    // slightly overshooting the bounds.
+    return smoothstep(-fade_dist, 0.0, edge_dist);
 }
 
 fn height_at(lod: u32, xz: vec2<f32>) -> f32 {
