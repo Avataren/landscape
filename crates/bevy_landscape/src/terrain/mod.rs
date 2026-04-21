@@ -44,8 +44,10 @@ use math::{compute_needed_tiles_for_level, level_scale, snap_camera_to_nested_cl
 use pbr_textures::{
     rebuild_pbr_textures_system, PbrRebuildProgress, PbrRebuildState, PbrTexturesDirty,
 };
-use physics_colliders::spawn_global_heightfield;
-use physics_colliders::{spawn_global_heightfield_for_desc, GlobalTerrainHeightfield};
+use physics_colliders::{
+    spawn_global_heightfield, spawn_global_heightfield_for_desc, update_local_terrain_collider,
+    GlobalTerrainHeightfield, LocalColliderState,
+};
 use render::TerrainRenderPlugin;
 use residency::update_required_tiles;
 use resources::{
@@ -121,6 +123,7 @@ impl Plugin for TerrainPlugin {
             .init_resource::<TerrainResidency>()
             .init_resource::<TerrainStreamQueue>()
             .init_resource::<TerrainCollisionCache>()
+            .init_resource::<LocalColliderState>()
             .init_resource::<PatchEntities>()
             .init_resource::<TerrainClipmapUploads>()
             .init_resource::<MaterialLibrary>()
@@ -147,6 +150,12 @@ impl Plugin for TerrainPlugin {
                     update_patch_transforms,
                     update_clipmap_textures,
                 )
+                    .after(update_terrain_view_state),
+            )
+            .add_systems(
+                Update,
+                update_local_terrain_collider
+                    .after(update_collision_tiles)
                     .after(update_terrain_view_state),
             )
             .add_systems(
