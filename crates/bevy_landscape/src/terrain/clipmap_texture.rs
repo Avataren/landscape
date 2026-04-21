@@ -44,7 +44,7 @@ pub fn height_at_world(x: f32, z: f32) -> f32 {
 
 /// Bytes per texel for our height texture format.
 const HEIGHT_BYTES_PER_TEXEL: usize = 2; // R16Unorm
-const NORMAL_BYTES_PER_TEXEL: usize = 2; // RG8Snorm
+pub const NORMAL_BYTES_PER_TEXEL: usize = 4; // RGBA8Snorm: RG=fine XZ, BA=coarse XZ
 
 pub fn normal_at_world(x: f32, z: f32, eps: f32, height_scale: f32) -> Vec3 {
     let h = height_at_world(x, z) * height_scale;
@@ -53,11 +53,12 @@ pub fn normal_at_world(x: f32, z: f32, eps: f32, height_scale: f32) -> Vec3 {
     Vec3::new(h - h_r, eps, h - h_u).normalize()
 }
 
-fn encode_normal_xz(normal: Vec3) -> [u8; 2] {
-    [
-        (normal.x.clamp(-1.0, 1.0) * 127.0).round() as i8 as u8,
-        (normal.z.clamp(-1.0, 1.0) * 127.0).round() as i8 as u8,
-    ]
+fn snorm(v: f32) -> u8 {
+    (v.clamp(-1.0, 1.0) * 127.0).round() as i8 as u8
+}
+
+fn encode_normal_pair(fine: Vec3, coarse: Vec3) -> [u8; 4] {
+    [snorm(fine.x), snorm(fine.z), snorm(coarse.x), snorm(coarse.z)]
 }
 
 /// Generates one R16Unorm layer for a clipmap level.
@@ -126,7 +127,10 @@ fn generate_normal_clipmap_layer(
             let gz = center.y - half + row;
             let wx = (gx as f32 + 0.5) * level_scale_ws;
             let wz = (gz as f32 + 0.5) * level_scale_ws;
-            let enc = encode_normal_xz(normal_at_world(wx, wz, level_scale_ws, height_scale));
+            let enc = encode_normal_pair(
+                normal_at_world(wx, wz, level_scale_ws, height_scale),
+                normal_at_world(wx, wz, level_scale_ws * 2.0, height_scale),
+            );
             let tx = gx.rem_euclid(clipmap_resolution as i32) as usize;
             let tz = gz.rem_euclid(clipmap_resolution as i32) as usize;
             let off = (tz * clipmap_resolution as usize + tx) * NORMAL_BYTES_PER_TEXEL;
@@ -184,8 +188,9 @@ pub fn create_initial_clipmap_texture(config: &TerrainConfig) -> Image {
         RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     );
     // Repeat + Linear: toroidal UV uses fract() wrapping; linear filtering
-    // smooths sub-texel interpolation.  Repeat address mode is required so
-    // hardware wraps correctly at the 0/1 boundary.
+    // smooths sub-texel interpolation in the morph transition zone.
+    // Nearest-neighbor would cause discrete height jumps as morph_alpha
+    // varies, producing faceted geometry at LOD ring boundaries.
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
         address_mode_u: ImageAddressMode::Repeat,
         address_mode_v: ImageAddressMode::Repeat,
@@ -225,7 +230,7 @@ pub fn create_initial_normal_clipmap_texture(config: &TerrainConfig) -> Image {
         },
         TextureDimension::D2,
         data,
-        TextureFormat::Rg8Snorm,
+        TextureFormat::Rgba8Snorm,
         RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     );
     image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
@@ -606,9 +611,12 @@ fn write_normal_texel_at(
     let enc = if use_procedural {
         let wx = (gx as f32 + 0.5) * scale;
         let wz = (gz as f32 + 0.5) * scale;
-        encode_normal_xz(normal_at_world(wx, wz, scale, height_scale))
+        encode_normal_pair(
+            normal_at_world(wx, wz, scale, height_scale),
+            normal_at_world(wx, wz, scale * 2.0, height_scale),
+        )
     } else {
-        [0u8, 0u8]
+        [0u8; 4]
     };
     let tx = gx.rem_euclid(n) as usize;
     let tz = gz.rem_euclid(n) as usize;

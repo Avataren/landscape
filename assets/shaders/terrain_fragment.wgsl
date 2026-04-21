@@ -557,39 +557,37 @@ fn pixel_normal(lod: u32, xz: vec2<f32>) -> vec3<f32> {
     return normalize(vec3<f32>(h - h_r, eps, h - h_u));
 }
 
-// Sample the baked RG8Snorm normal array for this LOD.
+// Sample the baked RGBA8Snorm normal array for this LOD.
 //
-// The baked normals were computed at bake time from the f32 heightmap via a
-// Sobel kernel — *before* the R16Unorm quantization that produces the
-// contour-shading artefacts we see in the FD path.  Using them here is the
-// single biggest shading-quality win available with no extra cost; this
-// replaces three `height_at_frag` samples with one `textureSample`.
+// RG = fine XZ (computed at this LOD's texel eps), BA = coarse XZ (2× eps).
+// Both channels are stored in the same layer so a single texture lookup
+// provides both ends of the LOD seam, halving normal-texture bandwidth vs
+// sampling fine and coarse LOD layers separately (GPU Gems 2, Ch. 2).
 //
-// UV math mirrors `height_at_frag` exactly (same half-texel offset) so
-// normals line up with geometry on every LOD.
-fn baked_normal_at(lod: u32, xz: vec2<f32>) -> vec3<f32> {
+// UV math mirrors `height_at_frag` exactly (same half-texel offset).
+fn baked_normal_rgba(lod: u32, xz: vec2<f32>) -> vec4<f32> {
     let lvl       = terrain.clip_levels[lod];
     let world_min = terrain.world_bounds.xy;
     let world_max = terrain.world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
     let sample_xz = clamp(xz, world_min, world_max);
     let uv        = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
-    // RG = tangent-space XZ components, stored as signed [-1, 1].
-    let rg = textureSample(normal_tex, normal_samp, uv, i32(lod)).rg;
-    // Reconstruct Y from the half-sphere constraint; positive because the
-    // surface normal always points upward for heightfield terrain.
-    let y2 = max(1.0 - rg.x * rg.x - rg.y * rg.y, 0.0);
-    return normalize(vec3<f32>(rg.x, sqrt(y2), rg.y));
+    return textureSample(normal_tex, normal_samp, uv, i32(lod));
 }
 
-fn shading_normal(lod: u32, xz: vec2<f32>) -> vec3<f32> {
-    // Baked normals are computed from full-res f32 data before R16Unorm
-    // quantization, avoiding the staircase artifacts that FD produces on
-    // steep slopes. Unloaded tiles return (0,0) → reconstructs to (0,1,0).
-    // debug_flags.y: show FD normals for comparison.
+// Returns the shading normal blended between fine and coarse using morph_alpha.
+// Single texture lookup (RGBA8Snorm): rg=fine XZ, ba=coarse XZ.
+// Falls back to per-pixel FD normals when debug_flags.y is set.
+fn shading_normal_blended(lod: u32, coarse_lod: u32, xz: vec2<f32>, alpha: f32) -> vec3<f32> {
     if terrain.debug_flags.y > 0.5 {
-        return pixel_normal(lod, xz);
+        let n_fine   = pixel_normal(lod, xz);
+        let n_coarse = pixel_normal(coarse_lod, xz);
+        return normalize(mix(n_fine, n_coarse, alpha));
     }
-    return baked_normal_at(lod, xz);
+    let rgba = baked_normal_rgba(lod, xz);
+    // Blend fine (rg) and coarse (ba) XZ components, then reconstruct Y.
+    let xz_n = mix(rgba.rg, rgba.ba, alpha);
+    let y2   = max(1.0 - dot(xz_n, xz_n), 0.0);
+    return normalize(vec3<f32>(xz_n.x, sqrt(y2), xz_n.y));
 }
 
 // ---------------------------------------------------------------------------
@@ -642,9 +640,7 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     let vertex_n   = normalize(in.world_normal);
     let coarse_lod = min(in.lod_level + 1u, u32(terrain.num_lod_levels) - 1u);
     let frag_xz    = in.world_pos.xz;
-    let n_fine     = shading_normal(in.lod_level, frag_xz);
-    let n_coarse   = shading_normal(coarse_lod,   frag_xz);
-    let n_macro    = normalize(mix(n_fine, n_coarse, in.morph_alpha));
+    let n_macro    = shading_normal_blended(in.lod_level, coarse_lod, frag_xz, in.morph_alpha);
 
     // Slope from the macro normal drives zone selection (albedo/normal blending),
     // so both functions see the same weights regardless of detail perturbation.

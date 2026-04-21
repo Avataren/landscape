@@ -338,7 +338,7 @@ fn sync_preload_tiles(
 
     let res = config.clipmap_resolution();
     let height_bpl = (res * res * 2) as usize; // R16Unorm
-    let normal_bpl = (res * res * 2) as usize; // RG8Snorm
+    let normal_bpl = (res * res * 4) as usize; // RGBA8Snorm
     let half = (res / 2) as i32;
     let ts = config.tile_size;
 
@@ -402,10 +402,10 @@ fn sync_preload_tiles(
                         }
                         let tx = gx.rem_euclid(res as i32) as usize;
                         let tz = gz.rem_euclid(res as i32) as usize;
-                        let dst = layer_base + (tz * res as usize + tx) * 2;
+                        let dst = layer_base + (tz * res as usize + tx) * 4;
                         let enc = tile.normal_data[(row * ts + col) as usize];
-                        if dst + 2 <= img_data.len() {
-                            img_data[dst..dst + 2].copy_from_slice(&enc);
+                        if dst + 4 <= img_data.len() {
+                            img_data[dst..dst + 4].copy_from_slice(&enc);
                         }
                     }
                 }

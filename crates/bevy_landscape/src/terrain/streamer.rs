@@ -108,7 +108,7 @@ pub(crate) fn load_tile_data(
             if use_procedural {
                 build_procedural_normal_tile(key, tile_size, level_scale_ws, height_scale)
             } else {
-                vec![[0u8, 0u8]; (tile_size * tile_size) as usize]
+                vec![[0u8; 4]; (tile_size * tile_size) as usize]
             }
         });
 
@@ -395,13 +395,15 @@ fn load_disk_normal_tile(
     key: TileKey,
     tile_size: u32,
     bounds: Option<GridBounds>,
-) -> Option<Vec<[u8; 2]>> {
-    match bounds {
+) -> Option<Vec<[u8; 4]>> {
+    let rg: Vec<[u8; 2]> = match bounds {
         Some(bounds) => build_bounded_tile(key, tile_size, bounds, |src_key| {
             read_rg8_snorm_tile(&normal_tile_path(root, src_key), tile_size)
-        }),
-        None => read_rg8_snorm_tile(&normal_tile_path(root, key), tile_size),
-    }
+        })?,
+        None => read_rg8_snorm_tile(&normal_tile_path(root, key), tile_size)?,
+    };
+    // Disk files store only the fine normal (2 bytes). Duplicate into coarse (BA=RG).
+    Some(rg.into_iter().map(|[r, g]| [r, g, r, g]).collect())
 }
 
 /// Reads a pre-baked R16Unorm tile from disk and converts to f32 in [0, 1].
@@ -429,11 +431,12 @@ fn read_rg8_snorm_tile(path: &Path, tile_size: u32) -> Option<Vec<[u8; 2]>> {
     Some(bytes.chunks_exact(2).map(|b| [b[0], b[1]]).collect())
 }
 
-fn encode_normal_xz_snorm(normal: Vec3) -> [u8; 2] {
-    [
-        (normal.x.clamp(-1.0, 1.0) * 127.0).round() as i8 as u8,
-        (normal.z.clamp(-1.0, 1.0) * 127.0).round() as i8 as u8,
-    ]
+fn snorm(v: f32) -> u8 {
+    (v.clamp(-1.0, 1.0) * 127.0).round() as i8 as u8
+}
+
+fn encode_normal_pair(fine: Vec3, coarse: Vec3) -> [u8; 4] {
+    [snorm(fine.x), snorm(fine.z), snorm(coarse.x), snorm(coarse.z)]
 }
 
 fn build_procedural_normal_tile(
@@ -441,22 +444,48 @@ fn build_procedural_normal_tile(
     tile_size: u32,
     level_scale_ws: f32,
     height_scale: f32,
-) -> Vec<[u8; 2]> {
+) -> Vec<[u8; 4]> {
     let len = (tile_size * tile_size) as usize;
     let mut pixels = Vec::with_capacity(len);
     for row in 0..tile_size {
         for col in 0..tile_size {
             let world_x = ((key.x * tile_size as i32 + col as i32) as f32 + 0.5) * level_scale_ws;
             let world_z = ((key.y * tile_size as i32 + row as i32) as f32 + 0.5) * level_scale_ws;
-            pixels.push(encode_normal_xz_snorm(normal_at_world(
-                world_x,
-                world_z,
-                level_scale_ws,
-                height_scale,
-            )));
+            pixels.push(encode_normal_pair(
+                normal_at_world(world_x, world_z, level_scale_ws, height_scale),
+                normal_at_world(world_x, world_z, level_scale_ws * 2.0, height_scale),
+            ));
         }
     }
     pixels
+}
+
+fn sobel_normal(
+    col: i32,
+    row: i32,
+    eps: i32,
+    height_data: &[f32],
+    tile_size_i32: i32,
+    level_scale_ws: f32,
+    height_scale: f32,
+) -> Vec3 {
+    let sample = |x: i32, y: i32| -> f32 {
+        let x = x.clamp(0, tile_size_i32 - 1) as usize;
+        let y = y.clamp(0, tile_size_i32 - 1) as usize;
+        height_data[y * tile_size_i32 as usize + x]
+    };
+    let h = |dx: i32, dy: i32| sample(col + dx * eps, row + dy * eps);
+    let gx = (h(1, -1) + 2.0 * h(1, 0) + h(1, 1) - h(-1, -1) - 2.0 * h(-1, 0) - h(-1, 1))
+        * (1.0 / 8.0)
+        * height_scale;
+    let gz = (h(-1, 1) + 2.0 * h(0, 1) + h(1, 1) - h(-1, -1) - 2.0 * h(0, -1) - h(1, -1))
+        * (1.0 / 8.0)
+        * height_scale;
+    let nx = -gx;
+    let nz = -gz;
+    let ny = level_scale_ws * eps as f32;
+    let len = (nx * nx + ny * ny + nz * nz).sqrt().max(1e-6);
+    Vec3::new(nx / len, ny / len, nz / len)
 }
 
 fn build_normal_tile_from_height_data(
@@ -464,34 +493,15 @@ fn build_normal_tile_from_height_data(
     tile_size: u32,
     level_scale_ws: f32,
     height_scale: f32,
-) -> Vec<[u8; 2]> {
+) -> Vec<[u8; 4]> {
     let tile_size_i32 = tile_size as i32;
     let mut pixels = Vec::with_capacity((tile_size * tile_size) as usize);
-    let sample = |x: i32, y: i32| -> f32 {
-        let x = x.clamp(0, tile_size_i32 - 1) as usize;
-        let y = y.clamp(0, tile_size_i32 - 1) as usize;
-        height_data[y * tile_size as usize + x]
-    };
 
     for row in 0..tile_size_i32 {
         for col in 0..tile_size_i32 {
-            let h = |dx: i32, dy: i32| sample(col + dx, row + dy);
-            let gx = (h(1, -1) + 2.0 * h(1, 0) + h(1, 1) - h(-1, -1) - 2.0 * h(-1, 0) - h(-1, 1))
-                * (1.0 / 8.0)
-                * height_scale;
-            let gz = (h(-1, 1) + 2.0 * h(0, 1) + h(1, 1) - h(-1, -1) - 2.0 * h(0, -1) - h(1, -1))
-                * (1.0 / 8.0)
-                * height_scale;
-            let nx = -gx;
-            let nz = -gz;
-            let len = (nx * nx + level_scale_ws * level_scale_ws + nz * nz)
-                .sqrt()
-                .max(1e-6);
-            pixels.push(encode_normal_xz_snorm(Vec3::new(
-                nx / len,
-                level_scale_ws / len,
-                nz / len,
-            )));
+            let fine = sobel_normal(col, row, 1, height_data, tile_size_i32, level_scale_ws, height_scale);
+            let coarse = sobel_normal(col, row, 2, height_data, tile_size_i32, level_scale_ws, height_scale);
+            pixels.push(encode_normal_pair(fine, coarse));
         }
     }
 

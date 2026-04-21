@@ -49,8 +49,9 @@ pub struct HeightTileCpu {
     pub key: TileKey,
     /// Row-major f32 heights, [tile_size * tile_size] elements.
     pub data: Vec<f32>,
-    /// Row-major RG8Snorm XZ normals, [tile_size * tile_size] elements.
-    pub normal_data: Vec<[u8; 2]>,
+    /// Row-major RGBA8Snorm normals, [tile_size * tile_size] elements.
+    /// RG = fine-level XZ, BA = coarse-level XZ (2× epsilon).
+    pub normal_data: Vec<[u8; 4]>,
     pub tile_size: u32,
     /// Reload generation this tile was requested for.  Tiles with a stale
     /// generation are discarded by `poll_tile_stream_jobs` after a hot-reload,
