@@ -24,7 +24,7 @@ use bevy::{
 };
 
 use crate::images::{GeneratorImage, NormalizationImage};
-use crate::uniforms::{GeneratorParamGeneration, GeneratorUniform, GeneratorUniformBuffer};
+use crate::uniforms::{GeneratorDisplayGeneration, GeneratorParamGeneration, GeneratorUniform, GeneratorUniformBuffer};
 
 const WORKGROUP_SIZE: u32 = 8;
 
@@ -387,8 +387,8 @@ impl Node for GeneratorNormNode {
     ) -> Result<(), NodeRunError> {
         if matches!(self.state, GeneratorState::Loading) { return Ok(()); }
 
-        let param_gen = world
-            .get_resource::<GeneratorParamGeneration>()
+        let display_gen = world
+            .get_resource::<GeneratorDisplayGeneration>()
             .map(|g| g.0)
             .unwrap_or(0);
         let erosion_ticks = world
@@ -398,7 +398,7 @@ impl Node for GeneratorNormNode {
 
         let last_gen   = self.dispatched_params_gen.load(Ordering::Relaxed);
         let last_ticks = self.dispatched_erosion_ticks.load(Ordering::Relaxed);
-        if param_gen == last_gen && erosion_ticks == last_ticks {
+        if display_gen == last_gen && erosion_ticks == last_ticks {
             return Ok(());
         }
 
@@ -449,7 +449,7 @@ impl Node for GeneratorNormNode {
             pass.dispatch_workgroups(wg_x, wg_y, 1);
         }
 
-        self.dispatched_params_gen.store(param_gen, Ordering::Relaxed);
+        self.dispatched_params_gen.store(display_gen, Ordering::Relaxed);
         self.dispatched_erosion_ticks.store(erosion_ticks, Ordering::Relaxed);
         Ok(())
     }
@@ -474,6 +474,7 @@ impl Plugin for GeneratorComputePlugin {
         app.add_plugins(ExtractResourcePlugin::<GeneratorImage>::default())
             .add_plugins(ExtractResourcePlugin::<GeneratorUniform>::default())
             .add_plugins(ExtractResourcePlugin::<GeneratorParamGeneration>::default())
+            .add_plugins(ExtractResourcePlugin::<GeneratorDisplayGeneration>::default())
             .add_plugins(ExtractResourcePlugin::<NormalizationImage>::default());
 
         let render_app = app.sub_app_mut(RenderApp);

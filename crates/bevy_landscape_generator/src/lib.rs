@@ -17,8 +17,9 @@ use export::GeneratorExportPlugin;
 use images::{
     build_generator_image, build_normalization_image, GeneratorImage, NormalizationImage,
 };
-use uniforms::{GeneratorParamGeneration, GeneratorUniform};
+use uniforms::{GeneratorDisplayGeneration, GeneratorParamGeneration, GeneratorUniform};
 
+pub use erosion_images::ErosionBuffers as GeneratorErosionBuffers;
 pub use erosion_params::ErosionControlState as GeneratorErosionControlState;
 pub use erosion_params::ErosionParams as GeneratorErosionParams;
 pub use images::GeneratorImage as HeightfieldImage;
@@ -31,6 +32,7 @@ impl Plugin for LandscapeGeneratorPlugin {
         app.init_resource::<GeneratorParams>()
             .init_resource::<GeneratorUniform>()
             .init_resource::<GeneratorParamGeneration>()
+            .init_resource::<GeneratorDisplayGeneration>()
             .init_resource::<ErosionParams>()
             .init_resource::<ErosionUniform>()
             .insert_resource(ErosionControlState::new_dirty())
@@ -138,10 +140,36 @@ fn sync_uniform(
     params: Res<GeneratorParams>,
     mut uniform: ResMut<GeneratorUniform>,
     mut generation: ResMut<GeneratorParamGeneration>,
+    mut display_generation: ResMut<GeneratorDisplayGeneration>,
 ) {
     if params.is_changed() {
-        *uniform = GeneratorUniform::from_params(&params);
-        generation.0 += 1;
+        let new = GeneratorUniform::from_params(&params);
+        // Check whether any *noise/shape* field changed, ignoring the display-only
+        // `grayscale` flag.  If only grayscale flipped, we must NOT increment the raw
+        // generation — that would re-dispatch `preview_generate_raw` and overwrite
+        // the eroded `raw_heights` with fresh un-eroded noise.
+        let raw_changed = new.resolution           != uniform.resolution
+            || new.octaves              != uniform.octaves
+            || new.seed                 != uniform.seed
+            || new.offset               != uniform.offset
+            || new.frequency            != uniform.frequency
+            || new.lacunarity           != uniform.lacunarity
+            || new.gain                 != uniform.gain
+            || new.height_scale         != uniform.height_scale
+            || new.continent_frequency  != uniform.continent_frequency
+            || new.continent_strength   != uniform.continent_strength
+            || new.ridge_strength       != uniform.ridge_strength
+            || new.warp_frequency       != uniform.warp_frequency
+            || new.warp_strength        != uniform.warp_strength
+            || new.erosion_strength     != uniform.erosion_strength;
+        *uniform = new;
+        // Always bump display_generation so GeneratorNormNode re-runs the
+        // normalize/colorize pass (needed for grayscale toggle, erosion, etc.).
+        display_generation.0 += 1;
+        // Only bump the raw generation when the noise/shape params actually changed.
+        if raw_changed {
+            generation.0 += 1;
+        }
     }
 }
 

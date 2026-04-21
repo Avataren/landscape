@@ -317,7 +317,8 @@ fn preview_reduce_minmax(
 
     if id.x < params.resolution.x && id.y < params.resolution.y {
         let h = textureLoad(raw_heights, vec2<i32>(id.xy)).x;
-        // IEEE 754: positive floats in [0,1] compare correctly as unsigned integers.
+        // IEEE 754: positive floats compare correctly as unsigned integers for
+        // any positive range (including values above 1.0 from eroded deposition).
         let bits = bitcast<u32>(h);
         atomicMin(&wg_min, bits);
         atomicMax(&wg_max, bits);
@@ -342,23 +343,22 @@ fn preview_normalize_display(@builtin(global_invocation_id) id: vec3<u32>) {
     let max_h = bitcast<f32>(atomicLoad(&minmax_buf[1]));
     let range = max_h - min_h;
 
-    let h_raw = textureLoad(raw_heights, vec2<i32>(id.xy)).x;
+    let coord = vec2<i32>(id.xy);
+    let h_raw = textureLoad(raw_heights, coord).x;
     let h = select(h_raw, (h_raw - min_h) / range, range > 1e-6);
 
     var color: vec3<f32>;
     if params.grayscale != 0u {
         color = vec3<f32>(h, h, h);
     } else {
-        // Re-compute finite-difference neighbours for hillshading using raw (unnormalised)
-        // heights so the gradient magnitude is unchanged; use normalised h for palette only.
-        let res = vec2<f32>(f32(params.resolution.x), f32(params.resolution.y));
-        let texel = 1.0 / res;
-        let uv = (vec2<f32>(f32(id.x), f32(id.y)) + 0.5) / res;
-
-        let hx0 = terrain_height_for(params, uv - vec2<f32>(texel.x, 0.0));
-        let hx1 = terrain_height_for(params, uv + vec2<f32>(texel.x, 0.0));
-        let hy0 = terrain_height_for(params, uv - vec2<f32>(0.0, texel.y));
-        let hy1 = terrain_height_for(params, uv + vec2<f32>(0.0, texel.y));
+        // Compute finite-difference neighbours for hillshading directly from
+        // raw_heights so the gradient reflects the actual eroded terrain.
+        // (Previously this called terrain_height_for(), which samples the noise
+        // function and therefore never reflects erosion-modified topology.)
+        let hx0 = textureLoad(raw_heights, clamp_texel(coord + vec2<i32>(-1,  0), params.resolution)).x;
+        let hx1 = textureLoad(raw_heights, clamp_texel(coord + vec2<i32>( 1,  0), params.resolution)).x;
+        let hy0 = textureLoad(raw_heights, clamp_texel(coord + vec2<i32>( 0, -1), params.resolution)).x;
+        let hy1 = textureLoad(raw_heights, clamp_texel(coord + vec2<i32>( 0,  1), params.resolution)).x;
 
         let dx = (hx1 - hx0) * 4.6;
         let dy = (hy1 - hy0) * 4.6;

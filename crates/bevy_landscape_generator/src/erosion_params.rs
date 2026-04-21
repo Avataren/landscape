@@ -48,18 +48,29 @@ impl Default for ErosionParams {
     fn default() -> Self {
         Self {
             enabled: false,
-            iterations: 500,
+            // 2000 iterations gives the river network time to develop at the
+            // reduced erosion rates above (was 500, which completed too quickly
+            // with the old over-aggressive defaults).
+            iterations: 2000,
             dt: 0.02,
             gravity: 9.81,
             pipe_length: 1.0,
             pipe_area: 1.0,
             rain_rate: 0.003,
             evaporation_rate: 0.015,
-            sediment_capacity: 1.0,
-            erosion_rate: 0.5,
-            deposition_rate: 1.0,
+            // Reduced from 1.0: high capacity + fast flows on a [0,1] heightmap
+            // eroded the entire terrain to flat mush within ~50 ticks.
+            sediment_capacity: 0.5,
+            // Reduced from 0.5: allows gradual channel incision without
+            // stripping all material in the first pass.
+            erosion_rate: 0.15,
+            // Reduced from 1.0: slower deposition lets sediment travel further
+            // downstream, producing alluvial fans and longer river paths.
+            deposition_rate: 0.3,
             min_slope: 0.01,
-            erosion_depth_max: 0.05,
+            // Reduced from 0.05: erosion at full strength with a thinner water
+            // film promotes channel incision over broad sheet wash.
+            erosion_depth_max: 0.02,
             hardness_influence: 0.5,
             thermal_enabled: true,
             repose_angle: 35.0,
@@ -146,7 +157,17 @@ impl Default for ErosionUniform {
 
 impl ErosionUniform {
     /// `hardness_seed` should be stable per terrain (e.g. generator seed).
+    ///
+    /// The simulation runs in **pixel-grid units** (`pipe_length` = 1 cell).
+    ///
+    /// Resolution compensation:
+    /// - `pipe_area` is scaled by `N / 512` so that flux (which depends on
+    ///   per-pixel Δh ∝ 1/N) is resolution-independent.
+    /// - The shader computes *physical slope* (via `gradient2` multiplied by
+    ///   `N / 512`) for sediment capacity, making erosion depth consistent
+    ///   across resolutions.
     pub fn from_params(p: &ErosionParams, resolution: u32, hardness_seed: u32) -> Self {
+        let res_scale = resolution as f32 / 512.0;
         Self {
             resolution:           UVec2::splat(resolution),
             dt:                   p.dt,
@@ -165,7 +186,7 @@ impl ErosionUniform {
             max_steps:            p.particle_max_steps,
             inertia:              p.particle_inertia,
             frame_seed:           hardness_seed,
-            pipe_area:            p.pipe_area,
+            pipe_area:            p.pipe_area * res_scale,
             erosion_depth_max:    p.erosion_depth_max,
         }
     }

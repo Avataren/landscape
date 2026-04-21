@@ -11,6 +11,14 @@ use bevy::{
 #[derive(Clone, Default, Resource, ExtractResource)]
 pub(crate) struct GeneratorParamGeneration(pub u64);
 
+/// Monotonically increasing counter, incremented on any `GeneratorParams` change
+/// including display-only fields (e.g. `grayscale`).  `GeneratorNormNode` watches
+/// this so it re-runs the normalize pass even for display-only changes while
+/// `GeneratorRawNode` continues to watch only `GeneratorParamGeneration` (which
+/// excludes display-only changes) and therefore does NOT re-dispatch `preview_generate_raw`.
+#[derive(Clone, Default, Resource, ExtractResource)]
+pub(crate) struct GeneratorDisplayGeneration(pub u64);
+
 use crate::params::GeneratorParams;
 
 /// GPU-side uniform mirroring the WGSL `GeneratorParams` struct.

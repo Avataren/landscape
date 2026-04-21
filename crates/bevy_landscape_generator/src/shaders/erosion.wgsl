@@ -75,11 +75,19 @@ fn load_flux(c: vec2<i32>) -> vec4<f32> {
     return textureLoad(flux_tex, cc(c));
 }
 
+// Resolution compensation factor: all slopes are measured in pixel-grid
+// units (Δh / pixel).  At higher resolutions the same physical terrain has
+// smaller per-pixel Δh.  Multiplying by res_scale converts pixel-gradient
+// to a value that is consistent with the 512² reference resolution.
+fn res_scale() -> f32 {
+    return f32(params.resolution.x) / 512.0;
+}
+
 fn gradient2(c: vec2<i32>) -> vec2<f32> {
     let inv_2l = 0.5 / params.pipe_length;
     let gx = (load_ha(c + vec2<i32>(1, 0)) - load_ha(c + vec2<i32>(-1, 0))) * inv_2l;
     let gy = (load_ha(c + vec2<i32>(0, 1)) - load_ha(c + vec2<i32>(0, -1))) * inv_2l;
-    return vec2<f32>(gx, gy);
+    return vec2<f32>(gx, gy) * res_scale();
 }
 
 // IQ-style gradient hash for hardness noise.
@@ -124,8 +132,11 @@ fn erosion_init_hardness(@builtin(global_invocation_id) id: vec3<u32>) {
     // Hardness: 0 = hard (resistant), 1 = soft (easily eroded).
     // Higher terrain → harder (matches paper: high-altitude material is usually harder).
     let h = textureLoad(raw_heights, coord).r;
+    // Clamp h to [0,1] for the hardness formula so that deposited terrain
+    // (h up to 1.5) does not invert the "higher = harder" gradient.
+    let h01 = min(h, 1.0);
     let base = clamp(0.5 + n0 * 0.3 + n1 * 0.1, 0.0, 1.0);
-    let hardness = clamp(base * (1.0 - h * 0.4), 0.0, 1.0);
+    let hardness = clamp(base * (1.0 - h01 * 0.4), 0.0, 1.0);
     textureStore(hardness_tex, coord, vec4<f32>(hardness, 0.0, 0.0, 0.0));
 }
 
@@ -149,8 +160,16 @@ fn erosion_clear_buffers(@builtin(global_invocation_id) id: vec3<u32>) {
 fn erosion_copy_out(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= params.resolution.x || id.y >= params.resolution.y { return; }
     let coord = vec2<i32>(id.xy);
+    // Write the full eroded height without clamping to 1.0.  Deposition can
+    // raise height_a up to 1.5 (its internal ceiling); clipping that to 1.0
+    // collapses variation in sediment-filled areas, causing subsequent runs
+    // to start from a degenerate flat-1.0 terrain and the normalisation
+    // pipeline to produce an all-white preview (range → 0, h → 1).
+    // The preview_reduce_minmax / preview_normalize_display passes already
+    // handle any positive float range via the global min/max reduction.
+    // The CPU-side export scan_height_range also scans the actual range.
     let h = textureLoad(height_a, coord).r;
-    textureStore(raw_heights, coord, vec4<f32>(clamp(h, 0.0, 1.0), 0.0, 0.0, 0.0));
+    textureStore(raw_heights, coord, vec4<f32>(h, 0.0, 0.0, 0.0));
 }
 
 // ---------------------------------------------------------------------------
@@ -222,8 +241,11 @@ fn hydro_water_velocity(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(water_tex, coord, vec4<f32>(d_new, 0.0, 0.0, 0.0));
 
     // Velocity (eq. 8): v = ΔW / (d_bar * l)
+    // Floor at 0.01 (not 1e-5): near-dry cells (avg_d < 0.01) would otherwise
+    // produce velocities of 50 000×flux, blowing up the semi-Lagrangian sediment
+    // advection lookback by 100+ pixels and violating mass conservation.
     let avg_d  = (d_prev + d_new) * 0.5;
-    let inv_d  = 1.0 / (2.0 * params.pipe_length * max(avg_d, 1e-5));
+    let inv_d  = 1.0 / (2.0 * params.pipe_length * max(avg_d, 0.01));
     let vx = (in_L - f_self.x + f_self.y - in_R) * inv_d;
     let vy = (in_T - f_self.z + f_self.w - in_B) * inv_d;
     textureStore(velocity_tex, coord, vec4<f32>(vx, vy, 0.0, 0.0));
@@ -281,8 +303,10 @@ fn hydro_erode_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
         hard_w = max(0.05, hard - params.dt * params.hardness_influence * params.deposition_rate * excess);
     }
 
-    textureStore(height_a,     coord, vec4<f32>(clamp(h, 0.0, 1.5), 0.0, 0.0, 0.0));
-    textureStore(sediment_tex, coord, vec4<f32>(max(0.0, s),         0.0, 0.0, 0.0));
+    textureStore(height_a,     coord, vec4<f32>(clamp(h, 0.0, 1.5),    0.0, 0.0, 0.0));
+    // Upper-bound matches the copy_b_to_sediment clamp so hydro_sediment_transport
+    // samples a consistently bounded value (Regression Skeptic Q5 follow-up).
+    textureStore(sediment_tex, coord, vec4<f32>(clamp(s, 0.0, 2.0),    0.0, 0.0, 0.0));
     textureStore(hardness_tex, coord, vec4<f32>(clamp(hard_w, 0.0, 1.0), 0.0, 0.0, 0.0));
 }
 
@@ -307,7 +331,14 @@ fn hydro_sediment_transport(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= params.resolution.x || id.y >= params.resolution.y { return; }
     let coord = vec2<i32>(id.xy);
     let vel   = textureLoad(velocity_tex, coord).xy;
-    let prev  = vec2<f32>(f32(id.x), f32(id.y)) - vel * params.dt / params.pipe_length;
+    // Convert physical velocity to pixel displacement; clamp to ±1 pixel to
+    // satisfy CFL and prevent long-range lookback artefacts.
+    var disp  = vel * params.dt / params.pipe_length;
+    let mag   = length(disp);
+    if mag > 1.0 {
+        disp = disp / mag;
+    }
+    let prev  = vec2<f32>(f32(id.x), f32(id.y)) - disp;
     textureStore(height_b, coord, vec4<f32>(sample_sediment_bl(prev), 0.0, 0.0, 0.0));
 }
 
@@ -315,8 +346,10 @@ fn hydro_sediment_transport(@builtin(global_invocation_id) id: vec3<u32>) {
 fn copy_b_to_sediment(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= params.resolution.x || id.y >= params.resolution.y { return; }
     let coord = vec2<i32>(id.xy);
-    textureStore(sediment_tex, coord,
-                 vec4<f32>(textureLoad(height_b, coord).r, 0.0, 0.0, 0.0));
+    // Clamp to prevent ghost sediment (created by clamped-edge lookbacks in
+    // hydro_sediment_transport) from compounding across iterations.
+    let s = clamp(textureLoad(height_b, coord).r, 0.0, 2.0);
+    textureStore(sediment_tex, coord, vec4<f32>(s, 0.0, 0.0, 0.0));
 }
 
 // ---------------------------------------------------------------------------
@@ -363,59 +396,62 @@ fn thermal_compute(@builtin(global_invocation_id) id: vec3<u32>) {
     let threshold = tan(params.repose_angle_radians);
     let l = params.pipe_length;
     let l_diag = l * 1.41421356; // sqrt(2)
+    // Scale pixel-height-differences to physical slope (consistent with 512²).
+    let rs = res_scale();
 
     var total_out = 0.0;
 
     // Cardinal neighbors (4) — distance = l
-    let dh0 = h_self - load_ha(coord + vec2<i32>(-1,  0));
-    let dh1 = h_self - load_ha(coord + vec2<i32>( 1,  0));
-    let dh2 = h_self - load_ha(coord + vec2<i32>( 0, -1));
-    let dh3 = h_self - load_ha(coord + vec2<i32>( 0,  1));
+    // slope = raw_dh * rs / l  (physical);  transfer uses raw_dh
+    let rdh0 = h_self - load_ha(coord + vec2<i32>(-1,  0));
+    let rdh1 = h_self - load_ha(coord + vec2<i32>( 1,  0));
+    let rdh2 = h_self - load_ha(coord + vec2<i32>( 0, -1));
+    let rdh3 = h_self - load_ha(coord + vec2<i32>( 0,  1));
 
-    if dh0 > 0.0 && dh0 / l > threshold {
-        let t = (dh0 / l - threshold) * l * 0.5 * params.talus_rate * softness;
+    if rdh0 > 0.0 && rdh0 * rs / l > threshold {
+        let t = (rdh0 * rs / l - threshold) * l * 0.5 * params.talus_rate * softness / rs;
         total_out += t;
         atomic_add_delta(coord + vec2<i32>(-1,  0), t);
     }
-    if dh1 > 0.0 && dh1 / l > threshold {
-        let t = (dh1 / l - threshold) * l * 0.5 * params.talus_rate * softness;
+    if rdh1 > 0.0 && rdh1 * rs / l > threshold {
+        let t = (rdh1 * rs / l - threshold) * l * 0.5 * params.talus_rate * softness / rs;
         total_out += t;
         atomic_add_delta(coord + vec2<i32>( 1,  0), t);
     }
-    if dh2 > 0.0 && dh2 / l > threshold {
-        let t = (dh2 / l - threshold) * l * 0.5 * params.talus_rate * softness;
+    if rdh2 > 0.0 && rdh2 * rs / l > threshold {
+        let t = (rdh2 * rs / l - threshold) * l * 0.5 * params.talus_rate * softness / rs;
         total_out += t;
         atomic_add_delta(coord + vec2<i32>( 0, -1), t);
     }
-    if dh3 > 0.0 && dh3 / l > threshold {
-        let t = (dh3 / l - threshold) * l * 0.5 * params.talus_rate * softness;
+    if rdh3 > 0.0 && rdh3 * rs / l > threshold {
+        let t = (rdh3 * rs / l - threshold) * l * 0.5 * params.talus_rate * softness / rs;
         total_out += t;
         atomic_add_delta(coord + vec2<i32>( 0,  1), t);
     }
 
     // Diagonal neighbors (4) — distance = l * sqrt(2)
-    let dh4 = h_self - load_ha(coord + vec2<i32>(-1, -1));
-    let dh5 = h_self - load_ha(coord + vec2<i32>( 1, -1));
-    let dh6 = h_self - load_ha(coord + vec2<i32>(-1,  1));
-    let dh7 = h_self - load_ha(coord + vec2<i32>( 1,  1));
+    let rdh4 = h_self - load_ha(coord + vec2<i32>(-1, -1));
+    let rdh5 = h_self - load_ha(coord + vec2<i32>( 1, -1));
+    let rdh6 = h_self - load_ha(coord + vec2<i32>(-1,  1));
+    let rdh7 = h_self - load_ha(coord + vec2<i32>( 1,  1));
 
-    if dh4 > 0.0 && dh4 / l_diag > threshold {
-        let t = (dh4 / l_diag - threshold) * l_diag * 0.5 * params.talus_rate * softness;
+    if rdh4 > 0.0 && rdh4 * rs / l_diag > threshold {
+        let t = (rdh4 * rs / l_diag - threshold) * l_diag * 0.5 * params.talus_rate * softness / rs;
         total_out += t;
         atomic_add_delta(coord + vec2<i32>(-1, -1), t);
     }
-    if dh5 > 0.0 && dh5 / l_diag > threshold {
-        let t = (dh5 / l_diag - threshold) * l_diag * 0.5 * params.talus_rate * softness;
+    if rdh5 > 0.0 && rdh5 * rs / l_diag > threshold {
+        let t = (rdh5 * rs / l_diag - threshold) * l_diag * 0.5 * params.talus_rate * softness / rs;
         total_out += t;
         atomic_add_delta(coord + vec2<i32>( 1, -1), t);
     }
-    if dh6 > 0.0 && dh6 / l_diag > threshold {
-        let t = (dh6 / l_diag - threshold) * l_diag * 0.5 * params.talus_rate * softness;
+    if rdh6 > 0.0 && rdh6 * rs / l_diag > threshold {
+        let t = (rdh6 * rs / l_diag - threshold) * l_diag * 0.5 * params.talus_rate * softness / rs;
         total_out += t;
         atomic_add_delta(coord + vec2<i32>(-1,  1), t);
     }
-    if dh7 > 0.0 && dh7 / l_diag > threshold {
-        let t = (dh7 / l_diag - threshold) * l_diag * 0.5 * params.talus_rate * softness;
+    if rdh7 > 0.0 && rdh7 * rs / l_diag > threshold {
+        let t = (rdh7 * rs / l_diag - threshold) * l_diag * 0.5 * params.talus_rate * softness / rs;
         total_out += t;
         atomic_add_delta(coord + vec2<i32>( 1,  1), t);
     }

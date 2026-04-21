@@ -8,14 +8,25 @@ use bevy_egui::{
 use bevy_landscape::{MaterialLibrary, ReloadTerrainRequest, TerrainConfig, TerrainSourceDesc};
 use bevy_landscape_generator::{
     export::{GeneratorExportState, StartGeneratorExport},
-    GeneratorErosionControlState, GeneratorErosionParams, GeneratorParams, HeightfieldImage,
+    GeneratorErosionBuffers, GeneratorErosionControlState, GeneratorErosionParams, GeneratorParams,
+    HeightfieldImage,
 };
+
+#[derive(Default, Clone, Copy, PartialEq)]
+enum PreviewMode {
+    #[default]
+    Height,
+    Water,
+}
 
 #[derive(Resource)]
 pub struct GeneratorPanelState {
     pub open: bool,
     preview_id: Option<TextureId>,
     preview_handle: Option<Handle<Image>>,
+    water_preview_id: Option<TextureId>,
+    water_preview_handle: Option<Handle<Image>>,
+    preview_mode: PreviewMode,
     output_dir: String,
     last_completed_generation: u64,
 }
@@ -26,6 +37,9 @@ impl Default for GeneratorPanelState {
             open: false,
             preview_id: None,
             preview_handle: None,
+            water_preview_id: None,
+            water_preview_handle: None,
+            preview_mode: PreviewMode::Height,
             output_dir: "assets/tiles_generated".into(),
             last_completed_generation: 0,
         }
@@ -49,6 +63,7 @@ fn generator_panel_system(
     erosion_ctrl: Res<GeneratorErosionControlState>,
     export_state: Res<GeneratorExportState>,
     gen_image: Option<Res<HeightfieldImage>>,
+    erosion_buffers: Option<Res<GeneratorErosionBuffers>>,
     active_config: Res<TerrainConfig>,
     active_library: Res<MaterialLibrary>,
     mut reload_tx: MessageWriter<ReloadTerrainRequest>,
@@ -77,6 +92,17 @@ fn generator_panel_system(
             panel.preview_id = Some(contexts.add_image(bevy_egui::EguiTextureHandle::Strong(
                 img.heightfield.clone(),
             )));
+        }
+    }
+
+    // Register the water depth texture with egui once erosion buffers are available.
+    if let Some(ref eb) = erosion_buffers {
+        let needs_refresh = panel.water_preview_handle.as_ref() != Some(&eb.water);
+        if needs_refresh {
+            panel.water_preview_handle = Some(eb.water.clone());
+            panel.water_preview_id = Some(contexts.add_image(
+                bevy_egui::EguiTextureHandle::Strong(eb.water.clone()),
+            ));
         }
     }
 
@@ -417,23 +443,51 @@ fn generator_panel_system(
                     ui.heading("Preview");
                     ui.separator();
 
-                    if let Some(tex_id) = panel.preview_id {
-                        let mut grayscale = p.grayscale != 0;
-                        if ui.toggle_value(&mut grayscale, "Grayscale").on_hover_text(
-                            "Switch between pure heightmap (grayscale) and colour hillshade.",
-                        ).changed() {
-                            p.grayscale = grayscale as u32;
-                            params_changed = true;
+                    // Mode selector — swaps which texture is shown; does NOT
+                    // touch params_changed, so no shader re-dispatch fires.
+                    ui.horizontal(|ui| {
+                        ui.selectable_value(&mut panel.preview_mode, PreviewMode::Height, "Height");
+                        ui.selectable_value(&mut panel.preview_mode, PreviewMode::Water,  "Water depth");
+                    });
+                    ui.add_space(2.0);
+
+                    match panel.preview_mode {
+                        PreviewMode::Height => {
+                            if let Some(tex_id) = panel.preview_id {
+                                let mut grayscale = p.grayscale != 0;
+                                if ui.toggle_value(&mut grayscale, "Grayscale").on_hover_text(
+                                    "Switch between pure heightmap (grayscale) and colour hillshade.",
+                                ).changed() {
+                                    p.grayscale = grayscale as u32;
+                                    params_changed = true;
+                                }
+                                let avail = ui.available_width();
+                                ui.add(egui::Image::new((tex_id, egui::Vec2::splat(avail))));
+                                if p.grayscale != 0 {
+                                    ui.small("Raw heightmap — linear [0, 1]");
+                                } else {
+                                    ui.small("Contrast-enhanced hillshade preview");
+                                }
+                            } else {
+                                ui.label("(waiting for GPU texture…)");
+                            }
                         }
-                        let avail = ui.available_width();
-                        ui.add(egui::Image::new((tex_id, egui::Vec2::splat(avail))));
-                        if p.grayscale != 0 {
-                            ui.small("Raw heightmap — linear [0, 1]");
-                        } else {
-                            ui.small("Contrast-enhanced hillshade preview");
+                        PreviewMode::Water => {
+                            if let Some(tex_id) = panel.water_preview_id {
+                                let avail = ui.available_width();
+                                ui.add(egui::Image::new((tex_id, egui::Vec2::splat(avail))));
+                                let ticks = erosion_ctrl.ticks_done();
+                                if erosion_ctrl.is_dirty() && erosion.enabled {
+                                    ui.small(format!("Water depth (live) — tick {}/{}", ticks, erosion.iterations));
+                                } else if erosion.enabled {
+                                    ui.small(format!("Water depth — final ({} iterations)", erosion.iterations));
+                                } else {
+                                    ui.small("Water depth — run erosion to populate");
+                                }
+                            } else {
+                                ui.label("(waiting for erosion buffers…)");
+                            }
                         }
-                    } else {
-                        ui.label("(waiting for GPU texture…)");
                     }
 
                     ui.add_space(8.0);

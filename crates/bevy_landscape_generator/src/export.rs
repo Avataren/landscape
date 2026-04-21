@@ -66,11 +66,11 @@ struct GeneratorExportJob {
     output_dir: PathBuf,
     levels: u32,
     height_images: Vec<Handle<Image>>,
+    #[allow(dead_code)] // Normal readback removed; GPU dispatch kept for pipeline correctness
     normal_images: Vec<Handle<Image>>,
     gpu_dispatched: Arc<AtomicBool>,
     readback_started: bool,
     heights: Vec<Option<Vec<u8>>>,
-    normals: Vec<Option<Vec<u8>>>,
     writer: Option<ExportWriterHandle>,
 }
 
@@ -86,10 +86,12 @@ struct PendingGeneratorReadback {
     lod: u32,
     width: u32,
     height: u32,
+    #[allow(dead_code)] // kind is currently always Height; Normal readback was removed
     kind: ReadbackKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Normal variant no longer used; kept for potential future re-use
 enum ReadbackKind {
     Height,
     Normal,
@@ -733,7 +735,6 @@ fn start_generator_export(
             gpu_dispatched,
             readback_started: false,
             heights: vec![None; levels as usize],
-            normals: vec![None; levels as usize],
             writer: None,
         });
     }
@@ -758,6 +759,9 @@ fn begin_generator_readback(
 
     for lod in 0..job.levels {
         let resolution = job.params.resolution >> lod;
+        // Only read back the height images; normals are derived on CPU after
+        // height normalisation so that the Sobel gradients are consistent with
+        // the normalised height tile values.
         commands.spawn((
             PendingGeneratorReadback {
                 generation: job.generation,
@@ -767,16 +771,6 @@ fn begin_generator_readback(
                 kind: ReadbackKind::Height,
             },
             Readback::texture(job.height_images[lod as usize].clone()),
-        ));
-        commands.spawn((
-            PendingGeneratorReadback {
-                generation: job.generation,
-                lod,
-                width: resolution,
-                height: resolution,
-                kind: ReadbackKind::Normal,
-            },
-            Readback::texture(job.normal_images[lod as usize].clone()),
         ));
     }
 }
@@ -800,19 +794,13 @@ fn handle_generator_readback_complete(
         return;
     }
 
-    let bytes_per_pixel = match pending.kind {
-        ReadbackKind::Height => 4,
-        ReadbackKind::Normal => 4, // Rgba8Snorm: 4 bytes/texel; RG extracted in build_normal_tile_bytes
-    };
-    let compact = strip_padded_rows(&event.data, pending.width, pending.height, bytes_per_pixel);
+    // Only height readback entities are spawned; normals are derived on CPU.
+    let compact = strip_padded_rows(&event.data, pending.width, pending.height, 4);
     let lod = pending.lod as usize;
-    match pending.kind {
-        ReadbackKind::Height => job.heights[lod] = Some(compact),
-        ReadbackKind::Normal => job.normals[lod] = Some(compact),
-    }
+    job.heights[lod] = Some(compact);
 
-    let completed = job.heights.iter().flatten().count() + job.normals.iter().flatten().count();
-    let total = (job.levels as usize) * 2;
+    let completed = job.heights.iter().flatten().count();
+    let total = job.levels as usize;
     if completed < total {
         return;
     }
@@ -826,16 +814,10 @@ fn handle_generator_readback_complete(
         .iter_mut()
         .map(|slot| slot.take().expect("missing height readback"))
         .collect();
-    let normals = job
-        .normals
-        .iter_mut()
-        .map(|slot| slot.take().expect("missing normal readback"))
-        .collect();
     job.writer = Some(spawn_export_writer(
         job.params.clone(),
         job.output_dir.clone(),
         heights,
-        normals,
     ));
 }
 
@@ -1151,7 +1133,6 @@ fn spawn_export_writer(
     params: GeneratorParams,
     output_dir: PathBuf,
     heights: Vec<Vec<u8>>,
-    normals: Vec<Vec<u8>>,
 ) -> ExportWriterHandle {
     let (log_tx, log_rx) = mpsc::channel::<String>();
     let done = Arc::new(AtomicBool::new(false));
@@ -1161,7 +1142,7 @@ fn spawn_export_writer(
 
     std::thread::spawn(move || {
         let run = || -> Result<(), String> {
-            write_export_tiles(&params, &output_dir, &heights, &normals, &log_tx)?;
+            write_export_tiles(&params, &output_dir, &heights, &log_tx)?;
             Ok(())
         };
 
@@ -1181,11 +1162,67 @@ fn spawn_export_writer(
     }
 }
 
+/// Scan R32Float raw bytes from the GPU and return (min, max) of the height values.
+/// Used to normalise exported tiles to [0, 1] the same way the greyscale preview does.
+fn scan_height_range(level_bytes: &[u8]) -> (f32, f32) {
+    let mut min_h = f32::MAX;
+    let mut max_h = f32::MIN;
+    for chunk in level_bytes.chunks_exact(4) {
+        let h = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        if h.is_finite() {
+            if h < min_h { min_h = h; }
+            if h > max_h { max_h = h; }
+        }
+    }
+    if min_h >= max_h {
+        // Flat or empty — avoid divide-by-zero; treat as already normalised.
+        return (0.0, 1.0);
+    }
+    (min_h, max_h)
+}
+
+/// Derives surface normals from a normalised [0, 1] f32 height image using the same
+/// Sobel 3×3 filter as the `derive_normals` WGSL shader.
+/// Output: Rgba8Snorm bytes — XZ normal components in RG, BA = 0/127.
+/// This format is directly compatible with `build_normal_tile_bytes`.
+fn derive_normals_cpu(
+    heights: &[f32],
+    resolution: usize,
+    effective_height_scale: f32,
+    lod_scale: f32,
+) -> Vec<u8> {
+    let clamp_c = |c: i32| c.clamp(0, resolution as i32 - 1) as usize;
+    let s = |col: i32, row: i32| heights[clamp_c(row) * resolution + clamp_c(col)];
+    let mut out = vec![0u8; resolution * resolution * 4];
+    for row in 0..resolution {
+        for col in 0..resolution {
+            let c = col as i32;
+            let r = row as i32;
+            let gx = (s(c+1,r-1) + 2.0*s(c+1,r) + s(c+1,r+1)
+                    - s(c-1,r-1) - 2.0*s(c-1,r) - s(c-1,r+1))
+                    * (1.0 / 8.0) * effective_height_scale;
+            let gz = (s(c-1,r+1) + 2.0*s(c,r+1) + s(c+1,r+1)
+                    - s(c-1,r-1) - 2.0*s(c,r-1) - s(c+1,r-1))
+                    * (1.0 / 8.0) * effective_height_scale;
+            let nx = -gx;
+            let nz = -gz;
+            let len = (nx * nx + lod_scale * lod_scale + nz * nz).sqrt().max(1e-6);
+            let px = (nx / len).clamp(-1.0, 1.0);
+            let pz = (nz / len).clamp(-1.0, 1.0);
+            let off = (row * resolution + col) * 4;
+            out[off]     = (px * 127.0).round() as i8 as u8;
+            out[off + 1] = (pz * 127.0).round() as i8 as u8;
+            out[off + 2] = 0;
+            out[off + 3] = 127u8; // w = 1.0 in snorm (matches WGSL textureStore w=1.0)
+        }
+    }
+    out
+}
+
 fn write_export_tiles(
     params: &GeneratorParams,
     output_dir: &Path,
     heights: &[Vec<u8>],
-    normals: &[Vec<u8>],
     log: &mpsc::Sender<String>,
 ) -> Result<(), String> {
     prepare_output_dir(output_dir)?;
@@ -1196,7 +1233,40 @@ fn write_export_tiles(
     ))
     .ok();
 
-    for (lod, (height_level, normal_level)) in heights.iter().zip(normals.iter()).enumerate() {
+    // Compute the global height range from L0 and normalise ALL levels to [0, 1],
+    // exactly matching what the greyscale preview shows via preview_normalize_display.
+    let height_range = scan_height_range(&heights[0]);
+    log.send(format!(
+        "Height normalisation range: [{:.4}, {:.4}]",
+        height_range.0, height_range.1
+    ))
+    .ok();
+
+    // Build normalised f32 images for each level — needed for CPU normal derivation
+    // so that normals and heights are consistent (both in normalised space).
+    let (h_min, h_max) = height_range;
+    let range = (h_max - h_min).max(1e-8);
+    let normalized: Vec<Vec<f32>> = heights.iter().map(|level_bytes| {
+        level_bytes.chunks_exact(4)
+            .map(|b| {
+                let h = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                ((h - h_min) / range).clamp(0.0, 1.0)
+            })
+            .collect()
+    }).collect();
+
+    // Derive normals from the normalised heights.  The GPU normal readback was removed
+    // because GPU normals are baked before normalisation and have incorrect Sobel
+    // gradient magnitudes relative to the exported (normalised) height tiles.
+    let effective_height_scale = params.height_scale * params.world_scale;
+    let derived_normals: Vec<Vec<u8>> = (0..heights.len()).map(|lod| {
+        let lod_u32 = lod as u32;
+        let lod_res = (params.resolution >> lod_u32) as usize;
+        let lod_scale = params.world_scale * (1u32 << lod_u32) as f32;
+        derive_normals_cpu(&normalized[lod], lod_res, effective_height_scale, lod_scale)
+    }).collect();
+
+    for (lod, height_level) in heights.iter().enumerate() {
         let lod = lod as u32;
         let resolution = params.resolution >> lod;
         let tiles_per_side = (resolution / TILE_SIZE) as i32;
@@ -1213,9 +1283,9 @@ fn write_export_tiles(
                 let ty = tile_start + tile_y as i32;
 
                 let height_tile =
-                    build_height_tile_bytes(height_level, resolution as usize, tile_x, tile_y);
+                    build_height_tile_bytes(height_level, resolution as usize, tile_x, tile_y, height_range);
                 let normal_tile =
-                    build_normal_tile_bytes(normal_level, resolution as usize, tile_x, tile_y);
+                    build_normal_tile_bytes(&derived_normals[lod as usize], resolution as usize, tile_x, tile_y);
 
                 let height_path = height_dir.join(format!("{tx}_{ty}.bin"));
                 std::fs::write(&height_path, height_tile).map_err(|e| {
@@ -1245,6 +1315,7 @@ fn write_export_tiles(
     save_height_png(
         &heights[0],
         params.resolution as usize,
+        height_range,
         &output_dir.join("heightmap_L0.png"),
         log,
     );
@@ -1253,12 +1324,15 @@ fn write_export_tiles(
     Ok(())
 }
 
-fn save_height_png(level_bytes: &[u8], resolution: usize, path: &Path, log: &mpsc::Sender<String>) {
+fn save_height_png(level_bytes: &[u8], resolution: usize, height_range: (f32, f32), path: &Path, log: &mpsc::Sender<String>) {
+    let (h_min, h_max) = height_range;
+    let range = (h_max - h_min).max(1e-8);
     let pixels: Vec<u16> = level_bytes
         .chunks_exact(4)
         .map(|b| {
             let h = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-            (h.clamp(0.0, 1.0) * 65535.0).round() as u16
+            let h_norm = ((h - h_min) / range).clamp(0.0, 1.0);
+            (h_norm * 65535.0).round() as u16
         })
         .collect();
 
@@ -1297,7 +1371,10 @@ fn build_height_tile_bytes(
     resolution: usize,
     tile_x: usize,
     tile_y: usize,
+    height_range: (f32, f32),
 ) -> Vec<u8> {
+    let (h_min, h_max) = height_range;
+    let range = (h_max - h_min).max(1e-8);
     let mut out = Vec::with_capacity((TILE_SIZE * TILE_SIZE * 2) as usize);
     let start_x = tile_x * TILE_SIZE as usize;
     let start_y = tile_y * TILE_SIZE as usize;
@@ -1313,7 +1390,11 @@ fn build_height_tile_bytes(
                 level_bytes[offset + 2],
                 level_bytes[offset + 3],
             ]);
-            let quantized = (sample.clamp(0.0, 1.0) * 65535.0).round() as u16;
+            // Normalise to [0, 1] using the global L0 range — same operation as
+            // preview_normalize_display in generator.wgsl so the exported tiles
+            // match exactly what the greyscale preview shows.
+            let h_norm = ((sample - h_min) / range).clamp(0.0, 1.0);
+            let quantized = (h_norm * 65535.0).round() as u16;
             out.extend_from_slice(&quantized.to_le_bytes());
         }
     }
@@ -1456,7 +1537,7 @@ mod tests {
 
         for tile_y in 0..2usize {
             for tile_x in 0..2usize {
-                let tile = build_height_tile_bytes(&img, resolution, tile_x, tile_y);
+                let tile = build_height_tile_bytes(&img, resolution, tile_x, tile_y, (0.0, 1.0));
                 assert_eq!(tile.len(), (TILE_SIZE * TILE_SIZE * 2) as usize);
 
                 let src_row = tile_y * TILE_SIZE as usize;
@@ -1477,7 +1558,7 @@ mod tests {
 
         for tile_y in 0..2usize {
             for tile_x in 0..2usize {
-                let tile = build_height_tile_bytes(&img, resolution, tile_x, tile_y);
+                let tile = build_height_tile_bytes(&img, resolution, tile_x, tile_y, (0.0, 1.0));
 
                 // Last pixel = (tile_x*256+255, tile_y*256+255) in source
                 let src_row = tile_y * TILE_SIZE as usize + (TILE_SIZE as usize - 1);
@@ -1501,8 +1582,8 @@ mod tests {
         let img = make_height_image(resolution);
 
         for tile_x in 0..2usize {
-            let tile0 = build_height_tile_bytes(&img, resolution, tile_x, 0);
-            let tile1 = build_height_tile_bytes(&img, resolution, tile_x, 1);
+            let tile0 = build_height_tile_bytes(&img, resolution, tile_x, 0, (0.0, 1.0));
+            let tile1 = build_height_tile_bytes(&img, resolution, tile_x, 1, (0.0, 1.0));
 
             // Last row of tile0 (row 255 = source row 255)
             let last_row_h = tile_height_at(&tile0, TILE_SIZE as usize - 1, 0);
@@ -1542,7 +1623,7 @@ mod tests {
 
         for tile_y in 0..tiles_per_side {
             for tile_x in 0..tiles_per_side {
-                let tile = build_height_tile_bytes(&img, resolution, tile_x, tile_y);
+                let tile = build_height_tile_bytes(&img, resolution, tile_x, tile_y, (0.0, 1.0));
                 for row in 0..TILE_SIZE as usize {
                     for col in 0..TILE_SIZE as usize {
                         let src_row = tile_y * TILE_SIZE as usize + row;
