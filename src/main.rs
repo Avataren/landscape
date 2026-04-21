@@ -26,6 +26,7 @@ use bevy_landscape::{
 use bevy_landscape_clouds::{CloudsConfig, VolumetricCloudsPlugin};
 use bevy_landscape_editor::{AppPreferences, LandscapeEditorPlugin};
 use bevy_landscape_generator::LandscapeGeneratorPlugin;
+use bevy_landscape_water::LandscapeWaterPlugin;
 use player::{CameraMode, PlayerPlugin};
 
 const WINDOW_TITLE: &str = "Landscape Renderer";
@@ -42,7 +43,7 @@ fn main() {
     };
     let level_arg = level_arg.or_else(|| AppPreferences::load().default_level);
 
-    let (terrain_config, terrain_source, loaded_library, clouds_config) =
+    let (terrain_config, terrain_source, loaded_library, clouds_config, water_plugin) =
         if let Some(ref path) = level_arg {
             match load_level(path) {
                 Ok(desc) => {
@@ -50,13 +51,15 @@ fn main() {
                         .clouds
                         .as_ref()
                         .and_then(|v| serde_json::from_value(v.clone()).ok());
-                    let (mut config, source, library, _wmin, _wmax, _meta) = desc.into_runtime();
+                    let (mut config, source, library, wmin, wmax, meta) = desc.into_runtime();
                     config.height_scale *= 1.0; // into_runtime already multiplies
-                    (config, source, Some(library), loaded_clouds)
+                    let water_height = meta.water_level.map(|wl| wl * config.height_scale);
+                    let water = LandscapeWaterPlugin { water_height, world_min: wmin, world_max: wmax };
+                    (config, source, Some(library), loaded_clouds, water)
                 }
                 Err(e) => {
                     eprintln!("Warning: failed to load level '{path}': {e}. Starting with empty editor.");
-                    (TerrainConfig::default(), TerrainSourceDesc::default(), None, None)
+                    (TerrainConfig::default(), TerrainSourceDesc::default(), None, None, LandscapeWaterPlugin::default())
                 }
             }
         } else {
@@ -68,6 +71,7 @@ fn main() {
                 TerrainSourceDesc::default(),
                 None,
                 None,
+                LandscapeWaterPlugin::default(),
             )
         };
 
@@ -110,6 +114,7 @@ fn main() {
             config: terrain_config,
             source: terrain_source,
         })
+        .add_plugins(water_plugin)
         .add_plugins(VolumetricCloudsPlugin)
         .add_plugins(LandscapeGeneratorPlugin)
         .add_plugins(TerrainDebugPlugin)

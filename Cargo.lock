@@ -1258,6 +1258,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_landscape_water"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "bevy_landscape",
+ "bevy_water",
+]
+
+[[package]]
 name = "bevy_light"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1890,6 +1899,13 @@ dependencies = [
  "bevy_platform",
  "disqualified",
  "thread_local",
+]
+
+[[package]]
+name = "bevy_water"
+version = "0.18.1"
+dependencies = [
+ "bevy",
 ]
 
 [[package]]
@@ -3870,6 +3886,7 @@ dependencies = [
  "bevy_landscape_clouds",
  "bevy_landscape_editor",
  "bevy_landscape_generator",
+ "bevy_landscape_water",
  "bytemuck",
  "exr",
  "image",

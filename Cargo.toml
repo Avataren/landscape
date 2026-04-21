@@ -5,6 +5,7 @@ members = [
     "crates/bevy_landscape_clouds",
     "crates/bevy_landscape_editor",
     "crates/bevy_landscape_generator",
+    "crates/bevy_landscape_water",
 ]
 resolver = "2"
 
@@ -19,6 +20,7 @@ bevy_landscape = { path = "crates/bevy_landscape" }
 bevy_landscape_clouds = { path = "crates/bevy_landscape_clouds" }
 bevy_landscape_editor = { path = "crates/bevy_landscape_editor" }
 bevy_landscape_generator = { path = "crates/bevy_landscape_generator" }
+bevy_landscape_water = { path = "crates/bevy_landscape_water" }
 bevy = { version = "0.18" }
 avian3d = "0.6"
 bytemuck = { version = "1", features = ["derive"] }
