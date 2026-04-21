@@ -8,10 +8,17 @@ pub const MAX_SUPPORTED_CLIPMAP_LEVELS: usize = 16;
 pub struct TerrainConfig {
     /// Number of nested clipmap LOD levels.
     pub clipmap_levels: u32,
-    /// Vertex count per patch edge (NxN grid). Must be power-of-two friendly.
-    pub patch_resolution: u32,
-    /// Number of patches per ring edge side.
-    pub ring_patches: u32,
+    /// Clipmap grid size. Must be `2^k - 1` (e.g. 511).
+    ///
+    /// Drives the GPU Gems 2 nested-grid layout:
+    ///   block_size  m = (clipmap_n + 1) / 4   (quads per canonical block edge)
+    ///   ring width    = 4 m grid units
+    ///   inner hole    = 2 m grid units
+    ///   texture res   = clipmap_n + 1 texels per axis
+    ///
+    /// Default 511 → m = 128, texture 512 × 512 — matches the previous
+    /// `ring_patches = 8, patch_resolution = 64` resolution.
+    pub clipmap_n: u32,
     /// Height/material tile texel resolution (square).
     pub tile_size: u32,
     /// Uniform terrain scale multiplier at LOD 0, expressed as world-space
@@ -32,7 +39,8 @@ pub struct TerrainConfig {
     /// Baked normals are computed with this scale; a mismatch makes slopes
     /// appear too flat or too steep in lighting.
     pub height_scale: f32,
-    /// Distance ratio within a ring at which morphing begins (0..1).
+    /// Inner ratio of the ring half-extent at which LOD morphing begins (0..1).
+    /// 0.6 = morphing starts at 60 % of half-ring from centre (outer 40 % zone).
     pub morph_start_ratio: f32,
     /// Maximum number of terrain tiles kept resident on GPU.
     pub max_resident_tiles: usize,
@@ -59,8 +67,9 @@ impl Default for TerrainConfig {
     fn default() -> Self {
         Self {
             clipmap_levels: 12,
-            patch_resolution: 64,
-            ring_patches: 8,
+            // 511 = 2^9 - 1 → m = 128, texture 512×512 (same resolution as
+            // the old ring_patches=8 × patch_resolution=64 defaults).
+            clipmap_n: 511,
             tile_size: 256,
             world_scale: 1.0,
             height_scale: 1024.0,
@@ -81,12 +90,20 @@ impl TerrainConfig {
         self.clipmap_levels.min(MAX_SUPPORTED_CLIPMAP_LEVELS as u32)
     }
 
-    /// Effective resolution of each clipmap level texture.
+    /// Canonical block size: quads per block edge.
     ///
-    /// This is derived from the number of ring patches and the patch mesh
-    /// resolution so the clipmap texel grid always matches the terrain grid.
+    /// In the GPU Gems 2 layout, each ring decomposes into 12 (or 16 for level 0)
+    /// `m × m` canonical blocks where `m = (clipmap_n + 1) / 4`.
+    pub fn block_size(&self) -> u32 {
+        (self.clipmap_n + 1) / 4
+    }
+
+    /// Texel resolution of each clipmap level texture.
+    ///
+    /// Equals `clipmap_n + 1` — the number of grid vertices along one ring
+    /// edge, which spans 4 block-widths = 4 m grid units.
     pub fn clipmap_resolution(&self) -> u32 {
-        self.ring_patches * self.patch_resolution
+        self.clipmap_n + 1
     }
 }
 
@@ -95,11 +112,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clipmap_resolution_tracks_ring_geometry() {
+    fn block_size_divides_resolution() {
         let config = TerrainConfig::default();
-        assert_eq!(
-            config.clipmap_resolution(),
-            config.ring_patches * config.patch_resolution
-        );
+        assert_eq!(config.clipmap_resolution(), 4 * config.block_size());
+    }
+
+    #[test]
+    fn clipmap_n_is_valid() {
+        let config = TerrainConfig::default();
+        let n = config.clipmap_n;
+        // n must be 2^k - 1 for the GPU Gems 2 odd-n constraint.
+        assert_eq!((n + 1).count_ones(), 1, "clipmap_n + 1 must be a power of two");
     }
 }

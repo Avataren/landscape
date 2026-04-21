@@ -26,7 +26,7 @@ use bevy::{
     pbr::wireframe::{NoWireframe, WireframePlugin},
     prelude::*,
 };
-use clipmap::{build_patch_instances_for_view_in_bounds, PatchInstanceCpu};
+use clipmap::build_patch_instances_for_view_in_bounds;
 use clipmap_texture::{
     apply_tiles_to_clipmap, begin_terrain_upload_frame, compute_clip_levels,
     compute_initial_clip_levels, create_initial_clipmap_texture,
@@ -39,6 +39,7 @@ use config::TerrainConfig;
 use macro_color::load_macro_color_texture;
 use material::{TerrainMaterial, TerrainMaterialUniforms};
 use material_slots::{sync_material_library_to_terrain_material, MaterialLibrary};
+use clipmap::PatchInstanceCpu;
 use math::{compute_needed_tiles_for_level, level_scale, snap_camera_to_nested_clipmap_grid};
 use pbr_textures::{
     rebuild_pbr_textures_system, PbrRebuildProgress, PbrRebuildState, PbrTexturesDirty,
@@ -292,8 +293,7 @@ fn sync_preload_tiles(
         let keys = compute_needed_tiles_for_level(
             clip_centers[level],
             level_scales[level],
-            config.patch_resolution,
-            config.ring_patches,
+            config.block_size(),
             config.tile_size,
             level as u8,
         );
@@ -502,7 +502,9 @@ fn setup_terrain(
     // Materials panel can gate its "macro color override" toggle on it.
     material_library.macro_color_loaded = macro_color.enabled;
 
-    let base_patch_size = config.patch_resolution as f32 * config.world_scale;
+    // base_patch_size = world-space size of one grid unit at LOD 0 = world_scale.
+    // The vertex shader derives LOD from: round(log2(level_scale_ws / base_patch_size)).
+    let base_patch_size = config.world_scale;
     let bounds_fade_distance = compute_bounds_fade_dist(
         config.tile_size,
         config.world_scale,
@@ -510,8 +512,8 @@ fn setup_terrain(
         desc.world_max,
     );
 
-    // --- Patch mesh (shared by all entities) ---
-    let patch_mesh = patch_mesh::build_patch_mesh(config.patch_resolution);
+    // --- Canonical block mesh (shared by all block instances) ---
+    let patch_mesh = patch_mesh::build_block_mesh(config.block_size());
     let mesh_handle = meshes.add(patch_mesh);
 
     // --- Build initial patch list before creating the material ---
@@ -547,9 +549,9 @@ fn setup_terrain(
             height_scale: config.height_scale,
             base_patch_size,
             morph_start_ratio: config.morph_start_ratio,
-            ring_patches: config.ring_patches as f32,
+            ring_patches: 4.0, // always 4 canonical columns in GPU Gems 2 layout
             num_lod_levels: levels as f32,
-            patch_resolution: config.patch_resolution as f32,
+            patch_resolution: config.block_size() as f32,
             world_bounds: Vec4::new(
                 desc.world_min.x,
                 desc.world_min.y,
@@ -609,14 +611,15 @@ fn setup_terrain(
         &mut patch_entities,
         &patches,
         config.height_scale,
-        config.patch_resolution,
+        config.block_size(),
     );
 
     info!(
-        "[Terrain] Setup complete: {} patches across {} LOD levels. \
-         Clipmap {}×{}×{} (R16Unorm array, derived from ring_patches × patch_resolution).",
+        "[Terrain] Setup complete: {} blocks across {} LOD levels (GPU Gems 2 layout, m={}). \
+         Clipmap {}×{}×{} (R16Unorm array).",
         patches.len(),
         levels,
+        config.block_size(),
         config.clipmap_resolution(),
         config.clipmap_resolution(),
         levels,
@@ -692,10 +695,8 @@ fn forward_bias_xz(config: &TerrainConfig, cam: &Transform, ratio: f32) -> Vec2 
     if len <= 1e-3 {
         return Vec2::ZERO;
     }
-    let half_ring_l0 = config.ring_patches as f32
-        * config.patch_resolution as f32
-        * level_scale(config.world_scale, 0)
-        * 0.5;
+    // Half the L0 ring span = 2 * block_size * world_scale.
+    let half_ring_l0 = 2.0 * config.block_size() as f32 * level_scale(config.world_scale, 0);
     (forward_xz / len) * (half_ring_l0 * ratio)
 }
 
@@ -733,7 +734,7 @@ fn update_patch_transforms(
             &mut patch_entities,
             &patches,
             config.height_scale,
-            config.patch_resolution,
+            config.block_size(),
         );
         respawned = true;
     }
@@ -748,9 +749,9 @@ fn update_patch_transforms(
     for (entity, patch) in patch_entities.entities.iter().zip(patches.iter()) {
         if let Ok((mut transform, mut instance)) = query.get_mut(*entity) {
             transform.translation = Vec3::new(patch.origin_ws.x, 0.0, patch.origin_ws.y);
-            transform.scale = Vec3::new(patch.patch_size_ws, 1.0, patch.patch_size_ws);
+            transform.scale = Vec3::new(patch.level_scale_ws, 1.0, patch.level_scale_ws);
             instance.patch_origin_ws = patch.origin_ws;
-            instance.patch_scale_ws = patch.patch_size_ws;
+            instance.patch_scale_ws = patch.level_scale_ws;
         }
     }
     patch_entities.last_clip_centers = view.clip_centers.clone();
@@ -833,12 +834,11 @@ fn reload_terrain_system(
             mat.height_texture = new_height_handle.clone();
             mat.normal_texture = new_normal_handle.clone();
             mat.params.height_scale = new_config.height_scale;
-            mat.params.base_patch_size =
-                new_config.patch_resolution as f32 * new_config.world_scale;
+            mat.params.base_patch_size = new_config.world_scale;
             mat.params.morph_start_ratio = new_config.morph_start_ratio;
-            mat.params.ring_patches = new_config.ring_patches as f32;
+            mat.params.ring_patches = 4.0;
             mat.params.num_lod_levels = new_config.active_clipmap_levels() as f32;
-            mat.params.patch_resolution = new_config.patch_resolution as f32;
+            mat.params.patch_resolution = new_config.block_size() as f32;
             mat.params.world_bounds = Vec4::new(
                 new_desc.world_min.x,
                 new_desc.world_min.y,
@@ -926,9 +926,9 @@ fn respawn_patch_entities(
     patch_entities: &mut PatchEntities,
     patches: &[PatchInstanceCpu],
     height_scale: f32,
-    patch_resolution: u32,
+    block_size: u32,
 ) {
-    let local_aabb = terrain_patch_local_aabb(height_scale, patch_resolution);
+    let local_aabb = terrain_block_local_aabb(height_scale, block_size);
 
     for entity in patch_entities.entities.drain(..) {
         commands.entity(entity).despawn();
@@ -941,19 +941,19 @@ fn respawn_patch_entities(
                 MeshMaterial3d(patch_entities.material_handle.clone()),
                 Transform {
                     translation: Vec3::new(patch.origin_ws.x, 0.0, patch.origin_ws.y),
-                    scale: Vec3::new(patch.patch_size_ws, 1.0, patch.patch_size_ws),
+                    // Scale = one grid unit in world space; the block mesh has
+                    // vertices at integer grid positions so this maps each
+                    // local unit to level_scale_ws world units.
+                    scale: Vec3::new(patch.level_scale_ws, 1.0, patch.level_scale_ws),
                     ..default()
                 },
                 components::TerrainPatchInstance {
                     lod_level: patch.lod_level,
-                    patch_kind: patch.patch_kind,
+                    patch_kind: 0,
                     patch_origin_ws: patch.origin_ws,
-                    patch_scale_ws: patch.patch_size_ws,
+                    patch_scale_ws: patch.level_scale_ws,
                 },
                 local_aabb,
-                // Keep Bevy's built-in frustum culling enabled, but stop its
-                // automatic bounds pass from replacing the conservative
-                // displaced-terrain AABB with the flat source mesh bounds.
                 NoAutoAabb,
                 NoWireframe,
             ))
@@ -963,14 +963,13 @@ fn respawn_patch_entities(
     }
 }
 
-fn terrain_patch_local_aabb(height_scale: f32, patch_resolution: u32) -> Aabb {
-    // Geomorphing can snap vertices onto the next coarser lattice, which moves
-    // seam vertices up to one coarse texel (2 / patch_resolution in local X/Z)
-    // outside the nominal [0, 1] patch footprint. Pad the local bounds so
-    // Bevy's frustum culler stays conservative for near seam patches.
-    let morph_pad = 2.0 / patch_resolution.max(1) as f32;
+fn terrain_block_local_aabb(height_scale: f32, block_size: u32) -> Aabb {
+    // Block mesh vertices are at integer grid positions [0, m] × [0, m].
+    // Geomorphing can snap outer-edge vertices to the next coarser grid,
+    // displacing them by at most 1 grid unit in X or Z. Pad by 1 unit.
+    let m = block_size as f32;
     Aabb::from_min_max(
-        Vec3::new(-morph_pad, 0.0, -morph_pad),
-        Vec3::new(1.0 + morph_pad, height_scale.max(1.0), 1.0 + morph_pad),
+        Vec3::new(-1.0, 0.0, -1.0),
+        Vec3::new(m + 1.0, height_scale.max(1.0), m + 1.0),
     )
 }

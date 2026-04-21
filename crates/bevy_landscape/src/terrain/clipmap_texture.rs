@@ -63,7 +63,7 @@ fn encode_normal_xz(normal: Vec3) -> [u8; 2] {
 /// Generates one R16Unorm layer for a clipmap level.
 ///
 /// The layer covers the square region centred on `center * level_scale` with
-/// a side length of `ring_patches * patch_resolution * level_scale` world units.
+/// a side length of `clipmap_resolution * level_scale` world units.
 /// `clipmap_resolution` texels span that side length.
 ///
 /// R16Unorm gives ~0.008 m precision over a 512 m height range, eliminating
@@ -71,8 +71,6 @@ fn encode_normal_xz(normal: Vec3) -> [u8; 2] {
 pub fn generate_clipmap_layer(
     center: IVec2,
     level_scale_ws: f32,
-    _ring_patches: u32,
-    _patch_resolution: u32,
     clipmap_resolution: u32,
     use_procedural: bool,
 ) -> Vec<u8> {
@@ -166,8 +164,6 @@ pub fn create_initial_clipmap_texture(config: &TerrainConfig) -> Image {
         let layer_data = generate_clipmap_layer(
             IVec2::ZERO,
             scale,
-            config.ring_patches,
-            config.patch_resolution,
             res,
             config.procedural_fallback,
         );
@@ -268,7 +264,7 @@ pub fn compute_clip_levels(
             .copied()
             .unwrap_or_else(|| level_scale(config.world_scale, lod as u32));
 
-        let ring_span = config.ring_patches as f32 * config.patch_resolution as f32 * scale;
+        let ring_span = config.clipmap_resolution() as f32 * scale;
         let inv_span = 1.0 / ring_span;
         let texel_ws = ring_span / config.clipmap_resolution() as f32;
         // Ring center: world-space position the clip center corresponds to.
@@ -645,7 +641,7 @@ fn write_new_strip(
     // Guard: if the shift is >= ring size a full reset is needed; this should
     // never happen during normal play but protects against teleports.
     if delta.x.abs() >= n || delta.y.abs() >= n {
-        let full = generate_clipmap_layer(new_center, scale, 0, 0, res, use_procedural);
+        let full = generate_clipmap_layer(new_center, scale, res, use_procedural);
         if let Some(slice) = data.get_mut(layer_offset..layer_offset + full.len()) {
             slice.copy_from_slice(&full);
         }
@@ -1065,7 +1061,7 @@ pub fn update_clipmap_textures(
         let height_layer_offset = lod * height_bpl;
         if is_full_reset {
             let full =
-                generate_clipmap_layer(new_center, scale, 0, 0, res, config.procedural_fallback);
+                generate_clipmap_layer(new_center, scale, res, config.procedural_fallback);
             if let Some(slice) = state
                 .height_cpu_data
                 .get_mut(height_layer_offset..height_layer_offset + height_bpl)
@@ -1245,8 +1241,6 @@ pub fn apply_tiles_to_clipmap(
             let full = generate_clipmap_layer(
                 center,
                 scale,
-                config.ring_patches,
-                config.patch_resolution,
                 res,
                 config.procedural_fallback,
             );

@@ -26,11 +26,11 @@ struct MaterialSlotGpu {
 
 struct TerrainParams {
     height_scale:       f32,
-    base_patch_size:    f32,   // patch_resolution * world_scale (LOD-0 patch side)
+    base_patch_size:    f32,   // world_scale (one grid unit at LOD 0); LOD = log2(level_scale_ws / base_patch_size)
     morph_start_ratio:  f32,
-    ring_patches:       f32,
+    ring_patches:       f32,   // always 4 (GPU Gems 2 layout); unused in shader logic
     num_lod_levels:     f32,   // active LOD count; used to clamp coarse index
-    patch_resolution:   f32,   // quads per patch edge
+    patch_resolution:   f32,   // block_size m (quads per canonical block edge)
     world_bounds:       vec4<f32>, // (min_x, min_z, max_x, max_z)
     bounds_fade:        vec4<f32>, // x = fade distance, y = use_macro_color, z = flip_v, w = show_wireframe
     debug_flags:        vec4<f32>, // x = show_normals_only, yzw reserved
@@ -138,12 +138,12 @@ fn blended_height(lod: u32, coarse_lod: u32, alpha: f32, xz: vec2<f32>) -> f32 {
 
 @vertex
 fn vertex(v: Vertex) -> TerrainVOut {
-    // Derive patch placement from the per-instance transform, matching the
-    // prepass/shadow path. This avoids coupling visible terrain geometry to a
-    // separate storage buffer indexed by instance_index, which can become
-    // unstable if Bevy splits terrain draws into multiple batches.
+    // Derive LOD from the per-instance transform's X scale (= level_scale_ws).
+    // Each canonical block has Transform.scale = (level_scale_ws, 1, level_scale_ws)
+    // where level_scale_ws = world_scale * 2^lod.  Dividing by base_patch_size
+    // (= world_scale) and taking log2 recovers the integer LOD level exactly.
     let model = get_world_from_local(v.instance_index);
-    let patch_size_ws = length(model[0].xyz);
+    let patch_size_ws = length(model[0].xyz); // = level_scale_ws
     let lod_f = round(log2(patch_size_ws / terrain.base_patch_size));
     let lod_level = u32(clamp(lod_f, 0.0, 15.0));
 
@@ -152,8 +152,9 @@ fn vertex(v: Vertex) -> TerrainVOut {
     let coarse_lod  = min(lod_level + 1u, max_lod_idx);
 
     // --- World XZ before morphing. ---
-    // Mesh vertices are in [0,1] local XZ; scale by patch_size_ws and offset
-    // by origin to get world space.
+    // Block mesh vertices are at integer grid positions [0, m] in local XZ.
+    // Transform scale = level_scale_ws maps each grid unit to world space.
+    // Translation = block origin in world space.
     let world_xz_orig = (model * vec4<f32>(v.position, 1.0)).xz;
 
     // --- Geomorphing ---

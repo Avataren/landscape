@@ -27,8 +27,7 @@ pub fn update_required_tiles(
         let keys = compute_needed_tiles_for_level(
             center,
             scale,
-            config.patch_resolution,
-            config.ring_patches,
+            config.block_size(),
             config.tile_size,
             level as u8,
         );

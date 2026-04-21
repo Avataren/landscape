@@ -39,46 +39,38 @@ pub fn snap_camera_to_nested_clipmap_grid(
 }
 
 // ---------------------------------------------------------------------------
-// Ring patch layout
+// GPU Gems 2 block layout
 // ---------------------------------------------------------------------------
 
-/// Builds world-space XZ origins for all patches in a clipmap ring at `level`.
+/// Returns the world-space XZ origins of all canonical `m × m` blocks for
+/// one clipmap level, following the GPU Gems 2 nested-grid structure.
 ///
-/// * `center`          – snapped grid-space center for this level
-/// * `scale`           – world-space size of one texel at this level
-/// * `patch_resolution`– vertices per patch edge
-/// * `ring_patches`    – number of patches per ring edge (e.g. 8 → 8×8 outer, minus inner)
-/// * `has_inner_hole`  – true for level > 0 (inner region is covered by finer level)
-pub fn build_ring_patch_origins(
-    center: IVec2,
-    scale: f32,
-    patch_resolution: u32,
-    ring_patches: u32,
-    has_inner_hole: bool,
-) -> Vec<Vec2> {
-    let patch_size_grid = patch_resolution as i32; // grid cells per patch
-    let half = (ring_patches / 2) as i32;
+/// Ring geometry (level > 0 — hollow ring):
+///   Outer boundary: ± 2m grid units from `center`
+///   Inner hole:     ± m  grid units from `center` (filled by the finer level)
+///   → 12 blocks arranged in a 4 × 4 pattern with the centre 2 × 2 removed.
+///
+/// Fill geometry (level 0 — no finer level below):
+///   All 16 blocks in the full 4 × 4 grid.
+///
+/// Each block's world origin is the block's minimum (−x, −z) corner.
+/// The block covers `[origin, origin + m * scale]` in world space.
+pub fn build_block_origins(center: IVec2, scale: f32, m: u32, has_inner_hole: bool) -> Vec<Vec2> {
+    let m = m as i32;
+    // Column starts (in grid units, relative to center): -2m, -m, 0, m
+    let cols = [-2 * m, -m, 0, m];
 
-    // Inner hole half-size in grid cells (half of ring / 2)
-    let inner_half = if has_inner_hole { half / 2 } else { i32::MIN };
+    let mut origins = Vec::with_capacity(if has_inner_hole { 12 } else { 16 });
 
-    let mut origins = Vec::new();
-
-    for py in -half..half {
-        for px in -half..half {
-            // Is this patch inside the inner hole that the next-finer level covers?
-            if has_inner_hole {
-                let in_hole_x = px >= -inner_half && px < inner_half;
-                let in_hole_y = py >= -inner_half && py < inner_half;
-                if in_hole_x && in_hole_y {
-                    continue;
-                }
+    for &bz in &cols {
+        for &bx in &cols {
+            // Skip the inner 2×2 hole for ring levels (l > 0).
+            if has_inner_hole && bx >= -m && bx < m && bz >= -m && bz < m {
+                continue;
             }
-
-            let gx = center.x + px * patch_size_grid;
-            let gy = center.y + py * patch_size_grid;
-
-            origins.push(Vec2::new(gx as f32 * scale, gy as f32 * scale));
+            let gx = center.x + bx;
+            let gz = center.y + bz;
+            origins.push(Vec2::new(gx as f32 * scale, gz as f32 * scale));
         }
     }
 
@@ -91,21 +83,22 @@ pub fn build_ring_patch_origins(
 
 /// Returns the set of tile keys at `level` required to cover the camera's
 /// visible ring.
+///
+/// The ring spans `±2 * block_size` grid units from `center` in each axis
+/// (the full outer boundary of the 4 × 4 canonical-block arrangement).
 pub fn compute_needed_tiles_for_level(
     center: IVec2,
     level_scale: f32,
-    patch_resolution: u32,
-    ring_patches: u32,
+    block_size: u32,
     tile_size: u32,
     level: u8,
 ) -> Vec<TileKey> {
-    let half = (ring_patches / 2) as i32;
-    let patch_size_grid = patch_resolution as i32;
+    let half_extent = (block_size * 2) as i32; // = 2m
     let tile_grid = tile_size as i32;
 
-    // Compute world-space bounds of the ring.
-    let min_grid = center + IVec2::splat(-half * patch_size_grid);
-    let max_grid = center + IVec2::splat(half * patch_size_grid);
+    // Ring outer boundary: center ± 2m in grid space.
+    let min_grid = center + IVec2::splat(-half_extent);
+    let max_grid = center + IVec2::splat(half_extent);
 
     let tx_min =
         (min_grid.x as f32 * level_scale / (tile_grid as f32 * level_scale)).floor() as i32;
@@ -194,18 +187,17 @@ mod tests {
     }
 
     #[test]
-    fn ring_patch_count_with_hole() {
-        let ring = 8u32;
-        let origins = build_ring_patch_origins(IVec2::ZERO, 1.0, 64, ring, true);
-        // Full 8x8 = 64, inner 4x4 = 16 removed -> 48
-        assert_eq!(origins.len(), 48);
+    fn block_count_ring() {
+        // Ring level: 4×4 = 16 minus inner 2×2 = 4 → 12 blocks.
+        let origins = build_block_origins(IVec2::ZERO, 1.0, 128, true);
+        assert_eq!(origins.len(), 12);
     }
 
     #[test]
-    fn ring_patch_count_no_hole() {
-        let ring = 8u32;
-        let origins = build_ring_patch_origins(IVec2::ZERO, 1.0, 64, ring, false);
-        assert_eq!(origins.len(), 64);
+    fn block_count_fill() {
+        // Fill level (l=0): full 4×4 = 16 blocks.
+        let origins = build_block_origins(IVec2::ZERO, 1.0, 128, false);
+        assert_eq!(origins.len(), 16);
     }
 
     #[test]

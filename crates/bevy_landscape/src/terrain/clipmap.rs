@@ -1,6 +1,6 @@
 use crate::terrain::{
     config::TerrainConfig,
-    math::{build_ring_patch_origins, level_scale},
+    math::{build_block_origins, level_scale},
     resources::TerrainViewState,
 };
 use bevy::prelude::*;
@@ -9,38 +9,41 @@ use bevy::prelude::*;
 // CPU patch instance descriptor
 // ---------------------------------------------------------------------------
 
-/// CPU-side description of one terrain patch instance.
-/// Built from the clipmap state every frame (or when the camera crosses a
-/// snapped grid boundary) and submitted to the GPU as a storage buffer.
+/// CPU-side description of one canonical `m × m` terrain block instance.
+///
+/// The corresponding Bevy `Transform` is:
+///   translation = (origin_ws.x, 0, origin_ws.y)
+///   scale       = (level_scale_ws, 1, level_scale_ws)
+///
+/// The vertex shader derives the LOD level from the transform's X-scale:
+///   lod = round(log2(level_scale_ws / world_scale))
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct PatchInstanceCpu {
     /// Clipmap LOD level (0 = finest detail).
     pub lod_level: u32,
-    /// Patch type (0 = normal, reserved for trim patches later).
-    pub patch_kind: u32,
-    /// World-space XZ position of the patch minimum corner.
+    /// World-space XZ position of the block's minimum corner.
     pub origin_ws: Vec2,
-    /// World-space size of one patch side.
-    pub patch_size_ws: f32,
-    /// Camera distance at which morphing starts.
-    pub morph_start: f32,
-    /// Camera distance at which morphing reaches full blend (= coarse grid).
-    pub morph_end: f32,
+    /// World-space size of one grid unit at this LOD (= world_scale × 2^lod).
+    /// Used as the Transform X/Z scale.
+    pub level_scale_ws: f32,
+    /// World-space size of the block side (= m × level_scale_ws).
+    /// Used only for CPU-side bounds intersection; not sent to the GPU.
+    pub block_world_size: f32,
 }
 
 // ---------------------------------------------------------------------------
 // Clipmap builder
 // ---------------------------------------------------------------------------
 
-/// Builds all `PatchInstanceCpu` descriptors for the current terrain view.
+/// Builds all `PatchInstanceCpu` block descriptors for the current terrain view.
 ///
-/// This runs on the CPU every frame. The result goes into a GPU storage
-/// buffer via the render extract/prepare path.
+/// Each LOD level contributes either 16 blocks (level 0, full fill) or
+/// 12 blocks (levels > 0, hollow ring) following the GPU Gems 2 layout.
 pub fn build_patch_instances_for_view(
     config: &TerrainConfig,
     view: &TerrainViewState,
 ) -> Vec<PatchInstanceCpu> {
+    let m = config.block_size();
     let mut out = Vec::new();
 
     for level in 0..config.active_clipmap_levels() {
@@ -54,29 +57,15 @@ pub fn build_patch_instances_for_view(
         };
 
         let has_hole = level > 0;
-        let origins = build_ring_patch_origins(
-            center,
-            lvl_scale,
-            config.patch_resolution,
-            config.ring_patches,
-            has_hole,
-        );
-
-        let patch_world_size = config.patch_resolution as f32 * lvl_scale;
-        // The ring spans ring_patches * patch_size in each direction.
-        // Morph starts at morph_start_ratio of that span from the inner edge.
-        let ring_world_span = patch_world_size * config.ring_patches as f32;
-        let band_near = ring_world_span * config.morph_start_ratio;
-        let band_far = ring_world_span;
+        let origins = build_block_origins(center, lvl_scale, m, has_hole);
+        let block_ws = m as f32 * lvl_scale;
 
         for origin in origins {
             out.push(PatchInstanceCpu {
                 lod_level: level,
-                patch_kind: 0,
                 origin_ws: origin,
-                patch_size_ws: patch_world_size,
-                morph_start: band_near,
-                morph_end: band_far,
+                level_scale_ws: lvl_scale,
+                block_world_size: block_ws,
             });
         }
     }
@@ -84,9 +73,8 @@ pub fn build_patch_instances_for_view(
     out
 }
 
-/// Builds only the patch instances that overlap the terrain footprint.
-/// When bounds are degenerate (world_min == world_max, i.e. not yet set),
-/// all patches pass through so the ring geometry is always present.
+/// Filters instances to those that overlap the terrain footprint.
+/// When bounds are degenerate (world_min == world_max) all instances pass.
 pub fn build_patch_instances_for_view_in_bounds(
     config: &TerrainConfig,
     view: &TerrainViewState,
@@ -94,23 +82,22 @@ pub fn build_patch_instances_for_view_in_bounds(
     world_max: Vec2,
 ) -> Vec<PatchInstanceCpu> {
     let patches = build_patch_instances_for_view(config, view);
-    // Skip bounds culling when no real terrain has been loaded yet.
     if world_min == world_max {
         return patches;
     }
     patches
         .into_iter()
-        .filter(|patch| patch_intersects_world_bounds(patch, world_min, world_max))
+        .filter(|p| block_intersects_world_bounds(p, world_min, world_max))
         .collect()
 }
 
-fn patch_intersects_world_bounds(
+fn block_intersects_world_bounds(
     patch: &PatchInstanceCpu,
     world_min: Vec2,
     world_max: Vec2,
 ) -> bool {
     let patch_min = patch.origin_ws;
-    let patch_max = patch.origin_ws + Vec2::splat(patch.patch_size_ws);
+    let patch_max = patch.origin_ws + Vec2::splat(patch.block_world_size);
 
     patch_max.x > world_min.x
         && patch_min.x < world_max.x
@@ -145,7 +132,6 @@ mod tests {
         let view = make_view(&config, Vec3::new(100.0, 0.0, 100.0));
         let patches = build_patch_instances_for_view(&config, &view);
 
-        // Collect level of each patch; verify they are grouped by level.
         let levels: Vec<u32> = patches.iter().map(|p| p.lod_level).collect();
         let mut prev = 0u32;
         for &l in &levels {
@@ -155,50 +141,47 @@ mod tests {
     }
 
     #[test]
-    fn level_0_has_no_hole() {
+    fn level_0_has_full_grid() {
         let config = TerrainConfig::default();
         let view = make_view(&config, Vec3::ZERO);
         let patches = build_patch_instances_for_view(&config, &view);
 
-        // Level 0 has no inner hole, so it should have ring_patches^2 patches.
+        // Level 0: 4×4 = 16 blocks (no inner hole).
         let count_l0 = patches.iter().filter(|p| p.lod_level == 0).count();
-        assert_eq!(count_l0 as u32, config.ring_patches * config.ring_patches);
+        assert_eq!(count_l0, 16);
     }
 
     #[test]
-    fn level_1_has_hole() {
+    fn level_1_has_ring() {
         let config = TerrainConfig::default();
         let view = make_view(&config, Vec3::ZERO);
         let patches = build_patch_instances_for_view(&config, &view);
 
-        // Level 1 has an inner hole that removes the central quarter of patches.
+        // Level 1: 4×4 = 16 minus inner 2×2 = 12 blocks.
         let count_l1 = patches.iter().filter(|p| p.lod_level == 1).count();
-        let full = config.ring_patches * config.ring_patches;
-        let hole_edge = config.ring_patches / 2;
-        let hole = hole_edge * hole_edge;
-        assert_eq!(count_l1 as u32, full - hole);
+        assert_eq!(count_l1, 12);
     }
 
     #[test]
-    fn patch_sizes_double_per_level() {
+    fn block_world_sizes_double_per_level() {
         let config = TerrainConfig::default();
         let view = make_view(&config, Vec3::ZERO);
         let patches = build_patch_instances_for_view(&config, &view);
 
         for level in 1..config.active_clipmap_levels() {
-            let prev_size = patches
+            let prev = patches
                 .iter()
                 .find(|p| p.lod_level == level - 1)
-                .map(|p| p.patch_size_ws)
+                .map(|p| p.block_world_size)
                 .unwrap();
-            let this_size = patches
+            let curr = patches
                 .iter()
                 .find(|p| p.lod_level == level)
-                .map(|p| p.patch_size_ws)
+                .map(|p| p.block_world_size)
                 .unwrap();
             assert!(
-                (this_size - prev_size * 2.0).abs() < 1e-4,
-                "each level should double the patch size"
+                (curr - prev * 2.0).abs() < 1e-4,
+                "block world size must double each level"
             );
         }
     }

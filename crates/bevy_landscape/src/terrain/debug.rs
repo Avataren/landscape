@@ -205,9 +205,9 @@ pub fn draw_terrain_debug(
         );
         for patch in &patches {
             let color = LOD_COLORS[patch.lod_level as usize % LOD_COLORS.len()];
-            let cx = patch.origin_ws.x + patch.patch_size_ws * 0.5;
-            let cz = patch.origin_ws.y + patch.patch_size_ws * 0.5;
-            let size = patch.patch_size_ws;
+            let cx = patch.origin_ws.x + patch.block_world_size * 0.5;
+            let cz = patch.origin_ws.y + patch.block_world_size * 0.5;
+            let size = patch.block_world_size;
             // Draw the 4 bottom edges of the patch bounding box.
             let corners = [
                 Vec3::new(cx - size * 0.5, 0.0, cz - size * 0.5),
