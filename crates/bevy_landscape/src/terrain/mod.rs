@@ -156,6 +156,12 @@ impl Plugin for TerrainPlugin {
                     .after(update_clipmap_textures)
                     .after(update_terrain_view_state),
             )
+            .add_systems(
+                Update,
+                update_patch_aabbs
+                    .after(apply_tiles_to_clipmap)
+                    .after(update_clipmap_textures),
+            )
             .add_systems(Update, sync_material_library_to_terrain_material)
             .add_systems(Update, rebuild_pbr_textures_system)
             .add_systems(
@@ -972,4 +978,104 @@ fn terrain_block_local_aabb(height_scale: f32, block_size: u32) -> Aabb {
         Vec3::new(-1.0, 0.0, -1.0),
         Vec3::new(m + 1.0, height_scale.max(1.0), m + 1.0),
     )
+}
+
+/// Samples the toroidal height CPU buffer for a block's footprint and returns
+/// the normalized [0,1] min/max heights (multiply by height_scale for world Y).
+/// Stride-4 sampling trades tiny precision loss for cache efficiency.
+fn compute_block_height_range(
+    height_data: &[u8],
+    lod: u32,
+    gx_start: i32,
+    gz_start: i32,
+    block_size: u32,
+    res: u32,
+) -> (f32, f32) {
+    let res = res as usize;
+    let bpl = res * res * 2; // R16Unorm: 2 bytes per texel
+    let layer_base = lod as usize * bpl;
+
+    if layer_base + bpl > height_data.len() {
+        return (0.0, 1.0);
+    }
+
+    let m = block_size as i32;
+    const STRIDE: i32 = 4;
+    let mut h_min = f32::MAX;
+    let mut h_max = 0.0_f32;
+
+    let mut gz = gz_start - 1;
+    while gz <= gz_start + m + 1 {
+        let tz = gz.rem_euclid(res as i32) as usize;
+        let row_base = layer_base + tz * res * 2;
+        let mut gx = gx_start - 1;
+        while gx <= gx_start + m + 1 {
+            let tx = gx.rem_euclid(res as i32) as usize;
+            let off = row_base + tx * 2;
+            if off + 2 <= height_data.len() {
+                let raw = u16::from_le_bytes([height_data[off], height_data[off + 1]]);
+                let h = raw as f32 * (1.0 / 65535.0);
+                if h < h_min {
+                    h_min = h;
+                }
+                if h > h_max {
+                    h_max = h;
+                }
+            }
+            gx += STRIDE;
+        }
+        gz += STRIDE;
+    }
+
+    if h_min > h_max {
+        (0.0, 1.0)
+    } else {
+        (h_min, h_max)
+    }
+}
+
+/// Tightens per-block AABBs each frame by sampling actual height data.
+///
+/// Replaces the conservative full-height-range AABB with per-block [y_min, y_max]
+/// derived from the CPU-side clipmap texture mirror.  Runs after both clipmap
+/// update systems so the data is always current.
+fn update_patch_aabbs(
+    config: Res<TerrainConfig>,
+    view: Res<TerrainViewState>,
+    clipmap_state: Res<TerrainClipmapState>,
+    patch_entities: Res<PatchEntities>,
+    mut query: Query<(&components::TerrainPatchInstance, &mut Aabb)>,
+) {
+    if clipmap_state.height_cpu_data.is_empty() || view.level_scales.is_empty() {
+        return;
+    }
+
+    let m = config.block_size();
+    let res = config.clipmap_resolution();
+    let height_scale = config.height_scale;
+    const PAD: f32 = 1.0;
+
+    for entity in &patch_entities.entities {
+        if let Ok((instance, mut aabb)) = query.get_mut(*entity) {
+            let level_scale_ws = instance.patch_scale_ws;
+            let origin_ws = instance.patch_origin_ws;
+
+            let gx_start = (origin_ws.x / level_scale_ws).round() as i32;
+            let gz_start = (origin_ws.y / level_scale_ws).round() as i32;
+
+            let (h_min, h_max) = compute_block_height_range(
+                &clipmap_state.height_cpu_data,
+                instance.lod_level,
+                gx_start,
+                gz_start,
+                m,
+                res,
+            );
+
+            *aabb = Aabb::from_min_max(
+                Vec3::new(-PAD, h_min * height_scale, -PAD),
+                Vec3::new(m as f32 + PAD, (h_max * height_scale).max(1.0), m as f32 + PAD),
+            );
+        }
+    }
 }
