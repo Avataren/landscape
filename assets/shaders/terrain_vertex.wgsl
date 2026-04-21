@@ -109,18 +109,19 @@ fn height_at(lod: u32, xz: vec2<f32>) -> f32 {
     return sampled_height * bounds_fade_at(xz);
 }
 
-fn normal_at(lod: u32, xz: vec2<f32>) -> vec3<f32> {
-    // Derive the world-space normal from height finite-differences.
-    // Sampling one texel step in +X and +Z gives the surface tangent vectors;
-    // their cross product is the outward normal.
-    //   tangent_x = (eps, h_r - h, 0)
-    //   tangent_z = (0,   h_u - h, eps)
-    //   normal    = tangent_x × tangent_z = (h - h_r, eps, h - h_u)
-    let eps = terrain.clip_levels[lod].w; // texel world size at this LOD
-    let h   = height_at(lod, xz);
-    let h_r = height_at(lod, xz + vec2<f32>(eps, 0.0));
-    let h_u = height_at(lod, xz + vec2<f32>(0.0, eps));
-    return normalize(vec3<f32>(h - h_r, eps, h - h_u));
+/// Sample the baked RGBA8Snorm normal array (RG = fine XZ, BA = coarse XZ) and
+/// return a morph-blended world-space normal. One texture fetch instead of six
+/// height-texture fetches that the finite-difference path would require.
+fn baked_normal_v(lod: u32, xz: vec2<f32>, alpha: f32) -> vec3<f32> {
+    let lvl       = terrain.clip_levels[lod];
+    let world_min = terrain.world_bounds.xy;
+    let world_max = terrain.world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
+    let sample_xz = clamp(xz, world_min, world_max);
+    let uv        = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
+    let rgba      = textureSampleLevel(normal_tex, normal_samp, uv, i32(lod), 0.0);
+    let xz_n      = mix(rgba.rg, rgba.ba, alpha);
+    let y2        = max(1.0 - dot(xz_n, xz_n), 0.0);
+    return normalize(vec3<f32>(xz_n.x, sqrt(y2), xz_n.y));
 }
 
 /// Blend height between fine (lod) and coarse (lod+1) levels by morph_alpha.
@@ -220,9 +221,7 @@ fn vertex(v: Vertex) -> TerrainVOut {
     let h   = blended_height(lod_level, coarse_lod, morph_alpha, world_xz);
     let pos = vec3<f32>(world_xz.x, h, world_xz.y);
 
-    let n_fine = normal_at(lod_level, world_xz);
-    let n_coarse = normal_at(coarse_lod, world_xz);
-    let nrm = normalize(mix(n_fine, n_coarse, morph_alpha));
+    let nrm = baked_normal_v(lod_level, world_xz, morph_alpha);
 
     var out: TerrainVOut;
     out.clip_pos     = position_world_to_clip(pos);
