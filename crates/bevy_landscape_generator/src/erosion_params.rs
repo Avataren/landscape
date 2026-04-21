@@ -166,6 +166,9 @@ impl ErosionUniform {
     /// - The shader computes *physical slope* (via `gradient2` multiplied by
     ///   `N / 512`) for sediment capacity, making erosion depth consistent
     ///   across resolutions.
+    /// - Particle erosion: `num_particles` scales by `(N/512)²` to maintain
+    ///   constant particle density per physical area, and `max_steps` scales
+    ///   by `N/512` so each particle covers the same physical distance.
     pub fn from_params(p: &ErosionParams, resolution: u32, hardness_seed: u32) -> Self {
         let res_scale = resolution as f32 / 512.0;
         Self {
@@ -182,12 +185,44 @@ impl ErosionUniform {
             hardness_influence:   p.hardness_influence,
             repose_angle_radians: p.repose_angle * (PI / 180.0),
             talus_rate:           p.talus_rate,
-            num_particles:        p.num_particles,
-            max_steps:            p.particle_max_steps,
+            num_particles:        ((p.num_particles as f32) * res_scale * res_scale) as u32,
+            max_steps:            ((p.particle_max_steps as f32) * res_scale).ceil() as u32,
             inertia:              p.particle_inertia,
             frame_seed:           hardness_seed,
             pipe_area:            p.pipe_area * res_scale,
             erosion_depth_max:    p.erosion_depth_max,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn particle_params_scale_with_resolution() {
+        let base = ErosionParams::default();
+        for &res in &[256u32, 512, 1024, 2048] {
+            let u = ErosionUniform::from_params(&base, res, 42);
+            let rs = res as f32 / 512.0;
+
+            // num_particles ∝ (N/512)²
+            let expected_np = ((base.num_particles as f32) * rs * rs) as u32;
+            assert_eq!(u.num_particles, expected_np, "num_particles at res {res}");
+
+            // max_steps ∝ N/512
+            let expected_ms = ((base.particle_max_steps as f32) * rs).ceil() as u32;
+            assert_eq!(u.max_steps, expected_ms, "max_steps at res {res}");
+
+            // pipe_area ∝ N/512
+            let expected_pa = base.pipe_area * rs;
+            assert!((u.pipe_area - expected_pa).abs() < 1e-6, "pipe_area at res {res}");
+
+            // evaporation_rate / rs must stay < 1.0 for default params
+            assert!(
+                base.evaporation_rate / rs < 1.0,
+                "evaporation would kill water instantly at res {res}"
+            );
         }
     }
 }

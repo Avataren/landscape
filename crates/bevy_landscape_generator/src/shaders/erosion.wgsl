@@ -549,6 +549,13 @@ fn particle_erode(@builtin(global_invocation_id) id: vec3<u32>) {
     var water  = 1.0;
     var carry  = 0.0;
 
+    // Resolution compensation: each step covers 1 pixel = 1/rs physical units.
+    // Scale per-step erosion/deposition by 1/rs so total material moved over the
+    // same physical distance is consistent.  Slope is converted to physical units
+    // (× rs) for capacity, matching the grid-based gradient2() convention.
+    let rs = res_scale();
+    let inv_rs = 1.0 / rs;
+
     for (var step = 0u; step < params.max_steps; step++) {
         let ipos = vec2<i32>(pos);
         if ipos.x < 0 || ipos.y < 0 || ipos.x >= rx() || ipos.y >= ry() { break; }
@@ -568,12 +575,13 @@ fn particle_erode(@builtin(global_invocation_id) id: vec3<u32>) {
         let h_delta  = new_h - old_h;
 
         speed = sqrt(max(0.0, speed * speed - h_delta * params.gravity));
-        let slope    = max(-h_delta, params.min_slope);
+        // Physical slope: per-pixel h_delta × res_scale (consistent with gradient2).
+        let slope    = max(-h_delta * rs, params.min_slope);
         let capacity = max(0.0, slope * speed * water * params.sediment_capacity);
 
         if carry > capacity || h_delta > 0.0 {
             let deposit = select(
-                params.deposition_rate * (carry - capacity),
+                params.deposition_rate * (carry - capacity) * inv_rs,
                 min(carry, h_delta),
                 h_delta > 0.0
             );
@@ -581,18 +589,25 @@ fn particle_erode(@builtin(global_invocation_id) id: vec3<u32>) {
             carry -= deposit_clamped;
             splat_delta(pos, deposit_clamped);
         } else {
-            // Cap erosion by the height drop per step — a particle can't excavate
-            // more than it descends in one move.
-            let erode = min(params.erosion_rate * (capacity - carry), -h_delta);
+            // Scale erosion per step by 1/rs — more steps at higher res each
+            // erode proportionally less, keeping total material consistent.
+            // Cap by the per-pixel height drop (can't excavate below next cell).
+            let erode = min(params.erosion_rate * (capacity - carry) * inv_rs, -h_delta);
             carry += erode;
             splat_delta(pos, -erode);
         }
 
-        water *= 1.0 - params.evaporation_rate;
+        // Evaporation per physical distance: divide rate by rs so the same
+        // physical path length evaporates the same fraction of water.
+        water = max(0.0, water * (1.0 - params.evaporation_rate * inv_rs));
         pos    = new_pos;
         if water < 0.01 { break; }
     }
-    splat_delta(pos, carry);
+    // Deposit a fraction of remaining sediment instead of dumping it all
+    // at the death position — prevents spike/boulder artifacts while
+    // preserving material budget proportional to deposition_rate.
+    let final_deposit = carry * params.deposition_rate;
+    splat_delta(pos, final_deposit);
 }
 
 @compute @workgroup_size(8, 8, 1)
