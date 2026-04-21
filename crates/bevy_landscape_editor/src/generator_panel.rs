@@ -277,11 +277,9 @@ fn generator_panel_system(
                                 ui.label(format!("{}", baked_clipmap_levels(p.resolution)));
                                 ui.end_row();
 
-                                ui.label("Export Smooth Passes")
-                                    .on_hover_text("Box-blur passes applied to L0 before downsampling. Reduces high-freq noise that aliases at coarser mip levels.");
-                                let mut sp = p.smooth_passes as i32;
-                                if ui.add(egui::Slider::new(&mut sp, 0..=8)).changed() {
-                                    p.smooth_passes = sp as u32;
+                                ui.label("Export Smooth σ")
+                                    .on_hover_text("Gaussian pre-smooth sigma (texels) applied to L0 before downsampling. 0 = off. ~1.0 removes spike outliers. Matches the import wizard's Smooth σ.");
+                                if ui.add(egui::DragValue::new(&mut p.smooth_sigma).speed(0.05).range(0.0..=10.0)).changed() {
                                     params_changed = true;
                                 }
                                 ui.end_row();

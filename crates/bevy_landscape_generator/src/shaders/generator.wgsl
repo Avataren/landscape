@@ -23,8 +23,10 @@ struct GeneratorParams {
 }
 
 struct DownsampleParams {
-    src_resolution: vec2<u32>,
-    dst_resolution: vec2<u32>,
+    src_resolution:   vec2<u32>,
+    dst_resolution:   vec2<u32>,
+    smooth_sigma:     f32,      // Gaussian σ (texels); read only by smooth_height
+    smooth_direction: u32,      // 0 = horizontal, 1 = vertical; read only by smooth_height
 }
 
 struct NormalParams {
@@ -407,22 +409,30 @@ fn downsample_height(@builtin(global_invocation_id) id: vec3<u32>) {
     textureStore(downsample_dst, vec2<i32>(id.xy), vec4<f32>(h, 0.0, 0.0, 1.0));
 }
 
-// 3×3 box blur — applied N times to L0 before the downsample chain.
-// Uses downsample bind group layout: src_resolution == dst_resolution.
+// Separable Gaussian blur — one horizontal pass then one vertical pass.
+// smooth_direction: 0 = blur along X, 1 = blur along Y.
+// Kernel half-width = ceil(3 * sigma), capped at 15 samples either side.
 @compute @workgroup_size(8, 8, 1)
 fn smooth_height(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= downsample_params.src_resolution.x || id.y >= downsample_params.src_resolution.y {
         return;
     }
-    let coord = vec2<i32>(id.xy);
-    let res = downsample_params.src_resolution;
-    var sum = 0.0;
-    for (var dy = -1i; dy <= 1i; dy++) {
-        for (var dx = -1i; dx <= 1i; dx++) {
-            sum += sample_height_texel(downsample_src, coord + vec2<i32>(dx, dy), res);
-        }
+    let coord      = vec2<i32>(id.xy);
+    let res        = downsample_params.src_resolution;
+    let sigma      = max(downsample_params.smooth_sigma, 0.001);
+    let half_k     = min(i32(ceil(3.0 * sigma)), 15);
+    let two_sig_sq = 2.0 * sigma * sigma;
+    let vertical   = downsample_params.smooth_direction != 0u;
+
+    var sum        = 0.0;
+    var weight_sum = 0.0;
+    for (var i = -half_k; i <= half_k; i++) {
+        let w      = exp(-f32(i * i) / two_sig_sq);
+        let offset = select(vec2<i32>(i, 0), vec2<i32>(0, i), vertical);
+        sum        += w * sample_height_texel(downsample_src, coord + offset, res);
+        weight_sum += w;
     }
-    textureStore(downsample_dst, coord, vec4<f32>(sum / 9.0, 0.0, 0.0, 1.0));
+    textureStore(downsample_dst, coord, vec4<f32>(sum / weight_sum, 0.0, 0.0, 1.0));
 }
 
 // Bilinear resample of eroded raw_heights into the export L0 image.

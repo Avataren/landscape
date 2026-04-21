@@ -24,11 +24,11 @@ pub struct GeneratorParams {
     /// of the colour hillshade, making banding / artefacts easier to spot.
     #[serde(default)]
     pub grayscale: u32,
-    /// Number of 3×3 box-blur passes applied to the L0 heightmap before
-    /// downsampling. Reduces high-frequency erosion noise that aliases at
-    /// coarser mip levels. 0 = no smoothing.
+    /// Gaussian pre-smooth sigma (texels) applied to L0 before downsampling.
+    /// Reduces high-frequency erosion noise that aliases at coarser mip levels.
+    /// 0 = off.  Matches the import wizard's "Smooth σ" parameter.
     #[serde(default)]
-    pub smooth_passes: u32,
+    pub smooth_sigma: f32,
 }
 
 impl Default for GeneratorParams {
@@ -50,7 +50,7 @@ impl Default for GeneratorParams {
             offset: Vec2::ZERO,
             seed: 42,
             grayscale: 0,
-            smooth_passes: 0,
+            smooth_sigma: 0.0,
         }
     }
 }

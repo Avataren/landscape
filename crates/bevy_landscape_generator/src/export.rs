@@ -106,7 +106,7 @@ struct ActiveGeneratorExport {
     normal_images: Vec<Handle<Image>>,
     gpu_dispatched: Arc<AtomicBool>,
     use_eroded: bool,
-    /// Ping-pong buffer for smooth passes (same resolution as L0, None if smooth_passes==0).
+    /// Intermediate buffer for separable Gaussian smooth (same resolution as L0, None if smooth_sigma==0).
     smooth_tmp: Option<Handle<Image>>,
 }
 
@@ -157,6 +157,10 @@ impl ExportGeneratorUniform {
 struct DownsampleUniform {
     src_resolution: UVec2,
     dst_resolution: UVec2,
+    /// Gaussian sigma for smooth passes (texels). Ignored by downsample passes.
+    smooth_sigma: f32,
+    /// 0 = horizontal blur, 1 = vertical blur. Ignored by downsample passes.
+    smooth_direction: u32,
 }
 
 #[derive(Clone, ShaderType)]
@@ -694,8 +698,8 @@ fn start_generator_export(
             normal_images.push(build_export_image(&mut images, resolution, TextureFormat::Rgba8Snorm));
         }
 
-        // Ping-pong buffer for smooth passes (same resolution as L0).
-        let smooth_tmp = if params.smooth_passes > 0 {
+        // Intermediate buffer for separable Gaussian smooth (only when sigma > 0).
+        let smooth_tmp = if params.smooth_sigma > 0.0 {
             Some(build_export_image(&mut images, params.resolution, TextureFormat::R32Float))
         } else {
             None
@@ -889,6 +893,8 @@ fn prepare_export_bind_groups(
         let mut uniform = UniformBuffer::from(DownsampleUniform {
             src_resolution: UVec2::splat(resolution),
             dst_resolution: UVec2::splat(resolution),
+            smooth_sigma: 0.0,
+            smooth_direction: 0,
         });
         uniform.write_buffer(&render_device, &render_queue);
         let uniform_bind_group = render_device.create_bind_group(
@@ -911,10 +917,10 @@ fn prepare_export_bind_groups(
         None
     };
 
-    // === smooth passes: N × (h0→tmp, tmp→h0) ===
-    let smooth_count = active_export.params.smooth_passes as usize;
-    let mut smooth_passes: Vec<[DownsamplePassResources; 2]> = Vec::with_capacity(smooth_count);
-    if smooth_count > 0 {
+    // === smooth: one separable Gaussian pass (horizontal h0→tmp, vertical tmp→h0) ===
+    let smooth_sigma = active_export.params.smooth_sigma;
+    let mut smooth_passes: Vec<[DownsamplePassResources; 2]> = Vec::new();
+    if smooth_sigma > 0.0 {
         let Some(tmp_handle) = &active_export.smooth_tmp else {
             return;
         };
@@ -922,44 +928,46 @@ fn prepare_export_bind_groups(
             return;
         };
         let resolution = active_export.params.resolution;
-        for _ in 0..smooth_count {
-            // h0 → tmp
-            let mut u0 = UniformBuffer::from(DownsampleUniform {
-                src_resolution: UVec2::splat(resolution),
-                dst_resolution: UVec2::splat(resolution),
-            });
-            u0.write_buffer(&render_device, &render_queue);
-            let ub0 = render_device.create_bind_group(
-                None,
-                &pipeline_cache.get_bind_group_layout(&pipeline.downsample_uniform_layout),
-                &BindGroupEntries::with_indices(((2, u0.binding().unwrap()),)),
-            );
-            let ib0 = render_device.create_bind_group(
-                None,
-                &pipeline_cache.get_bind_group_layout(&pipeline.downsample_image_layout),
-                &BindGroupEntries::with_indices(((2, &l0_height.texture_view), (3, &tmp_gpu.texture_view))),
-            );
-            // tmp → h0
-            let mut u1 = UniformBuffer::from(DownsampleUniform {
-                src_resolution: UVec2::splat(resolution),
-                dst_resolution: UVec2::splat(resolution),
-            });
-            u1.write_buffer(&render_device, &render_queue);
-            let ub1 = render_device.create_bind_group(
-                None,
-                &pipeline_cache.get_bind_group_layout(&pipeline.downsample_uniform_layout),
-                &BindGroupEntries::with_indices(((2, u1.binding().unwrap()),)),
-            );
-            let ib1 = render_device.create_bind_group(
-                None,
-                &pipeline_cache.get_bind_group_layout(&pipeline.downsample_image_layout),
-                &BindGroupEntries::with_indices(((2, &tmp_gpu.texture_view), (3, &l0_height.texture_view))),
-            );
-            smooth_passes.push([
-                DownsamplePassResources { _uniform: u0, uniform_bind_group: ub0, image_bind_group: ib0, dst_resolution: resolution },
-                DownsamplePassResources { _uniform: u1, uniform_bind_group: ub1, image_bind_group: ib1, dst_resolution: resolution },
-            ]);
-        }
+        // horizontal: h0 → tmp
+        let mut u0 = UniformBuffer::from(DownsampleUniform {
+            src_resolution: UVec2::splat(resolution),
+            dst_resolution: UVec2::splat(resolution),
+            smooth_sigma,
+            smooth_direction: 0,
+        });
+        u0.write_buffer(&render_device, &render_queue);
+        let ub0 = render_device.create_bind_group(
+            None,
+            &pipeline_cache.get_bind_group_layout(&pipeline.downsample_uniform_layout),
+            &BindGroupEntries::with_indices(((2, u0.binding().unwrap()),)),
+        );
+        let ib0 = render_device.create_bind_group(
+            None,
+            &pipeline_cache.get_bind_group_layout(&pipeline.downsample_image_layout),
+            &BindGroupEntries::with_indices(((2, &l0_height.texture_view), (3, &tmp_gpu.texture_view))),
+        );
+        // vertical: tmp → h0
+        let mut u1 = UniformBuffer::from(DownsampleUniform {
+            src_resolution: UVec2::splat(resolution),
+            dst_resolution: UVec2::splat(resolution),
+            smooth_sigma,
+            smooth_direction: 1,
+        });
+        u1.write_buffer(&render_device, &render_queue);
+        let ub1 = render_device.create_bind_group(
+            None,
+            &pipeline_cache.get_bind_group_layout(&pipeline.downsample_uniform_layout),
+            &BindGroupEntries::with_indices(((2, u1.binding().unwrap()),)),
+        );
+        let ib1 = render_device.create_bind_group(
+            None,
+            &pipeline_cache.get_bind_group_layout(&pipeline.downsample_image_layout),
+            &BindGroupEntries::with_indices(((2, &tmp_gpu.texture_view), (3, &l0_height.texture_view))),
+        );
+        smooth_passes.push([
+            DownsamplePassResources { _uniform: u0, uniform_bind_group: ub0, image_bind_group: ib0, dst_resolution: resolution },
+            DownsamplePassResources { _uniform: u1, uniform_bind_group: ub1, image_bind_group: ib1, dst_resolution: resolution },
+        ]);
     }
 
     // When eroded, height_images[0] will be filled by blit_eroded — skip generate.
@@ -1000,6 +1008,8 @@ fn prepare_export_bind_groups(
         let mut uniform = UniformBuffer::from(DownsampleUniform {
             src_resolution: UVec2::splat(active_export.params.resolution >> (lod - 1)),
             dst_resolution: UVec2::splat(dst_resolution),
+            smooth_sigma: 0.0,
+            smooth_direction: 0,
         });
         uniform.write_buffer(&render_device, &render_queue);
         let bind_group = render_device.create_bind_group(
