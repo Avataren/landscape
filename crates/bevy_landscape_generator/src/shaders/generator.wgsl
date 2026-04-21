@@ -233,15 +233,18 @@ fn sample_height_texel(src: texture_2d<f32>, coord: vec2<i32>, resolution: vec2<
 }
 
 fn preview_palette(h: f32) -> vec3<f32> {
-    let contrast_h = smoothstep(0.14, 0.9, pow(h, 0.72));
-    let foothills = vec3<f32>(0.10, 0.12, 0.09);
-    let uplands = vec3<f32>(0.30, 0.38, 0.21);
-    let rock = vec3<f32>(0.60, 0.53, 0.39);
-    let peaks = vec3<f32>(0.94, 0.92, 0.88);
+    // pow(h, 0.55) expands the lower half of the range for better perceptual
+    // contrast; the smoothstep edge is pushed higher so peaks are reserved for
+    // truly high terrain and the preview doesn't wash out to white.
+    let contrast_h = smoothstep(0.10, 0.95, pow(h, 0.55));
+    let foothills = vec3<f32>(0.10, 0.13, 0.08);
+    let uplands   = vec3<f32>(0.27, 0.38, 0.18);
+    let rock      = vec3<f32>(0.56, 0.49, 0.36);
+    let peaks     = vec3<f32>(0.88, 0.86, 0.82);
 
-    let low_to_mid = mix(foothills, uplands, smoothstep(0.06, 0.38, contrast_h));
-    let mid_to_high = mix(low_to_mid, rock, smoothstep(0.34, 0.68, contrast_h));
-    return mix(mid_to_high, peaks, smoothstep(0.64, 0.94, contrast_h));
+    let low_to_mid  = mix(foothills, uplands, smoothstep(0.05, 0.40, contrast_h));
+    let mid_to_high = mix(low_to_mid, rock,   smoothstep(0.36, 0.70, contrast_h));
+    return mix(mid_to_high, peaks, smoothstep(0.72, 1.00, contrast_h));
 }
 
 fn preview_color(uv: vec2<f32>) -> vec3<f32> {
@@ -344,23 +347,28 @@ fn preview_normalize_display(@builtin(global_invocation_id) id: vec3<u32>) {
     let min_h = bitcast<f32>(atomicLoad(&minmax_buf[0]));
     let max_h = bitcast<f32>(atomicLoad(&minmax_buf[1]));
     let range = max_h - min_h;
+    let inv_range = select(1.0, 1.0 / range, range > 1e-6);
 
     let coord = vec2<i32>(id.xy);
     let h_raw = textureLoad(raw_heights, coord).x;
-    let h = select(h_raw, (h_raw - min_h) / range, range > 1e-6);
+    let h = select(h_raw, (h_raw - min_h) * inv_range, range > 1e-6);
 
     var color: vec3<f32>;
     if params.grayscale != 0u {
         color = vec3<f32>(h, h, h);
     } else {
-        // Compute finite-difference neighbours for hillshading directly from
-        // raw_heights so the gradient reflects the actual eroded terrain.
-        // (Previously this called terrain_height_for(), which samples the noise
-        // function and therefore never reflects erosion-modified topology.)
-        let hx0 = textureLoad(raw_heights, clamp_texel(coord + vec2<i32>(-1,  0), params.resolution)).x;
-        let hx1 = textureLoad(raw_heights, clamp_texel(coord + vec2<i32>( 1,  0), params.resolution)).x;
-        let hy0 = textureLoad(raw_heights, clamp_texel(coord + vec2<i32>( 0, -1), params.resolution)).x;
-        let hy1 = textureLoad(raw_heights, clamp_texel(coord + vec2<i32>( 0,  1), params.resolution)).x;
+        // Normalise neighbour heights before computing hillshade gradients so the
+        // shading scale stays consistent regardless of the raw height range. Using
+        // raw (un-normalised) heights caused the preview to turn nearly white after
+        // erosion, because narrow raw ranges → tiny gradients → flat normals → all-ambient.
+        let hx0_raw = textureLoad(raw_heights, clamp_texel(coord + vec2<i32>(-1,  0), params.resolution)).x;
+        let hx1_raw = textureLoad(raw_heights, clamp_texel(coord + vec2<i32>( 1,  0), params.resolution)).x;
+        let hy0_raw = textureLoad(raw_heights, clamp_texel(coord + vec2<i32>( 0, -1), params.resolution)).x;
+        let hy1_raw = textureLoad(raw_heights, clamp_texel(coord + vec2<i32>( 0,  1), params.resolution)).x;
+        let hx0 = select(hx0_raw, (hx0_raw - min_h) * inv_range, range > 1e-6);
+        let hx1 = select(hx1_raw, (hx1_raw - min_h) * inv_range, range > 1e-6);
+        let hy0 = select(hy0_raw, (hy0_raw - min_h) * inv_range, range > 1e-6);
+        let hy1 = select(hy1_raw, (hy1_raw - min_h) * inv_range, range > 1e-6);
 
         let dx = (hx1 - hx0) * 4.6;
         let dy = (hy1 - hy0) * 4.6;

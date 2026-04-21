@@ -75,6 +75,12 @@ fn load_flux(c: vec2<i32>) -> vec4<f32> {
     return textureLoad(flux_tex, cc(c));
 }
 
+// For water-velocity inflow reads: OOB neighbors have no flux, not a copy of self.
+fn load_flux_open(c: vec2<i32>) -> vec4<f32> {
+    if c.x < 0 || c.y < 0 || c.x >= rx() || c.y >= ry() { return vec4<f32>(0.0); }
+    return textureLoad(flux_tex, c);
+}
+
 // Resolution compensation factor: all slopes are measured in pixel-grid
 // units (Δh / pixel).  At higher resolutions the same physical terrain has
 // smaller per-pixel Δh.  Multiplying by res_scale converts pixel-gradient
@@ -228,10 +234,12 @@ fn hydro_water_velocity(@builtin(global_invocation_id) id: vec3<u32>) {
     let coord = vec2<i32>(id.xy);
 
     let f_self  = load_flux(coord);
-    let in_L    = load_flux(coord + vec2<i32>(-1,  0)).y;  // right-of-left  → flows INTO us
-    let in_R    = load_flux(coord + vec2<i32>( 1,  0)).x;  // left-of-right  → flows INTO us
-    let in_T    = load_flux(coord + vec2<i32>( 0, -1)).w;  // bottom-of-top  → flows INTO us
-    let in_B    = load_flux(coord + vec2<i32>( 0,  1)).z;  // top-of-bottom  → flows INTO us
+    // Use load_flux_open (zero for OOB) so edge pixels don't see phantom
+    // inflow from the clamped-self read that load_flux(cc(...)) would return.
+    let in_L    = load_flux_open(coord + vec2<i32>(-1,  0)).y;  // right-of-left  → flows INTO us
+    let in_R    = load_flux_open(coord + vec2<i32>( 1,  0)).x;  // left-of-right  → flows INTO us
+    let in_T    = load_flux_open(coord + vec2<i32>( 0, -1)).w;  // bottom-of-top  → flows INTO us
+    let in_B    = load_flux_open(coord + vec2<i32>( 0,  1)).z;  // top-of-bottom  → flows INTO us
 
     let delta_V = params.dt * (in_L + in_R + in_T + in_B
                                - f_self.x - f_self.y - f_self.z - f_self.w);
@@ -264,6 +272,11 @@ fn hydro_water_velocity(@builtin(global_invocation_id) id: vec3<u32>) {
 @compute @workgroup_size(8, 8, 1)
 fn hydro_erode_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
     if id.x >= params.resolution.x || id.y >= params.resolution.y { return; }
+    // Boundary pixels are open drains — skip erosion/deposition so sediment
+    // can't accumulate there and raise edge heights to the 1.5 cap.
+    if id.x == 0u || id.y == 0u
+    || id.x == params.resolution.x - 1u
+    || id.y == params.resolution.y - 1u { return; }
     let coord = vec2<i32>(id.xy);
 
     let vel   = textureLoad(velocity_tex, coord).xy;
@@ -314,15 +327,25 @@ fn hydro_erode_deposit(@builtin(global_invocation_id) id: vec3<u32>) {
 // Hydraulic: Pass 5 — semi-Lagrangian sediment advection  (eq. 15)
 // ---------------------------------------------------------------------------
 
+fn in_bounds(x: i32, y: i32) -> bool {
+    return x >= 0 && y >= 0 && x < rx() && y < ry();
+}
+
 fn sample_sediment_bl(pos: vec2<f32>) -> f32 {
     let x0 = i32(floor(pos.x));
     let y0 = i32(floor(pos.y));
+    let x1 = x0 + 1;
+    let y1 = y0 + 1;
     let fx = fract(pos.x);
     let fy = fract(pos.y);
-    let s00 = textureLoad(sediment_tex, cc(vec2<i32>(x0,     y0    ))).r;
-    let s10 = textureLoad(sediment_tex, cc(vec2<i32>(x0 + 1, y0    ))).r;
-    let s01 = textureLoad(sediment_tex, cc(vec2<i32>(x0,     y0 + 1))).r;
-    let s11 = textureLoad(sediment_tex, cc(vec2<i32>(x0 + 1, y0 + 1))).r;
+    // Read via cc() so the textureLoad is always in-bounds, but zero out any
+    // corner that actually falls outside the map. Without the mask the edge
+    // pixel's sediment is sampled for every OOB lookup, concentrating sediment
+    // at map edges after many iterations.
+    let s00 = select(0.0, textureLoad(sediment_tex, cc(vec2<i32>(x0, y0))).r, in_bounds(x0, y0));
+    let s10 = select(0.0, textureLoad(sediment_tex, cc(vec2<i32>(x1, y0))).r, in_bounds(x1, y0));
+    let s01 = select(0.0, textureLoad(sediment_tex, cc(vec2<i32>(x0, y1))).r, in_bounds(x0, y1));
+    let s11 = select(0.0, textureLoad(sediment_tex, cc(vec2<i32>(x1, y1))).r, in_bounds(x1, y1));
     return mix(mix(s00, s10, fx), mix(s01, s11, fx), fy);
 }
 
@@ -348,7 +371,13 @@ fn copy_b_to_sediment(@builtin(global_invocation_id) id: vec3<u32>) {
     let coord = vec2<i32>(id.xy);
     // Clamp to prevent ghost sediment (created by clamped-edge lookbacks in
     // hydro_sediment_transport) from compounding across iterations.
-    let s = clamp(textureLoad(height_b, coord).r, 0.0, 2.0);
+    var s = clamp(textureLoad(height_b, coord).r, 0.0, 2.0);
+    // Drain sediment at boundary pixels: the semi-Lagrangian advection has no
+    // outflow mechanism so sediment accumulates at edges where water is draining.
+    // Zeroing it here mirrors the open-drain water boundary.
+    if id.x == 0u || id.y == 0u
+    || id.x == params.resolution.x - 1u
+    || id.y == params.resolution.y - 1u { s = 0.0; }
     textureStore(sediment_tex, coord, vec4<f32>(s, 0.0, 0.0, 0.0));
 }
 
@@ -379,9 +408,10 @@ fn clear_delta_height(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 
 fn atomic_add_delta(c: vec2<i32>, delta: f32) {
-    let cx  = clamp(c.x, 0, rx() - 1);
-    let cy  = clamp(c.y, 0, ry() - 1);
-    let idx = u32(cy) * params.resolution.x + u32(cx);
+    // Discard transfers that land outside the map — clamping them back to the
+    // edge pixel causes material to accumulate there after many iterations.
+    if c.x < 0 || c.y < 0 || c.x >= rx() || c.y >= ry() { return; }
+    let idx = u32(c.y) * params.resolution.x + u32(c.x);
     atomicAdd(&delta_height[idx], i32(round(clamp(delta * DELTA_SCALE, -1e8, 1e8))));
 }
 
