@@ -626,6 +626,98 @@ fn write_normal_texel_at(
     }
 }
 
+/// Fills the newly-exposed height strip from the next-coarser LOD's CPU data.
+///
+/// When tile streaming hasn't provided data for a new strip yet, keeping the
+/// stale toroidal data shows heights from a completely different world position
+/// (one ring-span away), which appears as ridges.  Using the coarser LOD as a
+/// fallback gives the correct world-position height at lower resolution — no
+/// chasms (zeros) and no ridges (wrong-position stale data).
+fn fill_height_strip_from_coarser_lod(
+    data: &mut Vec<u8>,
+    fine_layer_base: usize,
+    coarse_layer_base: usize,
+    res: u32,
+    new_center: IVec2,
+    old_center: IVec2,
+) {
+    let n = res as i32;
+    let half = (res / 2) as i32;
+    let delta = new_center - old_center;
+    if delta == IVec2::ZERO {
+        return;
+    }
+    if delta.x.abs() >= n || delta.y.abs() >= n {
+        return; // full-reset path handles this
+    }
+
+    // Build the list of (gx, gz, height) from the coarse region first (immutable borrow),
+    // then write into the fine region (mutable borrow). The two regions never overlap.
+    let layer_bytes = res as usize * res as usize * HEIGHT_BYTES_PER_TEXEL;
+
+    let new_heights: Vec<(i32, i32, u16)> = {
+        let coarse = &data[coarse_layer_base..coarse_layer_base + layer_bytes];
+
+        let read_h = |gx: i32, gz: i32| -> u16 {
+            let tx = (gx >> 1).rem_euclid(n) as usize;
+            let tz = (gz >> 1).rem_euclid(n) as usize;
+            let off = (tz * res as usize + tx) * HEIGHT_BYTES_PER_TEXEL;
+            if off + HEIGHT_BYTES_PER_TEXEL <= coarse.len() {
+                u16::from_le_bytes([coarse[off], coarse[off + 1]])
+            } else {
+                0
+            }
+        };
+
+        let mut out = Vec::new();
+        if delta.x != 0 {
+            let (x_lo, x_hi) = if delta.x > 0 {
+                (old_center.x + half, new_center.x + half - 1)
+            } else {
+                (new_center.x - half, old_center.x - half - 1)
+            };
+            for gz in (new_center.y - half)..=(new_center.y + half - 1) {
+                for gx in x_lo..=x_hi {
+                    out.push((gx, gz, read_h(gx, gz)));
+                }
+            }
+        }
+        if delta.y != 0 {
+            let (z_lo, z_hi) = if delta.y > 0 {
+                (old_center.y + half, new_center.y + half - 1)
+            } else {
+                (new_center.y - half, old_center.y - half - 1)
+            };
+            let (ex_lo, ex_hi) = if delta.x > 0 {
+                (old_center.x + half, new_center.x + half - 1)
+            } else if delta.x < 0 {
+                (new_center.x - half, old_center.x - half - 1)
+            } else {
+                (i32::MAX, i32::MIN)
+            };
+            for gz in z_lo..=z_hi {
+                for gx in (new_center.x - half)..=(new_center.x + half - 1) {
+                    if gx >= ex_lo && gx <= ex_hi {
+                        continue;
+                    }
+                    out.push((gx, gz, read_h(gx, gz)));
+                }
+            }
+        }
+        out
+    };
+
+    let fine = &mut data[fine_layer_base..fine_layer_base + layer_bytes];
+    for (gx, gz, h) in new_heights {
+        let tx = gx.rem_euclid(n) as usize;
+        let tz = gz.rem_euclid(n) as usize;
+        let off = (tz * res as usize + tx) * HEIGHT_BYTES_PER_TEXEL;
+        if off + HEIGHT_BYTES_PER_TEXEL <= fine.len() {
+            fine[off..off + HEIGHT_BYTES_PER_TEXEL].copy_from_slice(&h.to_le_bytes());
+        }
+    }
+}
+
 /// Writes only the newly-exposed strip into a toroidal clipmap layer.
 ///
 /// When the clip centre shifts by `delta`, the positions entering the window
@@ -1052,18 +1144,6 @@ pub fn update_clipmap_textures(
             .copied()
             .unwrap_or_else(|| level_scale(config.world_scale, lod as u32));
 
-        // When procedural_fallback is off, the non-sentinel strip path would
-        // write height=0 into every newly exposed texel.  `apply_tiles_to_clipmap`
-        // overwrites with real tile data afterwards — but only for tiles already
-        // resident in CPU cache.  Tiles still in-flight from async IO leave the
-        // zeros intact, which the GPU renders as thin height-0 cracks (chasms to
-        // the floor).  Skipping the zero-write and GPU upload lets the toroidal
-        // texture retain its stale-but-non-zero data from the previous ring
-        // position until real tile data arrives.
-        //
-        // The sentinel path (full layer reset) is kept because it is always
-        // paired with `clipmap_needs_rebuild = true`, which makes
-        // `apply_tiles_to_clipmap` do a full tile re-apply on the same frame.
         let is_full_reset = old_center.x == i32::MAX;
 
         let height_layer_offset = lod * height_bpl;
@@ -1086,19 +1166,36 @@ pub fn update_clipmap_textures(
                 scale,
                 config.procedural_fallback,
             );
+        } else {
+            // Fill the new strip from the next-coarser LOD's CPU data rather than
+            // keeping stale toroidal data (wrong world position → ridges) or writing
+            // zeros (height-0 chasms). The coarser LOD has the correct world-space
+            // heights at lower resolution, and resident tiles will overwrite this
+            // fallback once `apply_tiles_to_clipmap` runs in the same frame.
+            let coarse_lod = (lod + 1).min(levels - 1);
+            if coarse_lod > lod {
+                fill_height_strip_from_coarser_lod(
+                    &mut state.height_cpu_data,
+                    height_layer_offset,
+                    coarse_lod * height_bpl,
+                    res,
+                    new_center,
+                    old_center,
+                );
+            }
         }
-        if is_full_reset || config.procedural_fallback {
-            queue_new_strip_uploads(
-                &mut uploads,
-                &state.height_texture_handle,
-                lod as u32,
-                &state.height_cpu_data[height_layer_offset..height_layer_offset + height_bpl],
-                res,
-                HEIGHT_BYTES_PER_TEXEL,
-                new_center,
-                old_center,
-            );
-        }
+        // Always upload: coarse fallback, procedural, or full-reset data must reach the GPU.
+        // `apply_tiles_to_clipmap` will upload tile data on top in the same frame.
+        queue_new_strip_uploads(
+            &mut uploads,
+            &state.height_texture_handle,
+            lod as u32,
+            &state.height_cpu_data[height_layer_offset..height_layer_offset + height_bpl],
+            res,
+            HEIGHT_BYTES_PER_TEXEL,
+            new_center,
+            old_center,
+        );
 
         let normal_layer_offset = lod * normal_bpl;
         if is_full_reset {
@@ -1115,7 +1212,9 @@ pub fn update_clipmap_textures(
             {
                 slice.copy_from_slice(&full);
             }
-        } else if config.procedural_fallback {
+        } else {
+            // For procedural: real normals. For non-procedural: zeros → (0,1,0) flat normal.
+            // Flat normals are a safe temporary state until tile normals are applied.
             write_new_normal_strip(
                 &mut state.normal_cpu_data,
                 normal_layer_offset,
@@ -1127,18 +1226,16 @@ pub fn update_clipmap_textures(
                 config.procedural_fallback,
             );
         }
-        if is_full_reset || config.procedural_fallback {
-            queue_new_strip_uploads(
-                &mut uploads,
-                &state.normal_texture_handle,
-                lod as u32,
-                &state.normal_cpu_data[normal_layer_offset..normal_layer_offset + normal_bpl],
-                res,
-                NORMAL_BYTES_PER_TEXEL,
-                new_center,
-                old_center,
-            );
-        }
+        queue_new_strip_uploads(
+            &mut uploads,
+            &state.normal_texture_handle,
+            lod as u32,
+            &state.normal_cpu_data[normal_layer_offset..normal_layer_offset + normal_bpl],
+            res,
+            NORMAL_BYTES_PER_TEXEL,
+            new_center,
+            old_center,
+        );
     }
 
     // Refresh the per-level origin uniforms.
