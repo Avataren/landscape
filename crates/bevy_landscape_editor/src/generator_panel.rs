@@ -277,6 +277,14 @@ fn generator_panel_system(
                                 ui.label(format!("{}", baked_clipmap_levels(p.resolution)));
                                 ui.end_row();
 
+                                ui.label("Water Level")
+                                    .on_hover_text("Normalised sea level [0–1]. The preview shows water with depth-based transparency below this height. 0 = no water.");
+                                params_changed |= ui.add(
+                                    egui::Slider::new(&mut p.water_level, 0.0..=1.0)
+                                        .step_by(0.01),
+                                ).changed();
+                                ui.end_row();
+
                                 ui.label("Export Smooth σ")
                                     .on_hover_text("Gaussian pre-smooth sigma (texels) applied to L0 before downsampling. 0 = off. ~1.0 removes spike outliers. Matches the import wizard's Smooth σ.");
                                 if ui.add(egui::DragValue::new(&mut p.smooth_sigma).speed(0.05).range(0.0..=10.0)).changed() {

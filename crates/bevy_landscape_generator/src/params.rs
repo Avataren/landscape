@@ -29,6 +29,16 @@ pub struct GeneratorParams {
     /// 0 = off.  Matches the import wizard's "Smooth σ" parameter.
     #[serde(default)]
     pub smooth_sigma: f32,
+    /// Normalised water level in [0, 1] relative to the preview's height range.
+    /// The preview renders water with depth-based transparency below this line.
+    /// 0 = no water.  Default 0.35 produces a realistic sea-level for the
+    /// default continent settings.
+    #[serde(default = "GeneratorParams::default_water_level")]
+    pub water_level: f32,
+}
+
+impl GeneratorParams {
+    fn default_water_level() -> f32 { 0.35 }
 }
 
 impl Default for GeneratorParams {
@@ -51,6 +61,7 @@ impl Default for GeneratorParams {
             seed: 42,
             grayscale: 0,
             smooth_sigma: 0.0,
+            water_level: 0.35,
         }
     }
 }

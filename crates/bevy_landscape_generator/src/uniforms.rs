@@ -27,7 +27,7 @@ use crate::params::GeneratorParams;
 ///   row 1: offset(8) + frequency(4) + lacunarity(4)
 ///   row 2: gain(4) + height_scale(4) + continent_frequency(4) + continent_strength(4)
 ///   row 3: ridge_strength(4) + warp_frequency(4) + warp_strength(4) + erosion_strength(4)
-///   row 4: grayscale(4) + pad(12)
+///   row 4: grayscale(4) + water_level(4) + pad(8)
 #[derive(Clone, Resource, ExtractResource, ShaderType)]
 pub(crate) struct GeneratorUniform {
     pub resolution: UVec2,
@@ -45,6 +45,7 @@ pub(crate) struct GeneratorUniform {
     pub warp_strength: f32,
     pub erosion_strength: f32,
     pub grayscale: u32,
+    pub water_level: f32,
 }
 
 impl Default for GeneratorUniform {
@@ -71,6 +72,7 @@ impl GeneratorUniform {
             warp_strength: p.warp_strength,
             erosion_strength: p.erosion_strength,
             grayscale: p.grayscale,
+            water_level: p.water_level,
         }
     }
 }

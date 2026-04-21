@@ -20,6 +20,7 @@ struct GeneratorParams {
     warp_strength:       f32,
     erosion_strength:    f32,
     grayscale:           u32,
+    water_level:         f32,
 }
 
 struct DownsampleParams {
@@ -232,6 +233,28 @@ fn sample_height_texel(src: texture_2d<f32>, coord: vec2<i32>, resolution: vec2<
     return textureLoad(src, clamp_texel(coord, resolution), 0).x;
 }
 
+// Apply depth-based water compositing over an existing terrain colour.
+// h            — normalised terrain height [0, 1]
+// water_level  — normalised water surface [0, 1]
+// terrain_col  — hillshade colour already computed for this texel
+fn apply_water(h: f32, water_level: f32, terrain_col: vec3<f32>) -> vec3<f32> {
+    if water_level <= 0.0 || h >= water_level { return terrain_col; }
+    // depth ∈ [0, 1]: 0 = just below surface, 1 = deepest point.
+    let depth = clamp((water_level - h) / water_level, 0.0, 1.0);
+
+    // Water colour: teal-cyan at the shore → deep navy in the abyss.
+    let shallow = vec3<f32>(0.29, 0.60, 0.74);
+    let deep    = vec3<f32>(0.03, 0.09, 0.28);
+    let water_col = mix(shallow, deep, pow(depth, 0.45));
+
+    // Exponential opacity: nearly transparent at the surface, opaque in deep water.
+    let alpha = 1.0 - exp(-depth * 6.0);
+
+    // Blend water over the (slightly darkened) seafloor.
+    let seafloor = terrain_col * mix(1.0, 0.55, alpha);
+    return mix(seafloor, water_col, alpha);
+}
+
 fn preview_palette(h: f32) -> vec3<f32> {
     // pow(h, 0.55) expands the lower half of the range for better perceptual
     // contrast; the smoothstep edge is pushed higher so peaks are reserved for
@@ -269,7 +292,8 @@ fn preview_color(uv: vec2<f32>) -> vec3<f32> {
 
     let base = preview_palette(h);
     let height_boost = smoothstep(0.22, 0.92, h) * 0.12;
-    return clamp(base * shade + vec3<f32>(height_boost), vec3<f32>(0.0), vec3<f32>(1.0));
+    let terrain_col = clamp(base * shade + vec3<f32>(height_boost), vec3<f32>(0.0), vec3<f32>(1.0));
+    return apply_water(h, params.water_level, terrain_col);
 }
 
 @compute @workgroup_size(8, 8, 1)
@@ -382,7 +406,8 @@ fn preview_normalize_display(@builtin(global_invocation_id) id: vec3<u32>) {
 
         let base = preview_palette(h);
         let height_boost = smoothstep(0.22, 0.92, h) * 0.12;
-        color = clamp(base * shade + vec3<f32>(height_boost), vec3<f32>(0.0), vec3<f32>(1.0));
+        let terrain_col = clamp(base * shade + vec3<f32>(height_boost), vec3<f32>(0.0), vec3<f32>(1.0));
+        color = apply_water(h, params.water_level, terrain_col);
     }
 
     textureStore(preview_output, vec2<i32>(id.xy), vec4<f32>(color, 1.0));
