@@ -6,6 +6,7 @@
 
 use exr::prelude::{read_first_flat_layer_from_file, FlatSamples};
 use image::ImageReader;
+use std::collections::VecDeque;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -60,9 +61,28 @@ impl Default for BakeConfig {
 
 /// Run the full mip-pyramid bake pipeline.
 ///
+/// For TIFF heightmaps without a bump map this uses a streaming strip-reader
+/// so that arbitrarily large rasters (32k×32k and beyond) can be baked without
+/// loading the entire image into RAM.  All other inputs fall back to the
+/// in-memory path.
+///
 /// All progress messages are delivered via `log`.  Returns `Ok(())` on
 /// success or an `Err(message)` string on failure.
 pub fn bake_heightmap(config: BakeConfig, log: impl Fn(String)) -> Result<(), String> {
+    let is_tiff = config
+        .height_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("tif") || e.eq_ignore_ascii_case("tiff"))
+        .unwrap_or(false);
+    if is_tiff && config.bump_path.is_none() {
+        bake_heightmap_streaming(config, log)
+    } else {
+        bake_heightmap_in_memory(config, log)
+    }
+}
+
+fn bake_heightmap_in_memory(config: BakeConfig, log: impl Fn(String)) -> Result<(), String> {
     let t_start = Instant::now();
     let elapsed = || t_start.elapsed().as_secs_f32();
 
@@ -337,6 +357,501 @@ pub fn bake_heightmap(config: BakeConfig, log: impl Fn(String)) -> Result<(), St
         elapsed(),
     ));
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Streaming bake — large TIFFs, O(strip) RAM regardless of raster size
+// ---------------------------------------------------------------------------
+
+/// Convert a decoded TIFF strip/chunk to normalised f32 values in [0, 1].
+/// Signed integer types are shifted so that the minimum maps to 0.
+fn tiff_result_to_f32(result: tiff::decoder::DecodingResult) -> Vec<f32> {
+    use tiff::decoder::DecodingResult::*;
+    match result {
+        U8(v) => v.iter().map(|&x| x as f32 / u8::MAX as f32).collect(),
+        U16(v) => v.iter().map(|&x| x as f32 / u16::MAX as f32).collect(),
+        U32(v) => v.iter().map(|&x| x as f32 / u32::MAX as f32).collect(),
+        U64(v) => v.iter().map(|&x| x as f32 / u64::MAX as f32).collect(),
+        I8(v) => v
+            .iter()
+            .map(|&x| (x as f32 - i8::MIN as f32) / u8::MAX as f32)
+            .collect(),
+        I16(v) => v
+            .iter()
+            .map(|&x| (x as f32 - i16::MIN as f32) / u16::MAX as f32)
+            .collect(),
+        I32(v) => v
+            .iter()
+            .map(|&x| (x as f32 - i32::MIN as f32) / u32::MAX as f32)
+            .collect(),
+        I64(v) => v
+            .iter()
+            .map(|&x| (x as f64 - i64::MIN as f64) as f32 / u64::MAX as f32)
+            .collect(),
+        F32(v) => v,
+        F64(v) => v.iter().map(|&x| x as f32).collect(),
+        F16(v) => v.iter().map(|x| x.to_f32()).collect(),
+    }
+}
+
+/// Scan a TIFF to get dimensions, rows-per-strip, and the normalised min/max
+/// within the `bake_size`×`bake_size` domain (top-left crop).
+///
+/// Returns `(src_w, src_h, h_min, h_max, rows_per_strip)`.
+/// Also validates that the TIFF uses full-width strips (not tiles), which is
+/// required for the strip-offset addressing used in the streaming bake.
+fn scan_tiff_range(
+    path: &Path,
+    bake_size: usize,
+) -> Result<(usize, usize, f32, f32, usize), String> {
+    let f =
+        BufReader::new(File::open(path).map_err(|e| format!("{}: {e}", path.display()))?);
+    let mut dec =
+        tiff::decoder::Decoder::new(f).map_err(|e| format!("tiff open: {e}"))?;
+    let (w, h) = dec.dimensions().map_err(|e| e.to_string())?;
+    let (chunk_w, rps_raw) = dec.chunk_dimensions();
+    let rps = rps_raw as usize;
+
+    if chunk_w as usize != w as usize {
+        return Err(format!(
+            "TIFF '{}' uses {} pixel-wide tiles (expected full-width strips of {}px). \
+             Only stripped TIFFs are supported for streaming bake.",
+            path.display(),
+            chunk_w,
+            w
+        ));
+    }
+
+    let sc = dec.strip_count().map_err(|e| e.to_string())?;
+
+    let mut h_min = f32::INFINITY;
+    let mut h_max = f32::NEG_INFINITY;
+    for i in 0..sc {
+        let strip_row_start = i as usize * rps;
+        if strip_row_start >= bake_size {
+            break; // beyond the baked domain
+        }
+        let strip = dec.read_chunk(i).map_err(|e| e.to_string())?;
+        let values = tiff_result_to_f32(strip);
+        // Each strip row: rps rows × w pixels.
+        for row in 0..rps {
+            let abs_row = strip_row_start + row;
+            if abs_row >= bake_size {
+                break;
+            }
+            let row_start = row * w as usize;
+            for col in 0..bake_size {
+                let v = values.get(row_start + col).copied().unwrap_or(0.0);
+                if v < h_min { h_min = v; }
+                if v > h_max { h_max = v; }
+            }
+        }
+    }
+    Ok((w as usize, h as usize, h_min, h_max, rps))
+}
+
+/// Read a u16-encoded height tile back as normalised f32 values.
+fn read_tile_as_f32(path: &Path, tile_size: usize) -> Result<Vec<f32>, String> {
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let expected = tile_size * tile_size * 2;
+    if bytes.len() != expected {
+        return Err(format!(
+            "tile {} has {} bytes, expected {}",
+            path.display(),
+            bytes.len(),
+            expected
+        ));
+    }
+    Ok(bytes
+        .chunks_exact(2)
+        .map(|b| u16::from_le_bytes([b[0], b[1]]) as f32 / 65535.0)
+        .collect())
+}
+
+fn bake_heightmap_streaming(config: BakeConfig, log: impl Fn(String)) -> Result<(), String> {
+    let t_start = Instant::now();
+    let elapsed = move || t_start.elapsed().as_secs_f32();
+
+    if !config.height_path.exists() {
+        return Err(format!(
+            "height map not found: {}",
+            config.height_path.display()
+        ));
+    }
+
+    log(format!(
+        "Scanning {} for height range…",
+        config.height_path.display()
+    ));
+    // Derive bake_size first so scan_tiff_range only computes min/max within
+    // the domain we'll actually bake (trims border pixels if any).
+    let src_dims = {
+        let f = BufReader::new(
+            File::open(&config.height_path)
+                .map_err(|e| format!("{}: {e}", config.height_path.display()))?,
+        );
+        let mut dec =
+            tiff::decoder::Decoder::new(f).map_err(|e| format!("tiff open: {e}"))?;
+        dec.dimensions().map_err(|e| e.to_string())?
+    };
+    let (src_w, src_h) = (src_dims.0 as usize, src_dims.1 as usize);
+    if src_w != src_h {
+        return Err(format!(
+            "Expected square heightmap, got {}×{}",
+            src_w, src_h
+        ));
+    }
+    let bake_size = derive_bake_extent(src_w, config.tile_size)?;
+    if bake_size != src_w {
+        log(format!(
+            "Trimming source border: baking {}×{} as {}×{}.",
+            src_w, src_h, bake_size, bake_size
+        ));
+    }
+
+    let (_, _, h_min, h_max, rps) = scan_tiff_range(&config.height_path, bake_size)?;
+    let h_range = h_max - h_min;
+    log(format!(
+        "Source {}×{}  decoded range [{:.4}, {:.4}]  rps={}  [{:.1}s]",
+        src_w, src_h, h_min, h_max, rps,
+        elapsed()
+    ));
+
+    let levels = {
+        let mut sz = bake_size;
+        let mut n = 0u32;
+        while sz / config.tile_size >= 2 {
+            n += 1;
+            sz /= 2;
+        }
+        n
+    };
+    if levels == 0 {
+        return Err(format!(
+            "Heightmap {}px is too small for {}px tiles.",
+            src_w, config.tile_size
+        ));
+    }
+
+    let effective_height_scale = config.height_scale * config.world_scale;
+    prepare_output_dir(&config.output_dir, &log)?;
+    log(format!(
+        "Baking {} levels, tile {}px → '{}'",
+        levels,
+        config.tile_size,
+        config.output_dir.display()
+    ));
+
+    // LOD 0 — stream directly from the source TIFF
+    let lod0_tiles = stream_bake_lod0(
+        &config,
+        bake_size,
+        src_w,
+        src_h,
+        rps,
+        h_min,
+        h_range,
+        effective_height_scale,
+        &log,
+        &elapsed,
+    )?;
+
+    // LOD 1..N — build each level from the previous level's tile files
+    let mut total_tiles = lod0_tiles;
+    let mut cur_size = bake_size;
+    for lod in 1..levels {
+        cur_size /= 2;
+        total_tiles += bake_lod_from_children(
+            &config,
+            lod,
+            cur_size,
+            effective_height_scale,
+            &log,
+            &elapsed,
+        )?;
+    }
+
+    log(format!(
+        "Done. {} tiles → '{}'  ({:.1}s total)",
+        total_tiles,
+        config.output_dir.display(),
+        elapsed()
+    ));
+    Ok(())
+}
+
+/// LOD 0: read the source TIFF in rolling strips, write one tile at a time.
+///
+/// Memory cost: O((`tile_size` + 2·blur_radius) × `src_w`) — a few dozen MB
+/// even for 32 k-wide rasters.
+fn stream_bake_lod0(
+    config: &BakeConfig,
+    bake_size: usize,
+    src_w: usize,
+    _src_h: usize,
+    rps: usize,    // rows per strip in the source TIFF
+    h_min: f32,
+    h_range: f32,
+    effective_height_scale: f32,
+    log: &impl Fn(String),
+    elapsed: &impl Fn() -> f32,
+) -> Result<usize, String> {
+    use tiff::decoder::Decoder;
+
+    let tile_size = config.tile_size;
+    let tiles_per_side = bake_size / tile_size;
+    let tile_start = -(tiles_per_side as i32 / 2);
+
+    let blur_radius = if config.smooth_sigma > 0.0 {
+        (3.0 * config.smooth_sigma).ceil() as usize
+    } else {
+        0
+    };
+    // 1-pixel border above/below for Sobel normal filter, plus blur context.
+    let extra_rows = blur_radius + 1;
+
+    let height_dir = config.output_dir.join("height/L0");
+    let normal_dir = config.output_dir.join("normal/L0");
+    std::fs::create_dir_all(&height_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&normal_dir).map_err(|e| e.to_string())?;
+
+    let lod_scale = config.world_scale;
+    let level_tile_count = tiles_per_side * tiles_per_side;
+    let win_size = tile_size + 2; // padded window for Sobel
+
+    // Open the TIFF and read strips in forward order into a rolling VecDeque.
+    let f = BufReader::new(
+        File::open(&config.height_path)
+            .map_err(|e| format!("{}: {e}", config.height_path.display()))?,
+    );
+    let mut dec = Decoder::new(f).map_err(|e| e.to_string())?;
+    let strip_count = dec.strip_count().map_err(|e| e.to_string())? as usize;
+
+    // strip_buf[i] holds the decoded f32 data for strip (buf_strip_start + i).
+    let mut strip_buf: VecDeque<Vec<f32>> = VecDeque::new();
+    let mut buf_strip_start: usize = 0;
+    let mut next_strip_to_read: usize = 0;
+
+    let mut level_done = 0usize;
+
+    for row_idx in 0..tiles_per_side {
+        let ty = tile_start + row_idx as i32;
+        // Source-image Y of the tile's top pixel (0-based).
+        let py_src = row_idx * tile_size;
+
+        // Row band needed: [py_src - extra_rows, py_src + tile_size + extra_rows).
+        // Clamped to [0, bake_size) — rows outside this range reuse edge rows.
+        let band_y0 = py_src.saturating_sub(extra_rows);
+        let band_y1 = (py_src + tile_size + extra_rows).min(bake_size);
+        let band_h = tile_size + 2 * extra_rows; // full padded height (may include clamped rows)
+
+        // Strips that cover [band_y0, band_y1).
+        let need_start_strip = band_y0 / rps;
+        let need_end_strip = (band_y1.saturating_sub(1)) / rps + 1; // exclusive
+
+        // Drop strips that are no longer needed.
+        while buf_strip_start < need_start_strip {
+            strip_buf.pop_front();
+            buf_strip_start += 1;
+        }
+
+        // Load any strips not yet fetched.
+        while next_strip_to_read < need_end_strip && next_strip_to_read < strip_count {
+            let result = dec
+                .read_chunk(next_strip_to_read as u32)
+                .map_err(|e| e.to_string())?;
+            strip_buf.push_back(tiff_result_to_f32(result));
+            next_strip_to_read += 1;
+        }
+
+        // Helper: fetch normalised f32 for source pixel (sx, sy).
+        // `sy` is clamped to [0, bake_size-1]; `sx` to [0, bake_size-1].
+        let get_src = |sx: i32, sy: i32| -> f32 {
+            let sx = sx.clamp(0, bake_size as i32 - 1) as usize;
+            let sy = sy.clamp(0, bake_size as i32 - 1) as usize;
+            let strip_idx = sy / rps;
+            let row_in_strip = sy % rps;
+            let buf_idx = strip_idx.saturating_sub(buf_strip_start);
+            let raw = if buf_idx < strip_buf.len() {
+                let offset = row_in_strip * src_w + sx;
+                strip_buf[buf_idx]
+                    .get(offset)
+                    .copied()
+                    .unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            if h_range > 1e-6 {
+                ((raw - h_min) / h_range).clamp(0.0, 1.0)
+            } else {
+                raw.clamp(0.0, 1.0)
+            }
+        };
+
+        // Build the row band as a flat array [band_h × src_w], normalised.
+        let mut band = vec![0.0f32; src_w * band_h];
+        for bh in 0..band_h {
+            let sy = py_src as i32 - extra_rows as i32 + bh as i32;
+            for sx in 0..src_w {
+                band[bh * src_w + sx] = get_src(sx as i32, sy);
+            }
+        }
+
+        // Apply Gaussian blur to the band if requested.
+        let band = if config.smooth_sigma > 0.0 {
+            gaussian_blur_f32(&band, src_w, band_h, config.smooth_sigma)
+        } else {
+            band
+        };
+
+        // Process each tile column.
+        for col_idx in 0..tiles_per_side {
+            let tx = tile_start + col_idx as i32;
+            let px_src = col_idx * tile_size; // 0-based source X
+
+            // Extract (win_size × win_size) padded window for Sobel normals.
+            // Row `extra_rows - 1` in the band is the 1-pixel border above the tile.
+            let mut window = vec![0.0f32; win_size * win_size];
+            for wy in 0..win_size {
+                let band_row = extra_rows - 1 + wy; // 0-indexed in band
+                let band_row = band_row.min(band_h - 1);
+                for wx in 0..win_size {
+                    let sx = (px_src as i32 - 1 + wx as i32)
+                        .clamp(0, bake_size as i32 - 1) as usize;
+                    window[wy * win_size + wx] = band[band_row * src_w + sx];
+                }
+            }
+
+            // Encode height and normal tiles.
+            let mut tile_bytes = Vec::with_capacity(tile_size * tile_size * 2);
+            let mut norm_bytes = Vec::with_capacity(tile_size * tile_size * 2);
+            for row in 0..tile_size {
+                for col in 0..tile_size {
+                    let wx = col + 1;
+                    let wy = row + 1;
+                    let h = window[wy * win_size + wx];
+                    tile_bytes.extend_from_slice(&((h.clamp(0.0, 1.0) * 65535.0) as u16).to_le_bytes());
+                    let enc = encode_normal_xz(compute_normal(
+                        &window,
+                        win_size,
+                        wx,
+                        wy,
+                        lod_scale,
+                        effective_height_scale,
+                    ));
+                    norm_bytes.extend_from_slice(&enc);
+                }
+            }
+
+            let hpath = height_dir.join(format!("{}_{}.bin", tx, ty));
+            let npath = normal_dir.join(format!("{}_{}.bin", tx, ty));
+            std::fs::write(&hpath, &tile_bytes).map_err(|e| e.to_string())?;
+            std::fs::write(&npath, &norm_bytes).map_err(|e| e.to_string())?;
+            level_done += 1;
+        }
+
+        // Log progress ~10 times.
+        let report_every = (tiles_per_side / 10).max(1);
+        if row_idx % report_every == 0 || row_idx + 1 == tiles_per_side {
+            log(format!(
+                "Level 0: {}%  ({}/{})  [{:.1}s]",
+                level_done * 100 / level_tile_count,
+                level_done,
+                level_tile_count,
+                elapsed()
+            ));
+        }
+    }
+
+    log(format!(
+        "Level 0: {}×{} = {} tiles  [{:.1}s]",
+        tiles_per_side,
+        tiles_per_side,
+        level_tile_count,
+        elapsed()
+    ));
+    Ok(level_tile_count)
+}
+
+/// LOD N (N ≥ 1): build each tile by reading its 4 children from the previous
+/// level's tile files and box-filtering 2:1.
+fn bake_lod_from_children(
+    config: &BakeConfig,
+    lod: u32,
+    mip_size: usize,
+    effective_height_scale: f32,
+    log: &impl Fn(String),
+    elapsed: &impl Fn() -> f32,
+) -> Result<usize, String> {
+    let tile_size = config.tile_size;
+    let tiles_per_side = mip_size / tile_size;
+    let tile_start = -(tiles_per_side as i32 / 2);
+
+    let height_dir = config.output_dir.join(format!("height/L{lod}"));
+    let normal_dir = config.output_dir.join(format!("normal/L{lod}"));
+    let prev_height_dir = config.output_dir.join(format!("height/L{}", lod - 1));
+    std::fs::create_dir_all(&height_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&normal_dir).map_err(|e| e.to_string())?;
+
+    let lod_scale = config.world_scale * (1u32 << lod) as f32;
+    let level_tile_count = tiles_per_side * tiles_per_side;
+    let child_buf_side = tile_size * 2;
+
+    for ty in tile_start..tile_start + tiles_per_side as i32 {
+        for tx in tile_start..tile_start + tiles_per_side as i32 {
+            // Assemble the 4 child tiles into a 2×tile_size square.
+            let mut child_buf = vec![0.0f32; child_buf_side * child_buf_side];
+            for cy in 0..2usize {
+                for cx in 0..2usize {
+                    let child_path = prev_height_dir
+                        .join(format!("{}_{}.bin", tx * 2 + cx as i32, ty * 2 + cy as i32));
+                    let data = read_tile_as_f32(&child_path, tile_size)
+                        .unwrap_or_else(|_| vec![0.0; tile_size * tile_size]);
+                    for row in 0..tile_size {
+                        let dst = (cy * tile_size + row) * child_buf_side + cx * tile_size;
+                        child_buf[dst..dst + tile_size]
+                            .copy_from_slice(&data[row * tile_size..(row + 1) * tile_size]);
+                    }
+                }
+            }
+
+            // Box-filter 2:1 → tile_size × tile_size height data.
+            let height_data = box_filter_2x(&child_buf, child_buf_side, child_buf_side);
+
+            // Normals from the downsampled height (boundary pixels clamp via compute_normal).
+            let mut tile_bytes = Vec::with_capacity(tile_size * tile_size * 2);
+            let mut norm_bytes = Vec::with_capacity(tile_size * tile_size * 2);
+            for row in 0..tile_size {
+                for col in 0..tile_size {
+                    let h = height_data[row * tile_size + col];
+                    tile_bytes.extend_from_slice(
+                        &((h.clamp(0.0, 1.0) * 65535.0) as u16).to_le_bytes(),
+                    );
+                    let enc = encode_normal_xz(compute_normal(
+                        &height_data,
+                        tile_size,
+                        col,
+                        row,
+                        lod_scale,
+                        effective_height_scale,
+                    ));
+                    norm_bytes.extend_from_slice(&enc);
+                }
+            }
+
+            std::fs::write(height_dir.join(format!("{}_{}.bin", tx, ty)), &tile_bytes)
+                .map_err(|e| e.to_string())?;
+            std::fs::write(normal_dir.join(format!("{}_{}.bin", tx, ty)), &norm_bytes)
+                .map_err(|e| e.to_string())?;
+        }
+    }
+
+    log(format!(
+        "Level {lod}: {tiles_per_side}×{tiles_per_side} = {level_tile_count} tiles  [{:.1}s]",
+        elapsed()
+    ));
+    Ok(level_tile_count)
 }
 
 fn prepare_output_dir(output_dir: &Path, log: &impl Fn(String)) -> Result<(), String> {
