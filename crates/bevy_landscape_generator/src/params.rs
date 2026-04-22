@@ -38,7 +38,9 @@ pub struct GeneratorParams {
 }
 
 impl GeneratorParams {
-    fn default_water_level() -> f32 { 0.35 }
+    fn default_water_level() -> f32 {
+        0.35
+    }
 }
 
 impl Default for GeneratorParams {

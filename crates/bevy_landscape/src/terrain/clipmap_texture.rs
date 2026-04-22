@@ -58,7 +58,12 @@ fn snorm(v: f32) -> u8 {
 }
 
 fn encode_normal_pair(fine: Vec3, coarse: Vec3) -> [u8; 4] {
-    [snorm(fine.x), snorm(fine.z), snorm(coarse.x), snorm(coarse.z)]
+    [
+        snorm(fine.x),
+        snorm(fine.z),
+        snorm(coarse.x),
+        snorm(coarse.z),
+    ]
 }
 
 /// Generates one R16Unorm layer for a clipmap level.
@@ -165,12 +170,8 @@ pub fn create_initial_clipmap_texture(config: &TerrainConfig) -> Image {
 
     for level in 0..active_levels {
         let scale = level_scale(config.world_scale, level);
-        let layer_data = generate_clipmap_layer(
-            IVec2::ZERO,
-            scale,
-            res,
-            config.procedural_fallback,
-        );
+        let layer_data =
+            generate_clipmap_layer(IVec2::ZERO, scale, res, config.procedural_fallback);
         let offset = level as usize * bpl;
         data[offset..offset + bpl].copy_from_slice(&layer_data);
     }
@@ -1151,8 +1152,7 @@ pub fn update_clipmap_textures(
 
         let height_layer_offset = lod * height_bpl;
         if is_full_reset {
-            let full =
-                generate_clipmap_layer(new_center, scale, res, config.procedural_fallback);
+            let full = generate_clipmap_layer(new_center, scale, res, config.procedural_fallback);
             if let Some(slice) = state
                 .height_cpu_data
                 .get_mut(height_layer_offset..height_layer_offset + height_bpl)
@@ -1347,12 +1347,7 @@ pub fn apply_tiles_to_clipmap(
                 .copied()
                 .unwrap_or_else(|| level_scale(config.world_scale, lod as u32));
             let height_layer_offset = lod * height_bpl;
-            let full = generate_clipmap_layer(
-                center,
-                scale,
-                res,
-                config.procedural_fallback,
-            );
+            let full = generate_clipmap_layer(center, scale, res, config.procedural_fallback);
             if let Some(slice) = state
                 .height_cpu_data
                 .get_mut(height_layer_offset..height_layer_offset + height_bpl)

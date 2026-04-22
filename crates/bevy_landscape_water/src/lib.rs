@@ -87,7 +87,10 @@ fn sync_water_to_terrain(
         .map(|p| TerrainMetadata::load(p))
         .unwrap_or_default();
 
-    let new_height = meta.water_level.map(|wl| wl * config.height_scale).unwrap_or(0.0);
+    let new_height = meta
+        .water_level
+        .map(|wl| wl * config.height_scale)
+        .unwrap_or(0.0);
     let has_water = meta.water_level.is_some();
 
     settings.height = new_height;
@@ -95,7 +98,11 @@ fn sync_water_to_terrain(
 
     let new_cx = (source_desc.world_min.x + source_desc.world_max.x) * 0.5;
     let new_cz = (source_desc.world_min.y + source_desc.world_max.y) * 0.5;
-    let vis = if has_water { Visibility::Visible } else { Visibility::Hidden };
+    let vis = if has_water {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
 
     if let Ok((mut root_t, mut root_v)) = water_root.single_mut() {
         root_t.translation.x = new_cx;

@@ -436,7 +436,12 @@ fn snorm(v: f32) -> u8 {
 }
 
 fn encode_normal_pair(fine: Vec3, coarse: Vec3) -> [u8; 4] {
-    [snorm(fine.x), snorm(fine.z), snorm(coarse.x), snorm(coarse.z)]
+    [
+        snorm(fine.x),
+        snorm(fine.z),
+        snorm(coarse.x),
+        snorm(coarse.z),
+    ]
 }
 
 fn build_procedural_normal_tile(
@@ -499,8 +504,24 @@ fn build_normal_tile_from_height_data(
 
     for row in 0..tile_size_i32 {
         for col in 0..tile_size_i32 {
-            let fine = sobel_normal(col, row, 1, height_data, tile_size_i32, level_scale_ws, height_scale);
-            let coarse = sobel_normal(col, row, 2, height_data, tile_size_i32, level_scale_ws, height_scale);
+            let fine = sobel_normal(
+                col,
+                row,
+                1,
+                height_data,
+                tile_size_i32,
+                level_scale_ws,
+                height_scale,
+            );
+            let coarse = sobel_normal(
+                col,
+                row,
+                2,
+                height_data,
+                tile_size_i32,
+                level_scale_ws,
+                height_scale,
+            );
             pixels.push(encode_normal_pair(fine, coarse));
         }
     }

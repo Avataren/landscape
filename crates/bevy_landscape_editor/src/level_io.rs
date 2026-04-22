@@ -118,7 +118,11 @@ fn level_io_system(
                     level_desc.clouds = serde_json::to_value(&*clouds_config).ok();
                     if let Some(gp) = &generator_params {
                         level_desc.metadata = TerrainMetadata {
-                            water_level: if gp.water_level > 0.0 { Some(gp.water_level) } else { None },
+                            water_level: if gp.water_level > 0.0 {
+                                Some(gp.water_level)
+                            } else {
+                                None
+                            },
                         };
                     }
                     match save_level(&path, &level_desc) {
@@ -139,7 +143,8 @@ fn level_io_system(
                         {
                             *clouds_config = cc;
                         }
-                        let (new_config, new_source, new_library, _, _, _meta) = level_desc.into_runtime();
+                        let (new_config, new_source, new_library, _, _, _meta) =
+                            level_desc.into_runtime();
                         reload_tx.write(ReloadTerrainRequest {
                             config: new_config,
                             source: new_source,

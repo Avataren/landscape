@@ -362,18 +362,17 @@ impl FromWorld for GeneratorExportPipeline {
                 entry_point: Some("blit_eroded".into()),
                 ..default()
             });
-        let smooth_pipeline =
-            pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
-                label: Some("landscape_generator_export_smooth".into()),
-                layout: vec![
-                    downsample_uniform_layout.clone(),
-                    downsample_image_layout.clone(),
-                ],
-                shader: shader.clone(),
-                shader_defs: vec![],
-                entry_point: Some("smooth_height".into()),
-                ..default()
-            });
+        let smooth_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            label: Some("landscape_generator_export_smooth".into()),
+            layout: vec![
+                downsample_uniform_layout.clone(),
+                downsample_image_layout.clone(),
+            ],
+            shader: shader.clone(),
+            shader_defs: vec![],
+            entry_point: Some("smooth_height".into()),
+            ..default()
+        });
         let normal_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
             label: Some("landscape_generator_export_normals".into()),
             layout: vec![normal_uniform_layout.clone(), normal_image_layout.clone()],
@@ -425,10 +424,12 @@ impl Node for GeneratorExportNode {
     fn update(&mut self, world: &mut World) {
         let pipeline = world.resource::<GeneratorExportPipeline>();
         let pipeline_cache = world.resource::<PipelineCache>();
-        let ok = |id| matches!(
-            pipeline_cache.get_compute_pipeline_state(id),
-            CachedPipelineState::Ok(_)
-        );
+        let ok = |id| {
+            matches!(
+                pipeline_cache.get_compute_pipeline_state(id),
+                CachedPipelineState::Ok(_)
+            )
+        };
         if matches!(self.state, GeneratorExportNodeState::Loading)
             && ok(pipeline.generate_pipeline)
             && ok(pipeline.downsample_pipeline)
@@ -539,13 +540,12 @@ impl Node for GeneratorExportNode {
             };
             for pair in &resources.smooth_passes {
                 for smooth in pair {
-                    let mut pass =
-                        render_context
-                            .command_encoder()
-                            .begin_compute_pass(&ComputePassDescriptor {
-                                label: Some("generator_export_smooth"),
-                                ..default()
-                            });
+                    let mut pass = render_context.command_encoder().begin_compute_pass(
+                        &ComputePassDescriptor {
+                            label: Some("generator_export_smooth"),
+                            ..default()
+                        },
+                    );
                     pass.set_pipeline(smooth_pipeline);
                     pass.set_bind_group(0, &smooth.uniform_bind_group, &[]);
                     pass.set_bind_group(1, &smooth.image_bind_group, &[]);
@@ -694,19 +694,33 @@ fn start_generator_export(
         let mut normal_images = Vec::with_capacity(levels as usize);
         for lod in 0..levels {
             let resolution = params.resolution >> lod;
-            height_images.push(build_export_image(&mut images, resolution, TextureFormat::R32Float));
-            normal_images.push(build_export_image(&mut images, resolution, TextureFormat::Rgba8Snorm));
+            height_images.push(build_export_image(
+                &mut images,
+                resolution,
+                TextureFormat::R32Float,
+            ));
+            normal_images.push(build_export_image(
+                &mut images,
+                resolution,
+                TextureFormat::Rgba8Snorm,
+            ));
         }
 
         // Intermediate buffer for separable Gaussian smooth (only when sigma > 0).
         let smooth_tmp = if params.smooth_sigma > 0.0 {
-            Some(build_export_image(&mut images, params.resolution, TextureFormat::R32Float))
+            Some(build_export_image(
+                &mut images,
+                params.resolution,
+                TextureFormat::R32Float,
+            ))
         } else {
             None
         };
 
         if use_eroded {
-            state.log.push("Erosion active — exporting eroded terrain.".into());
+            state
+                .log
+                .push("Erosion active — exporting eroded terrain.".into());
         }
 
         state.log.push(format!(
@@ -905,7 +919,10 @@ fn prepare_export_bind_groups(
         let image_bind_group = render_device.create_bind_group(
             None,
             &pipeline_cache.get_bind_group_layout(&pipeline.downsample_image_layout),
-            &BindGroupEntries::with_indices(((2, &raw_gpu.texture_view), (3, &l0_height.texture_view))),
+            &BindGroupEntries::with_indices((
+                (2, &raw_gpu.texture_view),
+                (3, &l0_height.texture_view),
+            )),
         );
         Some(DownsamplePassResources {
             _uniform: uniform,
@@ -944,7 +961,10 @@ fn prepare_export_bind_groups(
         let ib0 = render_device.create_bind_group(
             None,
             &pipeline_cache.get_bind_group_layout(&pipeline.downsample_image_layout),
-            &BindGroupEntries::with_indices(((2, &l0_height.texture_view), (3, &tmp_gpu.texture_view))),
+            &BindGroupEntries::with_indices((
+                (2, &l0_height.texture_view),
+                (3, &tmp_gpu.texture_view),
+            )),
         );
         // vertical: tmp → h0
         let mut u1 = UniformBuffer::from(DownsampleUniform {
@@ -962,11 +982,24 @@ fn prepare_export_bind_groups(
         let ib1 = render_device.create_bind_group(
             None,
             &pipeline_cache.get_bind_group_layout(&pipeline.downsample_image_layout),
-            &BindGroupEntries::with_indices(((2, &tmp_gpu.texture_view), (3, &l0_height.texture_view))),
+            &BindGroupEntries::with_indices((
+                (2, &tmp_gpu.texture_view),
+                (3, &l0_height.texture_view),
+            )),
         );
         smooth_passes.push([
-            DownsamplePassResources { _uniform: u0, uniform_bind_group: ub0, image_bind_group: ib0, dst_resolution: resolution },
-            DownsamplePassResources { _uniform: u1, uniform_bind_group: ub1, image_bind_group: ib1, dst_resolution: resolution },
+            DownsamplePassResources {
+                _uniform: u0,
+                uniform_bind_group: ub0,
+                image_bind_group: ib0,
+                dst_resolution: resolution,
+            },
+            DownsamplePassResources {
+                _uniform: u1,
+                uniform_bind_group: ub1,
+                image_bind_group: ib1,
+                dst_resolution: resolution,
+            },
         ]);
     }
 
@@ -1180,8 +1213,12 @@ fn scan_height_range(level_bytes: &[u8]) -> (f32, f32) {
     for chunk in level_bytes.chunks_exact(4) {
         let h = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         if h.is_finite() {
-            if h < min_h { min_h = h; }
-            if h > max_h { max_h = h; }
+            if h < min_h {
+                min_h = h;
+            }
+            if h > max_h {
+                max_h = h;
+            }
         }
     }
     if min_h >= max_h {
@@ -1208,19 +1245,25 @@ fn derive_normals_cpu(
         for col in 0..resolution {
             let c = col as i32;
             let r = row as i32;
-            let gx = (s(c+1,r-1) + 2.0*s(c+1,r) + s(c+1,r+1)
-                    - s(c-1,r-1) - 2.0*s(c-1,r) - s(c-1,r+1))
-                    * (1.0 / 8.0) * effective_height_scale;
-            let gz = (s(c-1,r+1) + 2.0*s(c,r+1) + s(c+1,r+1)
-                    - s(c-1,r-1) - 2.0*s(c,r-1) - s(c+1,r-1))
-                    * (1.0 / 8.0) * effective_height_scale;
+            let gx = (s(c + 1, r - 1) + 2.0 * s(c + 1, r) + s(c + 1, r + 1)
+                - s(c - 1, r - 1)
+                - 2.0 * s(c - 1, r)
+                - s(c - 1, r + 1))
+                * (1.0 / 8.0)
+                * effective_height_scale;
+            let gz = (s(c - 1, r + 1) + 2.0 * s(c, r + 1) + s(c + 1, r + 1)
+                - s(c - 1, r - 1)
+                - 2.0 * s(c, r - 1)
+                - s(c + 1, r - 1))
+                * (1.0 / 8.0)
+                * effective_height_scale;
             let nx = -gx;
             let nz = -gz;
             let len = (nx * nx + lod_scale * lod_scale + nz * nz).sqrt().max(1e-6);
             let px = (nx / len).clamp(-1.0, 1.0);
             let pz = (nz / len).clamp(-1.0, 1.0);
             let off = (row * resolution + col) * 4;
-            out[off]     = (px * 127.0).round() as i8 as u8;
+            out[off] = (px * 127.0).round() as i8 as u8;
             out[off + 1] = (pz * 127.0).round() as i8 as u8;
             out[off + 2] = 0;
             out[off + 3] = 127u8; // w = 1.0 in snorm (matches WGSL textureStore w=1.0)
@@ -1256,25 +1299,31 @@ fn write_export_tiles(
     // so that normals and heights are consistent (both in normalised space).
     let (h_min, h_max) = height_range;
     let range = (h_max - h_min).max(1e-8);
-    let normalized: Vec<Vec<f32>> = heights.iter().map(|level_bytes| {
-        level_bytes.chunks_exact(4)
-            .map(|b| {
-                let h = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-                ((h - h_min) / range).clamp(0.0, 1.0)
-            })
-            .collect()
-    }).collect();
+    let normalized: Vec<Vec<f32>> = heights
+        .iter()
+        .map(|level_bytes| {
+            level_bytes
+                .chunks_exact(4)
+                .map(|b| {
+                    let h = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                    ((h - h_min) / range).clamp(0.0, 1.0)
+                })
+                .collect()
+        })
+        .collect();
 
     // Derive normals from the normalised heights.  The GPU normal readback was removed
     // because GPU normals are baked before normalisation and have incorrect Sobel
     // gradient magnitudes relative to the exported (normalised) height tiles.
     let effective_height_scale = params.height_scale * params.world_scale;
-    let derived_normals: Vec<Vec<u8>> = (0..heights.len()).map(|lod| {
-        let lod_u32 = lod as u32;
-        let lod_res = (params.resolution >> lod_u32) as usize;
-        let lod_scale = params.world_scale * (1u32 << lod_u32) as f32;
-        derive_normals_cpu(&normalized[lod], lod_res, effective_height_scale, lod_scale)
-    }).collect();
+    let derived_normals: Vec<Vec<u8>> = (0..heights.len())
+        .map(|lod| {
+            let lod_u32 = lod as u32;
+            let lod_res = (params.resolution >> lod_u32) as usize;
+            let lod_scale = params.world_scale * (1u32 << lod_u32) as f32;
+            derive_normals_cpu(&normalized[lod], lod_res, effective_height_scale, lod_scale)
+        })
+        .collect();
 
     for (lod, height_level) in heights.iter().enumerate() {
         let lod = lod as u32;
@@ -1292,10 +1341,19 @@ fn write_export_tiles(
                 let tx = tile_start + tile_x as i32;
                 let ty = tile_start + tile_y as i32;
 
-                let height_tile =
-                    build_height_tile_bytes(height_level, resolution as usize, tile_x, tile_y, height_range);
-                let normal_tile =
-                    build_normal_tile_bytes(&derived_normals[lod as usize], resolution as usize, tile_x, tile_y);
+                let height_tile = build_height_tile_bytes(
+                    height_level,
+                    resolution as usize,
+                    tile_x,
+                    tile_y,
+                    height_range,
+                );
+                let normal_tile = build_normal_tile_bytes(
+                    &derived_normals[lod as usize],
+                    resolution as usize,
+                    tile_x,
+                    tile_y,
+                );
 
                 let height_path = height_dir.join(format!("{tx}_{ty}.bin"));
                 std::fs::write(&height_path, height_tile).map_err(|e| {
@@ -1344,21 +1402,36 @@ struct ExportMetadata {
 
 fn write_metadata(params: &GeneratorParams, output_dir: &Path, log: &mpsc::Sender<String>) {
     let meta = ExportMetadata {
-        water_level: if params.water_level > 0.0 { Some(params.water_level) } else { None },
+        water_level: if params.water_level > 0.0 {
+            Some(params.water_level)
+        } else {
+            None
+        },
     };
     match toml::to_string_pretty(&meta) {
         Ok(text) => {
             let path = output_dir.join("metadata.toml");
             match std::fs::write(&path, text) {
                 Ok(()) => log.send(format!("Metadata → '{}'", path.display())).ok(),
-                Err(e) => log.send(format!("Warning: failed to write metadata.toml: {e}")).ok(),
+                Err(e) => log
+                    .send(format!("Warning: failed to write metadata.toml: {e}"))
+                    .ok(),
             };
         }
-        Err(e) => { log.send(format!("Warning: failed to serialize metadata: {e}")).ok(); }
+        Err(e) => {
+            log.send(format!("Warning: failed to serialize metadata: {e}"))
+                .ok();
+        }
     }
 }
 
-fn save_height_png(level_bytes: &[u8], resolution: usize, height_range: (f32, f32), path: &Path, log: &mpsc::Sender<String>) {
+fn save_height_png(
+    level_bytes: &[u8],
+    resolution: usize,
+    height_range: (f32, f32),
+    path: &Path,
+    log: &mpsc::Sender<String>,
+) {
     let (h_min, h_max) = height_range;
     let range = (h_max - h_min).max(1e-8);
     let pixels: Vec<u16> = level_bytes
@@ -1370,17 +1443,20 @@ fn save_height_png(level_bytes: &[u8], resolution: usize, height_range: (f32, f3
         })
         .collect();
 
-    let img = ImageBuffer::<Luma<u16>, Vec<u16>>::from_raw(
-        resolution as u32,
-        resolution as u32,
-        pixels,
-    );
+    let img =
+        ImageBuffer::<Luma<u16>, Vec<u16>>::from_raw(resolution as u32, resolution as u32, pixels);
     match img {
         Some(buf) => match buf.save(path) {
-            Ok(()) => log.send(format!("Saved heightmap PNG → '{}'", path.display())).ok(),
-            Err(e) => log.send(format!("Warning: failed to save heightmap PNG: {e}")).ok(),
+            Ok(()) => log
+                .send(format!("Saved heightmap PNG → '{}'", path.display()))
+                .ok(),
+            Err(e) => log
+                .send(format!("Warning: failed to save heightmap PNG: {e}"))
+                .ok(),
         },
-        None => log.send("Warning: could not create heightmap PNG buffer".into()).ok(),
+        None => log
+            .send("Warning: could not create heightmap PNG buffer".into())
+            .ok(),
     };
 }
 
@@ -1453,7 +1529,7 @@ fn build_normal_tile_bytes(
         for col in 0..TILE_SIZE as usize {
             let src_col = start_x + col;
             let offset = (src_row * resolution + src_col) * 4;
-            out.push(level_bytes[offset]);     // R = nx (X normal component)
+            out.push(level_bytes[offset]); // R = nx (X normal component)
             out.push(level_bytes[offset + 1]); // G = nz (Z normal component)
         }
     }
@@ -1475,8 +1551,8 @@ mod tests {
     #[test]
     fn baked_level_count_known_resolutions() {
         // Stops when tiles_per_side drops below 2 (need ≥2 tiles for correct centering).
-        assert_eq!(baked_level_count(512).unwrap(), 1);   // L0=512 (2 tiles/side), L1=256 (1 tile/side → stop)
-        assert_eq!(baked_level_count(1024).unwrap(), 2);  // L0=1024, L1=512
+        assert_eq!(baked_level_count(512).unwrap(), 1); // L0=512 (2 tiles/side), L1=256 (1 tile/side → stop)
+        assert_eq!(baked_level_count(1024).unwrap(), 2); // L0=1024, L1=512
         assert_eq!(baked_level_count(2048).unwrap(), 3);
         assert_eq!(baked_level_count(4096).unwrap(), 4);
         assert_eq!(baked_level_count(8192).unwrap(), 5);
@@ -1486,7 +1562,7 @@ mod tests {
     fn baked_level_count_rejects_invalid() {
         assert!(baked_level_count(32768).is_err()); // exceeds MAX_EXPORT_RESOLUTION
         assert!(baked_level_count(3000).is_err()); // not a power-of-two
-        assert!(baked_level_count(128).is_err());  // < TILE_SIZE
+        assert!(baked_level_count(128).is_err()); // < TILE_SIZE
         assert!(baked_level_count(0).is_err());
     }
 
@@ -1631,10 +1707,10 @@ mod tests {
             );
 
             // Verify each references the correct source row
-            let expected_last =
-                (255 * resolution + tile_x * TILE_SIZE as usize) as f32 / (resolution * resolution) as f32;
-            let expected_first =
-                (256 * resolution + tile_x * TILE_SIZE as usize) as f32 / (resolution * resolution) as f32;
+            let expected_last = (255 * resolution + tile_x * TILE_SIZE as usize) as f32
+                / (resolution * resolution) as f32;
+            let expected_first = (256 * resolution + tile_x * TILE_SIZE as usize) as f32
+                / (resolution * resolution) as f32;
 
             assert!(
                 (last_row_h - expected_last).abs() < 2.0 / 65535.0,
@@ -1754,7 +1830,10 @@ mod tests {
             let quantized = (original.clamp(0.0, 1.0) * 65535.0).round() as u16;
             let reloaded = quantized as f32 / 65535.0;
             let err = (original - reloaded).abs();
-            assert!(err <= max_err, "roundtrip error at i={i}: {err} > {max_err}");
+            assert!(
+                err <= max_err,
+                "roundtrip error at i={i}: {err} > {max_err}"
+            );
         }
     }
 }

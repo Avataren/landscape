@@ -128,25 +128,25 @@ impl ExtractResource for ErosionControlState {
 /// Layout: 80 bytes (multiple of 16, no padding required).
 #[derive(Clone, Resource, ExtractResource, ShaderType)]
 pub struct ErosionUniform {
-    pub resolution:           UVec2,
-    pub dt:                   f32,
-    pub gravity:              f32,
-    pub pipe_length:          f32,
-    pub rain_rate:            f32,
-    pub evaporation_rate:     f32,
-    pub sediment_capacity:    f32,
-    pub erosion_rate:         f32,
-    pub deposition_rate:      f32,
-    pub min_slope:            f32,
-    pub hardness_influence:   f32,
+    pub resolution: UVec2,
+    pub dt: f32,
+    pub gravity: f32,
+    pub pipe_length: f32,
+    pub rain_rate: f32,
+    pub evaporation_rate: f32,
+    pub sediment_capacity: f32,
+    pub erosion_rate: f32,
+    pub deposition_rate: f32,
+    pub min_slope: f32,
+    pub hardness_influence: f32,
     pub repose_angle_radians: f32,
-    pub talus_rate:           f32,
-    pub num_particles:        u32,
-    pub max_steps:            u32,
-    pub inertia:              f32,
-    pub frame_seed:           u32,
-    pub pipe_area:            f32,
-    pub erosion_depth_max:    f32,
+    pub talus_rate: f32,
+    pub num_particles: u32,
+    pub max_steps: u32,
+    pub inertia: f32,
+    pub frame_seed: u32,
+    pub pipe_area: f32,
+    pub erosion_depth_max: f32,
 }
 
 impl Default for ErosionUniform {
@@ -172,25 +172,25 @@ impl ErosionUniform {
     pub fn from_params(p: &ErosionParams, resolution: u32, hardness_seed: u32) -> Self {
         let res_scale = resolution as f32 / 512.0;
         Self {
-            resolution:           UVec2::splat(resolution),
-            dt:                   p.dt,
-            gravity:              p.gravity,
-            pipe_length:          p.pipe_length,
-            rain_rate:            p.rain_rate,
-            evaporation_rate:     p.evaporation_rate,
-            sediment_capacity:    p.sediment_capacity,
-            erosion_rate:         p.erosion_rate,
-            deposition_rate:      p.deposition_rate,
-            min_slope:            p.min_slope,
-            hardness_influence:   p.hardness_influence,
+            resolution: UVec2::splat(resolution),
+            dt: p.dt,
+            gravity: p.gravity,
+            pipe_length: p.pipe_length,
+            rain_rate: p.rain_rate,
+            evaporation_rate: p.evaporation_rate,
+            sediment_capacity: p.sediment_capacity,
+            erosion_rate: p.erosion_rate,
+            deposition_rate: p.deposition_rate,
+            min_slope: p.min_slope,
+            hardness_influence: p.hardness_influence,
             repose_angle_radians: p.repose_angle * (PI / 180.0),
-            talus_rate:           p.talus_rate,
-            num_particles:        ((p.num_particles as f32) * res_scale * res_scale) as u32,
-            max_steps:            ((p.particle_max_steps as f32) * res_scale).ceil() as u32,
-            inertia:              p.particle_inertia,
-            frame_seed:           hardness_seed,
-            pipe_area:            p.pipe_area * res_scale,
-            erosion_depth_max:    p.erosion_depth_max,
+            talus_rate: p.talus_rate,
+            num_particles: ((p.num_particles as f32) * res_scale * res_scale) as u32,
+            max_steps: ((p.particle_max_steps as f32) * res_scale).ceil() as u32,
+            inertia: p.particle_inertia,
+            frame_seed: hardness_seed,
+            pipe_area: p.pipe_area * res_scale,
+            erosion_depth_max: p.erosion_depth_max,
         }
     }
 }
@@ -216,7 +216,10 @@ mod tests {
 
             // pipe_area ∝ N/512
             let expected_pa = base.pipe_area * rs;
-            assert!((u.pipe_area - expected_pa).abs() < 1e-6, "pipe_area at res {res}");
+            assert!(
+                (u.pipe_area - expected_pa).abs() < 1e-6,
+                "pipe_area at res {res}"
+            );
 
             // evaporation_rate / rs must stay < 1.0 for default params
             assert!(

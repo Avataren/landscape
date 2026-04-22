@@ -4,8 +4,8 @@
   "diffuse_path": null,
   "max_mip_level": 4,
   "collision_mip_level": 2,
-  "world_scale": 2.0,
-  "height_scale": 1024.0,
+  "world_scale": 1.0,
+  "height_scale": 512.0,
   "clipmap_levels": 8,
   "material_library": {
     "slots": [
@@ -181,5 +181,8 @@
       0.0,
       125.0
     ]
+  },
+  "metadata": {
+    "water_level": 0.57
   }
 }

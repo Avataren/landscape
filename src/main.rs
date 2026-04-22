@@ -54,12 +54,24 @@ fn main() {
                     let (mut config, source, library, wmin, wmax, meta) = desc.into_runtime();
                     config.height_scale *= 1.0; // into_runtime already multiplies
                     let water_height = meta.water_level.map(|wl| wl * config.height_scale);
-                    let water = LandscapeWaterPlugin { water_height, world_min: wmin, world_max: wmax };
+                    let water = LandscapeWaterPlugin {
+                        water_height,
+                        world_min: wmin,
+                        world_max: wmax,
+                    };
                     (config, source, Some(library), loaded_clouds, water)
                 }
                 Err(e) => {
-                    eprintln!("Warning: failed to load level '{path}': {e}. Starting with empty editor.");
-                    (TerrainConfig::default(), TerrainSourceDesc::default(), None, None, LandscapeWaterPlugin::default())
+                    eprintln!(
+                        "Warning: failed to load level '{path}': {e}. Starting with empty editor."
+                    );
+                    (
+                        TerrainConfig::default(),
+                        TerrainSourceDesc::default(),
+                        None,
+                        None,
+                        LandscapeWaterPlugin::default(),
+                    )
                 }
             }
         } else {

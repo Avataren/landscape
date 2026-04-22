@@ -27,6 +27,7 @@ use bevy::{
     prelude::*,
 };
 use clipmap::build_patch_instances_for_view_in_bounds;
+use clipmap::PatchInstanceCpu;
 use clipmap_texture::{
     apply_tiles_to_clipmap, begin_terrain_upload_frame, compute_clip_levels,
     compute_initial_clip_levels, create_initial_clipmap_texture,
@@ -39,7 +40,6 @@ use config::TerrainConfig;
 use macro_color::load_macro_color_texture;
 use material::{TerrainMaterial, TerrainMaterialUniforms};
 use material_slots::{sync_material_library_to_terrain_material, MaterialLibrary};
-use clipmap::PatchInstanceCpu;
 use math::{compute_needed_tiles_for_level, level_scale, snap_camera_to_nested_clipmap_grid};
 use pbr_textures::{
     rebuild_pbr_textures_system, PbrRebuildProgress, PbrRebuildState, PbrTexturesDirty,

@@ -202,9 +202,7 @@ pub fn update_local_terrain_collider(
                 .map(|zi| {
                     let wx = center.x + (xi as f32 - half_n) * cell_size;
                     let wz = center.y + (zi as f32 - half_n) * cell_size;
-                    cache
-                        .sample_height(Vec2::new(wx, wz))
-                        .unwrap_or(0.0)
+                    cache.sample_height(Vec2::new(wx, wz)).unwrap_or(0.0)
                 })
                 .collect()
         })

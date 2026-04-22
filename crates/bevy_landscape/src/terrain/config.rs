@@ -122,6 +122,10 @@ mod tests {
         let config = TerrainConfig::default();
         let n = config.clipmap_n;
         // n must be 2^k - 1 for the GPU Gems 2 odd-n constraint.
-        assert_eq!((n + 1).count_ones(), 1, "clipmap_n + 1 must be a power of two");
+        assert_eq!(
+            (n + 1).count_ones(),
+            1,
+            "clipmap_n + 1 must be a power of two"
+        );
     }
 }

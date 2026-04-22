@@ -36,7 +36,11 @@ impl Plugin for LandscapeGeneratorPlugin {
             .init_resource::<ErosionParams>()
             .init_resource::<ErosionUniform>()
             .insert_resource(ErosionControlState::new_dirty())
-            .add_plugins((GeneratorComputePlugin, ErosionComputePlugin, GeneratorExportPlugin))
+            .add_plugins((
+                GeneratorComputePlugin,
+                ErosionComputePlugin,
+                GeneratorExportPlugin,
+            ))
             .add_systems(Startup, setup_generator)
             .add_systems(
                 PostUpdate,
@@ -57,9 +61,13 @@ fn setup_generator(
     params: Res<GeneratorParams>,
 ) {
     let handle = build_generator_image(&mut images, params.resolution);
-    commands.insert_resource(GeneratorImage { heightfield: handle });
+    commands.insert_resource(GeneratorImage {
+        heightfield: handle,
+    });
     let raw_handle = build_normalization_image(&mut images, params.resolution);
-    commands.insert_resource(NormalizationImage { raw_heights: raw_handle });
+    commands.insert_resource(NormalizationImage {
+        raw_heights: raw_handle,
+    });
     commands.insert_resource(ErosionBuffers::new(&mut images, params.resolution));
 }
 
@@ -69,7 +77,9 @@ fn sync_generator_image(
     params: Res<GeneratorParams>,
     current: Option<Res<GeneratorImage>>,
 ) {
-    if !params.is_changed() { return; }
+    if !params.is_changed() {
+        return;
+    }
 
     let needs_rebuild = current
         .as_ref()
@@ -82,7 +92,9 @@ fn sync_generator_image(
 
     if needs_rebuild {
         let handle = build_generator_image(&mut images, params.resolution);
-        commands.insert_resource(GeneratorImage { heightfield: handle });
+        commands.insert_resource(GeneratorImage {
+            heightfield: handle,
+        });
     }
 }
 
@@ -92,7 +104,9 @@ fn sync_normalization_image(
     params: Res<GeneratorParams>,
     current: Option<Res<NormalizationImage>>,
 ) {
-    if !params.is_changed() { return; }
+    if !params.is_changed() {
+        return;
+    }
 
     let needs_rebuild = current
         .as_ref()
@@ -105,7 +119,9 @@ fn sync_normalization_image(
 
     if needs_rebuild {
         let raw_handle = build_normalization_image(&mut images, params.resolution);
-        commands.insert_resource(NormalizationImage { raw_heights: raw_handle });
+        commands.insert_resource(NormalizationImage {
+            raw_heights: raw_handle,
+        });
     }
 }
 
@@ -117,7 +133,9 @@ fn sync_erosion_buffers(
     erosion_ctrl: Option<ResMut<ErosionControlState>>,
     mut erosion_params: ResMut<ErosionParams>,
 ) {
-    if !params.is_changed() { return; }
+    if !params.is_changed() {
+        return;
+    }
 
     let needs_rebuild = current
         .as_ref()
@@ -156,20 +174,20 @@ fn sync_uniform(
         // `grayscale` flag.  If only grayscale flipped, we must NOT increment the raw
         // generation — that would re-dispatch `preview_generate_raw` and overwrite
         // the eroded `raw_heights` with fresh un-eroded noise.
-        let raw_changed = new.resolution           != uniform.resolution
-            || new.octaves              != uniform.octaves
-            || new.seed                 != uniform.seed
-            || new.offset               != uniform.offset
-            || new.frequency            != uniform.frequency
-            || new.lacunarity           != uniform.lacunarity
-            || new.gain                 != uniform.gain
-            || new.height_scale         != uniform.height_scale
-            || new.continent_frequency  != uniform.continent_frequency
-            || new.continent_strength   != uniform.continent_strength
-            || new.ridge_strength       != uniform.ridge_strength
-            || new.warp_frequency       != uniform.warp_frequency
-            || new.warp_strength        != uniform.warp_strength
-            || new.erosion_strength     != uniform.erosion_strength;
+        let raw_changed = new.resolution != uniform.resolution
+            || new.octaves != uniform.octaves
+            || new.seed != uniform.seed
+            || new.offset != uniform.offset
+            || new.frequency != uniform.frequency
+            || new.lacunarity != uniform.lacunarity
+            || new.gain != uniform.gain
+            || new.height_scale != uniform.height_scale
+            || new.continent_frequency != uniform.continent_frequency
+            || new.continent_strength != uniform.continent_strength
+            || new.ridge_strength != uniform.ridge_strength
+            || new.warp_frequency != uniform.warp_frequency
+            || new.warp_strength != uniform.warp_strength
+            || new.erosion_strength != uniform.erosion_strength;
         *uniform = new;
         // Always bump display_generation so GeneratorNormNode re-runs the
         // normalize/colorize pass (needed for grayscale toggle, erosion, etc.).
@@ -187,4 +205,3 @@ fn sync_uniform(
         generation.0 += 1;
     }
 }
-

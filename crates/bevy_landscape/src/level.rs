@@ -181,7 +181,14 @@ impl LevelDesc {
             collision_mip_level: self.collision_mip_level,
         };
 
-        (config, source, self.material_library, world_min, world_max, metadata)
+        (
+            config,
+            source,
+            self.material_library,
+            world_min,
+            world_max,
+            metadata,
+        )
     }
 }
 
