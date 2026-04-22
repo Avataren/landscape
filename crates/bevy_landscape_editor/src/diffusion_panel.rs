@@ -196,6 +196,10 @@ pub(crate) struct DiffusionPanelState {
     /// Dimensions of the full conditioning raster (after azgaar-to-tiff).
     /// Populated lazily from an existing TIFF or from log output.
     pub conditioning_raster_size: Option<(u32, u32)>,
+    /// Egui texture handle for the world preview thumbnail.
+    preview_texture: Option<egui::TextureHandle>,
+    /// Raster size the preview texture was built for (to detect staleness).
+    preview_loaded_for: Option<(u32, u32)>,
 }
 
 impl DiffusionPanelState {
@@ -230,6 +234,8 @@ impl DiffusionPanelState {
             run_state: DiffusionRunState::Idle,
             prefs_applied: false,
             conditioning_raster_size: None,
+            preview_texture: None,
+            preview_loaded_for: None,
         }
     }
 
@@ -290,13 +296,47 @@ pub(crate) fn draw_diffusion_tab(ui: &mut egui::Ui, state: &mut DiffusionPanelSt
     if state.conditioning_raster_size.is_none() {
         let dir = match state.workflow {
             DiffusionWorkflow::AzgaarJson => {
-                // conditioning dir is working_dir/conditioning
                 let base = PathBuf::from(&state.working_dir).join("conditioning");
                 base.to_string_lossy().into_owned()
             }
             DiffusionWorkflow::ConditioningFolder => state.conditioning_dir.clone(),
         };
         state.conditioning_raster_size = probe_conditioning_tiff_size(&dir);
+    }
+
+    // Lazily load (or reload) the world preview texture.
+    if state.preview_loaded_for != state.conditioning_raster_size {
+        state.preview_texture = None;
+        if let Some(_) = state.conditioning_raster_size {
+            let tiff_path = match state.workflow {
+                DiffusionWorkflow::AzgaarJson => {
+                    PathBuf::from(&state.working_dir).join("conditioning/heightmap.tif")
+                }
+                DiffusionWorkflow::ConditioningFolder => {
+                    PathBuf::from(&state.conditioning_dir).join("heightmap.tif")
+                }
+            };
+            if let Some((pixels, tw, th)) =
+                bevy_landscape::bake::load_tiff_thumbnail(&tiff_path, 512)
+            {
+                // Apply a terrain colour ramp: deep blue → beach → green → white.
+                let color_pixels: Vec<egui::Color32> = pixels
+                    .iter()
+                    .map(|&g| terrain_color_ramp(g))
+                    .collect();
+                let img = egui::ColorImage {
+                    size: [tw, th],
+                    source_size: egui::vec2(tw as f32, th as f32),
+                    pixels: color_pixels,
+                };
+                state.preview_texture = Some(ui.ctx().load_texture(
+                    "world_preview",
+                    img,
+                    egui::TextureOptions::LINEAR,
+                ));
+            }
+        }
+        state.preview_loaded_for = state.conditioning_raster_size;
     }
 
     let mut pick_target = None;
@@ -486,8 +526,17 @@ pub(crate) fn draw_diffusion_tab(ui: &mut egui::Ui, state: &mut DiffusionPanelSt
                         );
                         let rect = response.rect;
 
-                        // World background.
-                        painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(50, 70, 45));
+                        // World background — heightmap texture if loaded, plain rect otherwise.
+                        if let Some(tex) = &state.preview_texture {
+                            painter.image(
+                                tex.id(),
+                                rect,
+                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                egui::Color32::WHITE,
+                            );
+                        } else {
+                            painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(50, 70, 45));
+                        }
                         painter.rect_stroke(
                             rect, 2.0,
                             egui::Stroke::new(1.0, egui::Color32::from_gray(120)),
@@ -858,6 +907,8 @@ fn start_run(state: &mut DiffusionPanelState) {
         error: None,
         reloaded: false,
     };
+    // Force texture reload after run completes.
+    state.preview_loaded_for = None;
 }
 
 fn start_probe(state: &mut DiffusionPanelState) {
@@ -1024,8 +1075,37 @@ fn parse_output_shape(line: &str) -> Option<(u32, u32)> {
 
 /// Try to read the pixel dimensions of the conditioning heightmap TIFF.
 /// Returns `None` if the file doesn't exist or can't be read.
-fn probe_conditioning_tiff_size(conditioning_dir: &str) -> Option<(u32, u32)> {
-    let path = PathBuf::from(conditioning_dir).join("heightmap.tif");
+/// Map a grayscale height value [0..255] to a terrain colour ramp.
+/// Ramp: deep ocean → shallow → beach → lowland → highland → snow.
+fn terrain_color_ramp(g: u8) -> egui::Color32 {
+    let t = g as f32 / 255.0;
+    // Colour stops: (threshold, R, G, B)
+    const STOPS: &[(f32, u8, u8, u8)] = &[
+        (0.00,  10,  20, 100), // deep ocean
+        (0.30,  30,  80, 180), // shallow
+        (0.38, 180, 175, 120), // beach
+        (0.42,  60, 130,  40), // lowland green
+        (0.60,  80, 100,  50), // highland
+        (0.75, 100,  90,  70), // rocky
+        (0.88, 220, 220, 215), // high snow
+        (1.00, 255, 255, 255), // peak
+    ];
+    let mut lo = STOPS[0];
+    let mut hi = STOPS[STOPS.len() - 1];
+    for w in STOPS.windows(2) {
+        if t >= w[0].0 && t <= w[1].0 {
+            lo = w[0];
+            hi = w[1];
+            break;
+        }
+    }
+    let span = hi.0 - lo.0;
+    let f = if span > 0.0 { (t - lo.0) / span } else { 0.0 };
+    let lerp = |a: u8, b: u8| (a as f32 + f * (b as f32 - a as f32)) as u8;
+    egui::Color32::from_rgb(lerp(lo.1, hi.1), lerp(lo.2, hi.2), lerp(lo.3, hi.3))
+}
+
+fn probe_conditioning_tiff_size(conditioning_dir: &str) -> Option<(u32, u32)> {    let path = PathBuf::from(conditioning_dir).join("heightmap.tif");
     if !path.exists() {
         return None;
     }

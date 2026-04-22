@@ -419,7 +419,71 @@ fn tiff_result_to_f32(result: tiff::decoder::DecodingResult) -> Vec<f32> {
     }
 }
 
-/// Scan a TIFF to get dimensions, rows-per-strip, and the normalised min/max
+/// Load a TIFF heightmap and return a downsampled grayscale thumbnail.
+///
+/// Reads at most `max_side` sample rows and `max_side` columns using uniform
+/// subsampling — safe to call on the main thread even for very large TIFFs.
+/// Returns `(pixels_u8, thumb_w, thumb_h)` where `pixels_u8` is row-major
+/// grayscale (0 = low, 255 = high). Returns `None` if the file can't be read.
+pub fn load_tiff_thumbnail(path: &Path, max_side: usize) -> Option<(Vec<u8>, usize, usize)> {
+    let f = File::open(path).ok()?;
+    let mut dec = tiff::decoder::Decoder::new(BufReader::new(f)).ok()?;
+    let (w, h) = dec.dimensions().ok()?;
+    let (chunk_w, rps_raw) = dec.chunk_dimensions();
+    if chunk_w != w {
+        return None; // tiled TIFF — skip
+    }
+    let rps = rps_raw as usize;
+    let strip_count = dec.strip_count().ok()? as usize;
+    let (src_w, src_h) = (w as usize, h as usize);
+
+    // Compute subsampling so the thumbnail fits within max_side × max_side.
+    let step = (src_w.max(src_h) + max_side - 1) / max_side;
+    let thumb_w = (src_w + step - 1) / step;
+    let thumb_h = (src_h + step - 1) / step;
+
+    let mut pixels = vec![0u8; thumb_w * thumb_h];
+    let mut h_min = f32::INFINITY;
+    let mut h_max = f32::NEG_INFINITY;
+
+    // Two-pass: first scan range, then fill pixels.
+    // We read each strip once per pass; total read = 2 × file size.
+    // For safety, collect all decoded rows into a subsampled buffer in one pass.
+    let mut rows: Vec<Vec<f32>> = Vec::with_capacity(thumb_h);
+    for i in 0..strip_count {
+        let strip_row_start = i * rps;
+        if strip_row_start >= src_h { break; }
+        let result = dec.read_chunk(i as u32).ok()?;
+        let vals = tiff_result_to_f32(result);
+        for row in 0..rps {
+            let abs_row = strip_row_start + row;
+            if abs_row >= src_h { break; }
+            if abs_row % step != 0 { continue; } // skip non-sampled rows
+            let row_vals: Vec<f32> = (0..thumb_w)
+                .map(|tx| {
+                    let sx = (tx * step).min(src_w - 1);
+                    let v = vals.get(row * src_w + sx).copied().unwrap_or(0.0);
+                    if v < h_min { h_min = v; }
+                    if v > h_max { h_max = v; }
+                    v
+                })
+                .collect();
+            rows.push(row_vals);
+        }
+    }
+
+    // Normalise and convert to u8.
+    let range = (h_max - h_min).max(1e-6);
+    for (ty, row_vals) in rows.iter().enumerate() {
+        if ty >= thumb_h { break; }
+        for (tx, &v) in row_vals.iter().enumerate() {
+            pixels[ty * thumb_w + tx] = (((v - h_min) / range) * 255.0) as u8;
+        }
+    }
+
+    Some((pixels, thumb_w, thumb_h))
+}
+
 /// within the `bake_size`×`bake_size` domain (top-left crop).
 ///
 /// Returns `(src_w, src_h, h_min, h_max, rows_per_strip)`.
