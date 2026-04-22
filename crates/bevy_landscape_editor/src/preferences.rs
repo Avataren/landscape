@@ -22,6 +22,13 @@ pub struct AppPreferences {
     /// Level JSON file loaded by default at startup when no `--level` argument
     /// is supplied.  `None` means fall back to `landscape.toml`.
     pub default_level: Option<String>,
+    /// Default terrain-diffusion checkout path for the diffusion generator tab.
+    pub diffusion_repo_path: Option<String>,
+    /// Python executable used to launch terrain-diffusion.
+    pub diffusion_python: Option<String>,
+    /// Optional extra environment variables for terrain-diffusion subprocesses.
+    /// Format: `KEY=VALUE;KEY2=VALUE2` or newline-separated pairs.
+    pub diffusion_env: Option<String>,
 }
 
 impl AppPreferences {
@@ -110,13 +117,19 @@ fn preferences_system(
     let mut pick = false;
     let mut save = false;
     let mut clear = false;
+    let mut clear_repo = false;
+    let mut clear_python = false;
+    let mut clear_env = false;
 
     // Work with a local copy of the level string so we can detect empty → None.
     let mut level_str = dialog.draft.default_level.clone().unwrap_or_default();
+    let mut diffusion_repo_str = dialog.draft.diffusion_repo_path.clone().unwrap_or_default();
+    let mut diffusion_python_str = dialog.draft.diffusion_python.clone().unwrap_or_default();
+    let mut diffusion_env_str = dialog.draft.diffusion_env.clone().unwrap_or_default();
 
     egui::Window::new("Preferences")
         .default_width(460.0)
-        .resizable(false)
+        .resizable(true)
         .collapsible(false)
         .show(ctx, |ui| {
             egui::Grid::new("prefs_grid")
@@ -140,7 +153,47 @@ fn preferences_system(
                         }
                     });
                     ui.end_row();
+
+                    ui.label("Diffusion repo").on_hover_text(
+                        "Default terrain-diffusion checkout path for the diffusion generator tab.",
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut diffusion_repo_str)
+                            .hint_text("/path/to/terrain-diffusion")
+                            .desired_width(260.0),
+                    );
+                    if ui.small_button("✕").on_hover_text("Clear").clicked() {
+                        clear_repo = true;
+                    }
+                    ui.end_row();
+
+                    ui.label("Diffusion Python").on_hover_text(
+                        "Interpreter path used to run terrain-diffusion. Point this at `.venv/bin/python` for a ROCm-enabled venv.",
+                    );
+                    ui.add(
+                        egui::TextEdit::singleline(&mut diffusion_python_str)
+                            .hint_text("/path/to/.venv/bin/python")
+                            .desired_width(260.0),
+                    );
+                    if ui.small_button("✕").on_hover_text("Clear").clicked() {
+                        clear_python = true;
+                    }
+                    ui.end_row();
                 });
+
+            ui.add_space(6.0);
+            ui.label("Diffusion extra env").on_hover_text(
+                "Optional env vars passed to terrain-diffusion. Use `KEY=VALUE;KEY2=VALUE2` or newline-separated pairs. Example: `HSA_OVERRIDE_GFX_VERSION=11.0.0`.",
+            );
+            ui.add(
+                egui::TextEdit::multiline(&mut diffusion_env_str)
+                    .desired_width(420.0)
+                    .desired_rows(3)
+                    .hint_text("HSA_OVERRIDE_GFX_VERSION=11.0.0"),
+            );
+            if ui.small_button("Clear diffusion env").clicked() {
+                clear_env = true;
+            }
 
             if let Some(ref s) = dialog.status {
                 let color = if s.starts_with("✓") {
@@ -168,9 +221,33 @@ fn preferences_system(
     } else {
         Some(level_str)
     };
+    dialog.draft.diffusion_repo_path = if diffusion_repo_str.trim().is_empty() {
+        None
+    } else {
+        Some(diffusion_repo_str)
+    };
+    dialog.draft.diffusion_python = if diffusion_python_str.trim().is_empty() {
+        None
+    } else {
+        Some(diffusion_python_str)
+    };
+    dialog.draft.diffusion_env = if diffusion_env_str.trim().is_empty() {
+        None
+    } else {
+        Some(diffusion_env_str)
+    };
 
     if clear {
         dialog.draft.default_level = None;
+    }
+    if clear_repo {
+        dialog.draft.diffusion_repo_path = None;
+    }
+    if clear_python {
+        dialog.draft.diffusion_python = None;
+    }
+    if clear_env {
+        dialog.draft.diffusion_env = None;
     }
 
     if pick {

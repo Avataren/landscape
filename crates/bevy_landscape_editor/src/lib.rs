@@ -1,4 +1,5 @@
 mod cloud_panel;
+mod diffusion_panel;
 mod fog_panel;
 mod generator_panel;
 mod import;

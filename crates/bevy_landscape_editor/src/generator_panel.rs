@@ -12,11 +12,21 @@ use bevy_landscape_generator::{
     HeightfieldImage,
 };
 
+use crate::diffusion_panel::{draw_diffusion_tab, poll_diffusion_state, DiffusionPanelState};
+use crate::preferences::AppPreferences;
+
 #[derive(Default, Clone, Copy, PartialEq)]
 enum PreviewMode {
     #[default]
     Height,
     Water,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum GeneratorTab {
+    #[default]
+    Legacy,
+    Diffusion,
 }
 
 #[derive(Resource)]
@@ -29,6 +39,8 @@ pub struct GeneratorPanelState {
     preview_mode: PreviewMode,
     output_dir: String,
     last_completed_generation: u64,
+    active_tab: GeneratorTab,
+    diffusion: DiffusionPanelState,
 }
 
 impl Default for GeneratorPanelState {
@@ -42,6 +54,8 @@ impl Default for GeneratorPanelState {
             preview_mode: PreviewMode::Height,
             output_dir: "assets/tiles_generated".into(),
             last_completed_generation: 0,
+            active_tab: GeneratorTab::Legacy,
+            diffusion: DiffusionPanelState::new(),
         }
     }
 }
@@ -66,9 +80,12 @@ fn generator_panel_system(
     erosion_buffers: Option<Res<GeneratorErosionBuffers>>,
     active_config: Res<TerrainConfig>,
     active_library: Res<MaterialLibrary>,
+    prefs: Res<AppPreferences>,
     mut reload_tx: MessageWriter<ReloadTerrainRequest>,
     mut export_tx: MessageWriter<StartGeneratorExport>,
 ) -> Result {
+    panel.diffusion.apply_startup_preferences(&prefs);
+
     if export_state.completed_generation != panel.last_completed_generation {
         panel.last_completed_generation = export_state.completed_generation;
         if export_state.succeeded {
@@ -100,11 +117,17 @@ fn generator_panel_system(
         let needs_refresh = panel.water_preview_handle.as_ref() != Some(&eb.water);
         if needs_refresh {
             panel.water_preview_handle = Some(eb.water.clone());
-            panel.water_preview_id = Some(contexts.add_image(
-                bevy_egui::EguiTextureHandle::Strong(eb.water.clone()),
-            ));
+            panel.water_preview_id =
+                Some(contexts.add_image(bevy_egui::EguiTextureHandle::Strong(eb.water.clone())));
         }
     }
+
+    poll_diffusion_state(
+        &mut panel.diffusion,
+        &active_config,
+        &active_library,
+        &mut reload_tx,
+    );
 
     if !panel.open {
         return Ok(());
@@ -124,14 +147,26 @@ fn generator_panel_system(
         .default_size([860.0, 700.0])
         .open(&mut open)
         .show(ctx, |ui| {
-            ui.horizontal_top(|ui| {
-                // ── Left column: all parameter sections ──────────────────────
-                ui.vertical(|ui| {
-                    ui.set_min_width(420.0);
-                    ui.set_max_width(420.0);
-                    egui::ScrollArea::vertical()
-                        .id_salt("params_scroll")
-                        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut panel.active_tab, GeneratorTab::Legacy, "Legacy");
+                ui.selectable_value(
+                    &mut panel.active_tab,
+                    GeneratorTab::Diffusion,
+                    "Diffusion",
+                );
+            });
+            ui.separator();
+
+            match panel.active_tab {
+                GeneratorTab::Legacy => {
+                    ui.horizontal_top(|ui| {
+                    // ── Left column: all parameter sections ──────────────────────
+                    ui.vertical(|ui| {
+                        ui.set_min_width(420.0);
+                        ui.set_max_width(420.0);
+                        egui::ScrollArea::vertical()
+                            .id_salt("params_scroll")
+                            .show(ui, |ui| {
                         ui.heading("Noise Parameters");
                         ui.separator();
 
@@ -439,15 +474,15 @@ fn generator_panel_system(
                                 ui.add(egui::Slider::new(&mut erosion.particle_inertia, 0.0..=0.99));
                                 ui.end_row();
                             });
-                    }); // end ScrollArea
-                }); // end left vertical
+                            }); // end ScrollArea
+                    }); // end left vertical
 
-                ui.separator();
-
-                // ── Right column: preview + export ───────────────────────────
-                ui.vertical(|ui| {
-                    ui.heading("Preview");
                     ui.separator();
+
+                    // ── Right column: preview + export ───────────────────────────
+                    ui.vertical(|ui| {
+                        ui.heading("Preview");
+                        ui.separator();
 
                     // Mode selector — swaps which texture is shown; does NOT
                     // touch params_changed, so no shader re-dispatch fires.
@@ -530,8 +565,13 @@ fn generator_panel_system(
                                 }
                             });
                     }
-                }); // end right vertical
-            }); // end horizontal_top
+                    }); // end right vertical
+                    });
+                }
+                GeneratorTab::Diffusion => {
+                    draw_diffusion_tab(ui, &mut panel.diffusion);
+                }
+            }
         });
     panel.open = open;
 
