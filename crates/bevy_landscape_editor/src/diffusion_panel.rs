@@ -66,6 +66,8 @@ impl DiffusionDtype {
     }
 }
 
+const AZGAAR_REGION_CELL_OPTIONS: &[u32] = &[4, 8, 16, 32, 64, 128];
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DiffusionPickTarget {
     RepoPath,
@@ -143,6 +145,9 @@ struct DiffusionJobConfig {
     python_bin: String,
     model_path: String,
     azgaar_json_path: String,
+    azgaar_region_cells: u32,
+    azgaar_center_x: f32,
+    azgaar_center_y: f32,
     conditioning_dir: String,
     conditioning_scale_km: f32,
     working_dir: String,
@@ -167,6 +172,9 @@ pub(crate) struct DiffusionPanelState {
     pub python_bin: String,
     pub model_path: String,
     pub azgaar_json_path: String,
+    pub azgaar_region_cells: u32,
+    pub azgaar_center_x: f32,
+    pub azgaar_center_y: f32,
     pub conditioning_dir: String,
     pub conditioning_scale_km: f32,
     pub working_dir: String,
@@ -197,6 +205,9 @@ impl DiffusionPanelState {
             python_bin: detect_python_bin(&repo_path).display().to_string(),
             model_path: "xandergos/terrain-diffusion-90m".into(),
             azgaar_json_path: String::new(),
+            azgaar_region_cells: 8,
+            azgaar_center_x: 0.5,
+            azgaar_center_y: 0.5,
             conditioning_dir: format!("{working_dir}/conditioning"),
             conditioning_scale_km: 23.0,
             working_dir,
@@ -408,6 +419,68 @@ pub(crate) fn draw_diffusion_tab(ui: &mut egui::Ui, state: &mut DiffusionPanelSt
             );
             ui.end_row();
 
+            if matches!(state.workflow, DiffusionWorkflow::AzgaarJson) {
+                ui.label("Azgaar region")
+                    .on_hover_text(
+                        "Square crop size in conditioning cells. The diffusion export expands each conditioning cell into 256 output pixels, so power-of-two sizes keep the current tile baker happy.",
+                    );
+                ui.add_enabled_ui(!running, |ui| {
+                    egui::ComboBox::from_id_salt("diffusion_azgaar_region_cells")
+                        .selected_text(format!("{} cells/side", state.azgaar_region_cells))
+                        .show_ui(ui, |ui| {
+                            for &cells in AZGAAR_REGION_CELL_OPTIONS {
+                                ui.selectable_value(
+                                    &mut state.azgaar_region_cells,
+                                    cells,
+                                    format!("{cells}"),
+                                );
+                            }
+                        });
+                });
+                ui.end_row();
+
+                ui.label("Region center X");
+                ui.add_enabled(
+                    !running,
+                    egui::Slider::new(&mut state.azgaar_center_x, 0.0..=1.0).show_value(true),
+                );
+                ui.end_row();
+
+                ui.label("Region center Y");
+                ui.add_enabled(
+                    !running,
+                    egui::Slider::new(&mut state.azgaar_center_y, 0.0..=1.0).show_value(true),
+                );
+                ui.end_row();
+
+                ui.label("Approx region span");
+                ui.label(format!(
+                    "{:.1} km/side",
+                    state.azgaar_region_cells as f32 * state.conditioning_scale_km
+                ));
+                ui.end_row();
+
+                ui.label("Generated raster");
+                ui.label(format!(
+                    "{} x {} px",
+                    state.azgaar_region_cells * 256,
+                    state.azgaar_region_cells * 256
+                ));
+                ui.end_row();
+
+                ui.label("Loaded terrain span");
+                ui.label(format!(
+                    "{:.1} km/side",
+                    state.azgaar_region_cells as f32 * 256.0 * state.world_scale / 1000.0
+                ));
+                ui.end_row();
+
+                let ideal_world_scale = state.conditioning_scale_km * 1000.0 / 256.0;
+                ui.label("Ideal world scale");
+                ui.label(format!("{ideal_world_scale:.2} m/px"));
+                ui.end_row();
+            }
+
             ui.label("World Scale (m/px)")
                 .on_hover_text("LOD0 cell size in your Bevy landscape after baking.");
             ui.add_enabled(
@@ -603,10 +676,12 @@ fn draw_run_log(ui: &mut egui::Ui, state: &DiffusionPanelState) {
             ui.label(kind.running_label());
         });
     } else if let Some(err) = error {
+        let summary = err.lines().next().unwrap_or(err.as_str());
         ui.colored_label(
             egui::Color32::RED,
-            format!("{}: {err}", kind.failure_label()),
-        );
+            format!("{}: {summary}", kind.failure_label()),
+        )
+        .on_hover_text(err.as_str());
     } else if reloaded {
         ui.colored_label(
             egui::Color32::GREEN,
@@ -623,10 +698,22 @@ fn draw_run_log(ui: &mut egui::Ui, state: &DiffusionPanelState) {
         ui.label("Diffusion pipeline finished.");
     }
 
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new("Log").small().color(egui::Color32::GRAY));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.small_button("📋 Copy log").clicked() {
+                ui.ctx().output_mut(|o| {
+                    o.commands
+                        .push(egui::OutputCommand::CopyText(log_lines.join("\n")));
+                });
+            }
+        });
+    });
+
     egui::ScrollArea::vertical()
         .id_salt("diffusion_run_log")
         .max_height(240.0)
-        .stick_to_bottom(true)
+        .stick_to_bottom(!finished)
         .show(ui, |ui| {
             for line in log_lines {
                 let color = if line.starts_with("✗") || line.contains("ERROR") {
@@ -707,6 +794,9 @@ fn build_job_config(state: &DiffusionPanelState) -> DiffusionJobConfig {
         python_bin: state.python_bin.clone(),
         model_path: state.model_path.clone(),
         azgaar_json_path: state.azgaar_json_path.clone(),
+        azgaar_region_cells: state.azgaar_region_cells,
+        azgaar_center_x: state.azgaar_center_x,
+        azgaar_center_y: state.azgaar_center_y,
         conditioning_dir: state.conditioning_dir.clone(),
         conditioning_scale_km: state.conditioning_scale_km,
         working_dir: state.working_dir.clone(),
@@ -756,6 +846,16 @@ fn validate_pipeline_settings(state: &DiffusionPanelState) -> Result<(), String>
         DiffusionWorkflow::AzgaarJson => {
             if state.azgaar_json_path.trim().is_empty() {
                 return Err("Azgaar full JSON export path is required.".into());
+            }
+            if !AZGAAR_REGION_CELL_OPTIONS.contains(&state.azgaar_region_cells) {
+                return Err(format!(
+                    "Azgaar region must be one of {} cells per side.",
+                    AZGAAR_REGION_CELL_OPTIONS
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
             }
         }
         DiffusionWorkflow::ConditioningFolder => {
@@ -1004,6 +1104,12 @@ fn run_pipeline_inner(
             working_dir.display()
         )
     })?;
+    let working_dir = working_dir.canonicalize().map_err(|e| {
+        format!(
+            "Failed to resolve work directory {}: {e}",
+            working_dir.display()
+        )
+    })?;
 
     let tile_output_dir = PathBuf::from(&config.tile_output_dir);
     if let Some(parent) = tile_output_dir.parent() {
@@ -1014,14 +1120,22 @@ fn run_pipeline_inner(
             )
         })?;
     }
+    let tile_output_dir = tile_output_dir
+        .canonicalize()
+        .unwrap_or_else(|_| tile_output_dir.clone());
 
     let conditioning_dir = match config.workflow {
         DiffusionWorkflow::AzgaarJson => working_dir.join("conditioning"),
-        DiffusionWorkflow::ConditioningFolder => PathBuf::from(&config.conditioning_dir),
+        DiffusionWorkflow::ConditioningFolder => {
+            PathBuf::from(&config.conditioning_dir)
+                .canonicalize()
+                .unwrap_or_else(|_| PathBuf::from(&config.conditioning_dir))
+        }
     };
+    let cropped_conditioning_dir = working_dir.join("conditioning_region");
     let generated_tiff = working_dir.join("generated_heightmap.tif");
 
-    match config.workflow {
+    let export_conditioning_dir = match config.workflow {
         DiffusionWorkflow::AzgaarJson => {
             std::fs::create_dir_all(&conditioning_dir).map_err(|e| {
                 format!(
@@ -1047,6 +1161,14 @@ fn run_pipeline_inner(
                 scale,
             ];
             run_logged_command(&config.python_bin, &args, &repo_path, &config.extra_env, tx)?;
+            crop_azgaar_conditioning_region(
+                config,
+                &repo_path,
+                &conditioning_dir,
+                &cropped_conditioning_dir,
+                tx,
+            )?;
+            cropped_conditioning_dir.clone()
         }
         DiffusionWorkflow::ConditioningFolder => {
             if !conditioning_dir.exists() {
@@ -1055,8 +1177,9 @@ fn run_pipeline_inner(
                     conditioning_dir.display()
                 ));
             }
+            conditioning_dir.clone()
         }
-    }
+    };
 
     send_log(
         tx,
@@ -1071,7 +1194,7 @@ fn run_pipeline_inner(
         "terrain_diffusion".to_string(),
         "tiff-export".to_string(),
         config.model_path.clone(),
-        conditioning_dir.display().to_string(),
+        export_conditioning_dir.display().to_string(),
         generated_tiff.display().to_string(),
         "--snr".to_string(),
         config.snr.clone(),
@@ -1203,6 +1326,121 @@ fn validate_synthetic_climate_assets(repo_path: &Path) -> Result<(), String> {
         missing.join("\n"),
         repo_path.join("data/global").display()
     ))
+}
+
+fn crop_azgaar_conditioning_region(
+    config: &DiffusionJobConfig,
+    repo_path: &Path,
+    source_dir: &Path,
+    output_dir: &Path,
+    tx: &mpsc::Sender<DiffusionMsg>,
+) -> Result<(), String> {
+    if output_dir.exists() {
+        std::fs::remove_dir_all(output_dir).map_err(|e| {
+            format!(
+                "Failed to clear previous Azgaar crop directory {}: {e}",
+                output_dir.display()
+            )
+        })?;
+    }
+    std::fs::create_dir_all(output_dir).map_err(|e| {
+        format!(
+            "Failed to create Azgaar crop directory {}: {e}",
+            output_dir.display()
+        )
+    })?;
+
+    send_log(
+        tx,
+        format!(
+            "Cropping Azgaar conditioning to {}x{} cells around ({:.2}, {:.2})",
+            config.azgaar_region_cells,
+            config.azgaar_region_cells,
+            config.azgaar_center_x,
+            config.azgaar_center_y,
+        ),
+    );
+
+    let script = r#"
+from pathlib import Path
+import shutil
+import sys
+
+import rasterio
+from rasterio.windows import Window
+
+source_dir = Path(sys.argv[1])
+output_dir = Path(sys.argv[2])
+requested_side = int(sys.argv[3])
+center_x = float(sys.argv[4])
+center_y = float(sys.argv[5])
+
+files = [
+    "heightmap.tif",
+    "temperature.tif",
+    "temperature_std.tif",
+    "precipitation.tif",
+    "precipitation_cv.tif",
+]
+existing = [name for name in files if (source_dir / name).exists()]
+if not existing:
+    raise SystemExit(f"No conditioning TIFFs found in {source_dir}")
+
+with rasterio.open(source_dir / existing[0]) as ds:
+    width = ds.width
+    height = ds.height
+
+min_dim = min(width, height)
+max_side = 1 << (min_dim.bit_length() - 1)
+if max_side < 2:
+    raise SystemExit(
+        f"Conditioning rasters are too small to crop for baking: {width}x{height}"
+    )
+
+side = min(requested_side, max_side)
+if side != requested_side:
+    print(
+        f"Requested {requested_side} conditioning cells, clamped to {side} to fit source {width}x{height}"
+    )
+
+px = (width - 1) * center_x
+py = (height - 1) * center_y
+x0 = int(round(px - side / 2))
+y0 = int(round(py - side / 2))
+x0 = max(0, min(x0, width - side))
+y0 = max(0, min(y0, height - side))
+window = Window(x0, y0, side, side)
+print(f"Cropping source {width}x{height} -> {side}x{side} at x={x0}, y={y0}")
+
+for name in existing:
+    src = source_dir / name
+    dst = output_dir / name
+    with rasterio.open(src) as ds:
+        if ds.width != width or ds.height != height:
+            raise SystemExit(
+                f"Mismatched conditioning raster size for {src}: {ds.width}x{ds.height}, expected {width}x{height}"
+            )
+        profile = ds.profile.copy()
+        profile.update(
+            width=side,
+            height=side,
+            transform=ds.window_transform(window),
+        )
+        data = ds.read(1, window=window)
+        with rasterio.open(dst, "w", **profile) as out:
+            out.write(data, 1)
+        print(f"Wrote {dst} ({side}x{side})")
+"#;
+    let args = vec![
+        "-c".to_string(),
+        script.to_string(),
+        source_dir.display().to_string(),
+        output_dir.display().to_string(),
+        config.azgaar_region_cells.to_string(),
+        format!("{:.6}", config.azgaar_center_x),
+        format!("{:.6}", config.azgaar_center_y),
+    ];
+    run_logged_command(&config.python_bin, &args, repo_path, &config.extra_env, tx)
 }
 
 fn stream_reader<R: std::io::Read>(reader: R, tx: mpsc::Sender<DiffusionMsg>) {

@@ -1220,6 +1220,7 @@ dependencies = [
  "image",
  "serde",
  "serde_json",
+ "tiff",
  "toml",
 ]
 

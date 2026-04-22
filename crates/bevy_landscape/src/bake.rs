@@ -6,6 +6,8 @@
 
 use exr::prelude::{read_first_flat_layer_from_file, FlatSamples};
 use image::ImageReader;
+use std::fs::File;
+use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -432,12 +434,63 @@ pub fn load_grayscale_image(
 fn load_grayscale_raster(
     path: &Path,
 ) -> Result<(Vec<f32>, usize, usize), Box<dyn std::error::Error>> {
+    // Try the tiff crate first so we can handle signed INT16 TIFFs (sample
+    // format 2), which the `image` crate rejects.
+    if path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("tif") || e.eq_ignore_ascii_case("tiff")).unwrap_or(false) {
+        if let Ok(pixels) = load_tiff_as_f32(path) {
+            return Ok(pixels);
+        }
+    }
+
     let img = ImageReader::open(path)?.decode()?;
     let w = img.width() as usize;
     let h = img.height() as usize;
     let luma = img.into_luma16();
     let pixels = luma.pixels().map(|p| p[0] as f32 / 65535.0).collect();
     Ok((pixels, w, h))
+}
+
+/// Read a single-band TIFF as normalised f32, handling UINT16, INT16, UINT32,
+/// INT32, and FLOAT32 sample formats.
+fn load_tiff_as_f32(
+    path: &Path,
+) -> Result<(Vec<f32>, usize, usize), Box<dyn std::error::Error>> {
+    use tiff::decoder::{Decoder, DecodingResult};
+    use tiff::ColorType;
+
+    let file = BufReader::new(File::open(path)?);
+    let mut dec = Decoder::new(file)?;
+
+    let (w, h) = dec.dimensions()?;
+    let color = dec.colortype()?;
+
+    // Only handle single-band (grayscale) images here.
+    match color {
+        ColorType::Gray(_) => {}
+        _ => {
+            return Err(format!(
+                "Expected a single-band TIFF, got {color:?}"
+            )
+            .into());
+        }
+    }
+
+    let result = dec.read_image()?;
+    let pixels: Vec<f32> = match result {
+        DecodingResult::U8(v)  => v.iter().map(|&x| x as f32 / u8::MAX as f32).collect(),
+        DecodingResult::U16(v) => v.iter().map(|&x| x as f32 / u16::MAX as f32).collect(),
+        DecodingResult::U32(v) => v.iter().map(|&x| x as f32 / u32::MAX as f32).collect(),
+        DecodingResult::U64(v) => v.iter().map(|&x| x as f32 / u64::MAX as f32).collect(),
+        DecodingResult::I8(v)  => v.iter().map(|&x| (x as f32 - i8::MIN as f32)  / u8::MAX as f32).collect(),
+        DecodingResult::I16(v) => v.iter().map(|&x| (x as f32 - i16::MIN as f32) / u16::MAX as f32).collect(),
+        DecodingResult::I32(v) => v.iter().map(|&x| (x as f32 - i32::MIN as f32) / u32::MAX as f32).collect(),
+        DecodingResult::I64(v) => v.iter().map(|&x| (x as f64 - i64::MIN as f64) as f32 / u64::MAX as f32).collect(),
+        DecodingResult::F32(v) => v,
+        DecodingResult::F64(v) => v.iter().map(|&x| x as f32).collect(),
+        DecodingResult::F16(v) => v.iter().map(|x| x.to_f32()).collect(),
+    };
+
+    Ok((pixels, w as usize, h as usize))
 }
 
 fn load_height_exr(path: &Path) -> Result<(Vec<f32>, usize, usize), Box<dyn std::error::Error>> {

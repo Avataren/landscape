@@ -569,7 +569,11 @@ fn generator_panel_system(
                     });
                 }
                 GeneratorTab::Diffusion => {
-                    draw_diffusion_tab(ui, &mut panel.diffusion);
+                    egui::ScrollArea::vertical()
+                        .id_salt("diffusion_tab_scroll")
+                        .show(ui, |ui| {
+                            draw_diffusion_tab(ui, &mut panel.diffusion);
+                        });
                 }
             }
         });
