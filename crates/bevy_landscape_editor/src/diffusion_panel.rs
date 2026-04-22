@@ -129,6 +129,10 @@ enum DiffusionRunState {
         finished: bool,
         error: Option<String>,
         reloaded: bool,
+        /// 0.0 = not started, 1.0 = done.
+        progress: f32,
+        /// Human-readable label for the current stage.
+        stage: String,
     },
 }
 
@@ -809,15 +813,17 @@ pub(crate) fn draw_diffusion_tab(ui: &mut egui::Ui, state: &mut DiffusionPanelSt
 }
 
 fn draw_run_log(ui: &mut egui::Ui, state: &DiffusionPanelState) {
-    let Some((kind, finished, error, reloaded, log_lines)) = (match &state.run_state {
+    let Some((kind, finished, error, reloaded, log_lines, progress, stage)) = (match &state.run_state {
         DiffusionRunState::Running {
             kind,
             finished,
             error,
             reloaded,
             log_lines,
+            progress,
+            stage,
             ..
-        } => Some((*kind, *finished, error.as_ref(), *reloaded, log_lines)),
+        } => Some((*kind, *finished, error.as_ref(), *reloaded, log_lines, *progress, stage.as_str())),
         _ => None,
     }) else {
         return;
@@ -830,8 +836,19 @@ fn draw_run_log(ui: &mut egui::Ui, state: &DiffusionPanelState) {
     if !finished {
         ui.horizontal(|ui| {
             ui.spinner();
-            ui.label(kind.running_label());
+            ui.label(if stage.is_empty() { kind.running_label() } else { stage });
         });
+        // Progress bar — only show once there's meaningful progress.
+        if progress > 0.01 {
+            ui.add(
+                egui::ProgressBar::new(progress)
+                    .show_percentage()
+                    .animate(true),
+            );
+        } else {
+            // Indeterminate pulse before first stage marker arrives.
+            ui.add(egui::ProgressBar::new(0.0).animate(true));
+        }
     } else if let Some(err) = error {
         let summary = err.lines().next().unwrap_or(err.as_str());
         ui.colored_label(
@@ -906,6 +923,8 @@ fn start_run(state: &mut DiffusionPanelState) {
         finished: false,
         error: None,
         reloaded: false,
+        progress: 0.0,
+        stage: "Starting…".into(),
     };
     // Force texture reload after run completes.
     state.preview_loaded_for = None;
@@ -932,6 +951,8 @@ fn start_probe(state: &mut DiffusionPanelState) {
         finished: false,
         error: None,
         reloaded: false,
+        progress: 0.0,
+        stage: "Probing…".into(),
     };
 }
 
@@ -943,6 +964,8 @@ fn set_finished_error(state: &mut DiffusionPanelState, kind: DiffusionRunKind, e
         finished: true,
         error: Some(err),
         reloaded: false,
+        progress: 0.0,
+        stage: String::new(),
     };
 }
 
@@ -1062,9 +1085,64 @@ fn poll_file_picker(state: &mut DiffusionPanelState) {
     }
 }
 
+/// Update progress and stage label from a single log line.
+///
+/// Recognises:
+/// - Bake level lines:  `"Level 0: 45%  (18/40)"`
+/// - tqdm lines:        `"  45%|"` or `" 45%|█"` (diffusion inference)
+/// - Stage markers:     key phrases that appear in the pipeline log
+fn update_progress_from_log(line: &str, progress: &mut f32, stage: &mut String) {
+    // Stage detection — update whenever a key phrase is seen.
+    if line.contains("Converting Azgaar export") {
+        *stage = "Converting world data…".into();
+        *progress = 0.02;
+    } else if line.contains("Cropping") && line.contains("conditioning") {
+        *stage = "Cropping region…".into();
+        *progress = 0.18;
+    } else if line.contains("Baking") && line.contains("tiles") {
+        *stage = "Baking tiles…".into();
+        *progress = 0.80;
+    } else if line.contains("terrain_diffusion") && line.contains("generate") {
+        *stage = "AI inference…".into();
+        *progress = 0.20;
+    } else if line.contains("Sea level") {
+        *stage = "Writing metadata…".into();
+    }
+
+    // Percentage extraction — works for both bake "Level N: X%" and tqdm "X%|".
+    // Find the last `%` in the line and look backwards for the number before it.
+    if let Some(pct_pos) = line.rfind('%') {
+        let before = &line[..pct_pos];
+        // Walk backwards past any whitespace to find the number.
+        let num_str: String = before
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_digit())
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        if let Ok(pct) = num_str.parse::<f32>() {
+            let pct = pct.clamp(0.0, 100.0);
+            // Map within-stage percentage to the overall pipeline range.
+            let new_p = if stage.starts_with("Baking") {
+                // Bake is roughly 80..100% of the overall pipeline.
+                0.80 + pct * 0.002  // 0.80 + (pct/100)*0.20
+            } else if stage.starts_with("AI") {
+                // Inference is roughly 20..80%.
+                0.20 + pct * 0.006  // 0.20 + (pct/100)*0.60
+            } else {
+                *progress  // don't regress for other stages
+            };
+            if new_p > *progress {
+                *progress = new_p.min(0.99);
+            }
+        }
+    }
+}
+
 /// Parse "Output shape: WxH" from a line of azgaar-to-tiff output.
-fn parse_output_shape(line: &str) -> Option<(u32, u32)> {
-    let idx = line.find("Output shape: ")?;
+fn parse_output_shape(line: &str) -> Option<(u32, u32)> {    let idx = line.find("Output shape: ")?;
     let rest = &line[idx + "Output shape: ".len()..];
     let (w_str, rest) = rest.split_once('x')?;
     let h_str = rest.split_ascii_whitespace().next()?;
@@ -1130,7 +1208,8 @@ fn poll_run(
         match msg {
             None => break,
             Some(DiffusionMsg::Log(line)) => {
-                if let DiffusionRunState::Running { log_lines, .. } = &mut state.run_state {
+                if let DiffusionRunState::Running { log_lines, progress, stage, .. } = &mut state.run_state {
+                    update_progress_from_log(&line, progress, stage);
                     log_lines.push(line);
                 }
             }
@@ -1141,12 +1220,16 @@ fn poll_run(
                     finished,
                     error,
                     reloaded,
+                    progress,
+                    stage,
                     ..
                 } = &mut state.run_state
                 {
                     match result {
                         Ok(DiffusionOutcome::Generated(tile_root)) => {
                             log_lines.push("✓ Diffusion run complete — reloading terrain…".into());
+                            *progress = 1.0;
+                            *stage = "Done".into();
                             trigger_reload(
                                 &tile_root,
                                 state.world_scale,
@@ -1161,6 +1244,8 @@ fn poll_run(
                         Ok(DiffusionOutcome::Probed) => {
                             if *kind == DiffusionRunKind::Probe {
                                 log_lines.push("✓ Diffusion runtime probe complete.".into());
+                                *progress = 1.0;
+                                *stage = "Done".into();
                             }
                         }
                         Err(err) => {
