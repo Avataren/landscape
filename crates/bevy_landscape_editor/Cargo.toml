@@ -11,6 +11,7 @@ bevy_landscape_clouds = { path = "../bevy_landscape_clouds" }
 bevy_landscape_generator = { path = "../bevy_landscape_generator" }
 rfd = "0.15"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+tiff = "0.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

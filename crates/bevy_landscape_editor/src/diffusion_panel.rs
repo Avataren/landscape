@@ -66,7 +66,7 @@ impl DiffusionDtype {
     }
 }
 
-const AZGAAR_REGION_CELL_OPTIONS: &[u32] = &[4, 8, 16, 32, 64, 128];
+const AZGAAR_REGION_CELL_OPTIONS: &[u32] = &[4, 8, 16, 32, 64, 128, 256, 512];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DiffusionPickTarget {
@@ -193,6 +193,9 @@ pub(crate) struct DiffusionPanelState {
     pub extra_env: String,
     run_state: DiffusionRunState,
     prefs_applied: bool,
+    /// Dimensions of the full conditioning raster (after azgaar-to-tiff).
+    /// Populated lazily from an existing TIFF or from log output.
+    pub conditioning_raster_size: Option<(u32, u32)>,
 }
 
 impl DiffusionPanelState {
@@ -226,6 +229,7 @@ impl DiffusionPanelState {
             extra_env: "HSA_OVERRIDE_GFX_VERSION=11.0.0".into(),
             run_state: DiffusionRunState::Idle,
             prefs_applied: false,
+            conditioning_raster_size: None,
         }
     }
 
@@ -282,6 +286,19 @@ pub(crate) fn poll_diffusion_state(
 }
 
 pub(crate) fn draw_diffusion_tab(ui: &mut egui::Ui, state: &mut DiffusionPanelState) {
+    // Lazily probe conditioning TIFF for world dimensions if not yet known.
+    if state.conditioning_raster_size.is_none() {
+        let dir = match state.workflow {
+            DiffusionWorkflow::AzgaarJson => {
+                // conditioning dir is working_dir/conditioning
+                let base = PathBuf::from(&state.working_dir).join("conditioning");
+                base.to_string_lossy().into_owned()
+            }
+            DiffusionWorkflow::ConditioningFolder => state.conditioning_dir.clone(),
+        };
+        state.conditioning_raster_size = probe_conditioning_tiff_size(&dir);
+    }
+
     let mut pick_target = None;
     let mut probe_requested = false;
     let mut start_requested = false;
@@ -451,6 +468,97 @@ pub(crate) fn draw_diffusion_tab(ui: &mut egui::Ui, state: &mut DiffusionPanelSt
                     !running,
                     egui::Slider::new(&mut state.azgaar_center_y, 0.0..=1.0).show_value(true),
                 );
+                ui.end_row();
+
+                // --- World preview mini-map ---
+                ui.label("World preview");
+                ui.vertical(|ui| {
+                    let raster_size = state.conditioning_raster_size;
+                    let (src_w, src_h) = raster_size.unwrap_or((1, 1));
+                    let aspect = src_w as f32 / src_h as f32;
+                    let preview_w = 220.0_f32;
+                    let preview_h = (preview_w / aspect).clamp(40.0, 180.0);
+
+                    if raster_size.is_some() {
+                        let (response, painter) = ui.allocate_painter(
+                            egui::vec2(preview_w, preview_h),
+                            if running { egui::Sense::hover() } else { egui::Sense::click_and_drag() },
+                        );
+                        let rect = response.rect;
+
+                        // World background.
+                        painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(50, 70, 45));
+                        painter.rect_stroke(
+                            rect, 2.0,
+                            egui::Stroke::new(1.0, egui::Color32::from_gray(120)),
+                            egui::StrokeKind::Outside,
+                        );
+
+                        // Crop region overlay.
+                        let crop_frac_w = (state.azgaar_region_cells as f32 / src_w as f32).min(1.0);
+                        let crop_frac_h = (state.azgaar_region_cells as f32 / src_h as f32).min(1.0);
+                        let cx = rect.left() + state.azgaar_center_x * rect.width();
+                        let cy = rect.top() + state.azgaar_center_y * rect.height();
+                        let hw = crop_frac_w * rect.width() * 0.5;
+                        let hh = crop_frac_h * rect.height() * 0.5;
+                        let crop_rect = egui::Rect::from_min_max(
+                            egui::pos2((cx - hw).max(rect.left()), (cy - hh).max(rect.top())),
+                            egui::pos2((cx + hw).min(rect.right()), (cy + hh).min(rect.bottom())),
+                        );
+                        painter.rect_filled(
+                            crop_rect, 0.0,
+                            egui::Color32::from_rgba_premultiplied(255, 200, 50, 70),
+                        );
+                        painter.rect_stroke(
+                            crop_rect, 0.0,
+                            egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 220, 50)),
+                            egui::StrokeKind::Outside,
+                        );
+
+                        // Click/drag to set center.
+                        if !running {
+                            if let Some(pos) = response.interact_pointer_pos() {
+                                state.azgaar_center_x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                                state.azgaar_center_y = ((pos.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
+                            }
+                        }
+
+                        // Coverage info below the map.
+                        let coverage = crop_frac_w.min(crop_frac_h / (src_h as f32 / src_w as f32));
+                        let coverage_area = (crop_frac_w * crop_frac_h * 100.0).min(100.0);
+                        ui.label(format!(
+                            "{src_w}×{src_h} source  |  {:.0}×{:.0} km crop  |  {coverage_area:.1}% area",
+                            state.azgaar_region_cells as f32 * state.conditioning_scale_km,
+                            state.azgaar_region_cells as f32 * state.conditioning_scale_km,
+                        ));
+                        let _ = coverage;
+                    } else {
+                        ui.label("(run once to see world preview)");
+                    }
+
+                    // Whole World button: fill the available cells with the largest square.
+                    if !running {
+                        if let Some((w, h)) = raster_size {
+                            let max_dim = w.min(h);
+                            let max_cells = 1u32 << (32 - max_dim.leading_zeros() - 1); // next lower PoT
+                            let whole_cells = AZGAAR_REGION_CELL_OPTIONS
+                                .iter()
+                                .copied()
+                                .filter(|&c| c <= max_cells)
+                                .last()
+                                .unwrap_or(4);
+                            if ui
+                                .button(format!("⛶ Whole World ({whole_cells} cells)"))
+                                .on_hover_text("Center crop and set cells to the largest available square covering the full world.")
+                                .clicked()
+                            {
+                                state.azgaar_region_cells = whole_cells;
+                                state.azgaar_center_x = 0.5;
+                                state.azgaar_center_y = 0.5;
+                            }
+                        }
+                    }
+                });
                 ui.end_row();
 
                 ui.label("Approx region span");
@@ -903,6 +1011,29 @@ fn poll_file_picker(state: &mut DiffusionPanelState) {
     }
 }
 
+/// Parse "Output shape: WxH" from a line of azgaar-to-tiff output.
+fn parse_output_shape(line: &str) -> Option<(u32, u32)> {
+    let idx = line.find("Output shape: ")?;
+    let rest = &line[idx + "Output shape: ".len()..];
+    let (w_str, rest) = rest.split_once('x')?;
+    let h_str = rest.split_ascii_whitespace().next()?;
+    let w = w_str.trim().parse().ok()?;
+    let h = h_str.trim().parse().ok()?;
+    Some((w, h))
+}
+
+/// Try to read the pixel dimensions of the conditioning heightmap TIFF.
+/// Returns `None` if the file doesn't exist or can't be read.
+fn probe_conditioning_tiff_size(conditioning_dir: &str) -> Option<(u32, u32)> {
+    let path = PathBuf::from(conditioning_dir).join("heightmap.tif");
+    if !path.exists() {
+        return None;
+    }
+    let f = std::fs::File::open(&path).ok()?;
+    let mut dec = tiff::decoder::Decoder::new(std::io::BufReader::new(f)).ok()?;
+    dec.dimensions().ok()
+}
+
 fn poll_run(
     state: &mut DiffusionPanelState,
     active_config: &TerrainConfig,
@@ -958,6 +1089,14 @@ fn poll_run(
                         }
                     }
                     *finished = true;
+                }
+                // After marking done, try to extract conditioning raster size from log.
+                if let DiffusionRunState::Running { log_lines, error, .. } = &state.run_state {
+                    if error.is_none() {
+                        if let Some(sz) = log_lines.iter().rev().find_map(|l| parse_output_shape(l)) {
+                            state.conditioning_raster_size = Some(sz);
+                        }
+                    }
                 }
                 break;
             }
