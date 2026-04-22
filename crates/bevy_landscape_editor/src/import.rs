@@ -222,6 +222,7 @@ fn settings_to_config(s: &ImportSettings) -> BakeConfig {
         tile_size: 256,
         flip_green: s.flip_green,
         smooth_sigma: s.smooth_sigma,
+        sea_level_decoded: None,
     }
 }
 

@@ -12,6 +12,8 @@ use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use crate::metadata::TerrainMetadata;
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -41,6 +43,14 @@ pub struct BakeConfig {
     /// Gaussian sigma (source texels) applied before building the mip pyramid.
     /// 0 = off.  ~1.0 removes single-texel outliers without softening real detail.
     pub smooth_sigma: f32,
+    /// Normalised [0, 1] decoded value that represents sea level (0 m elevation)
+    /// in the source heightmap.  When set, a `metadata.toml` with `water_level`
+    /// is written to `output_dir` after baking so water planes can be placed
+    /// correctly at runtime.
+    ///
+    /// For INT16 TIFFs where raw `i16(0)` = 0 m (azgaar-to-tiff output), this
+    /// is `(0 − i16::MIN as f32) / u16::MAX as f32 ≈ 0.5`.
+    pub sea_level_decoded: Option<f32>,
 }
 
 impl Default for BakeConfig {
@@ -55,6 +65,7 @@ impl Default for BakeConfig {
             tile_size: 256,
             flip_green: false,
             smooth_sigma: 0.0,
+            sea_level_decoded: None,
         }
     }
 }
@@ -136,6 +147,20 @@ fn bake_heightmap_in_memory(config: BakeConfig, log: impl Fn(String)) -> Result<
         "Height range: min={:.6}  max={:.6}  range={:.6}",
         h_min, h_max, h_range
     ));
+
+    // Write water_level metadata before the bulk of the work so it's on disk
+    // even if the bake is interrupted.
+    if let Some(sea) = config.sea_level_decoded {
+        let water_level = if h_range > 1e-6 {
+            ((sea - h_min) / h_range).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        log(format!("Sea level → water_level = {water_level:.6}"));
+        TerrainMetadata { water_level: Some(water_level) }
+            .save(&config.output_dir)
+            .map_err(|e| format!("Failed to write metadata.toml: {e}"))?;
+    }
     let mut height_pixels: Vec<f32> = if h_range > 1e-6 {
         height_pixels_raw
             .iter()
@@ -536,6 +561,18 @@ fn bake_heightmap_streaming(config: BakeConfig, log: impl Fn(String)) -> Result<
 
     let effective_height_scale = config.height_scale * config.world_scale;
     prepare_output_dir(&config.output_dir, &log)?;
+
+    if let Some(sea) = config.sea_level_decoded {
+        let water_level = if h_range > 1e-6 {
+            ((sea - h_min) / h_range).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        log(format!("Sea level → water_level = {water_level:.6}"));
+        TerrainMetadata { water_level: Some(water_level) }
+            .save(&config.output_dir)
+            .map_err(|e| format!("Failed to write metadata.toml: {e}"))?;
+    }
     log(format!(
         "Baking {} levels, tile {}px → '{}'",
         levels,

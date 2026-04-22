@@ -201,6 +201,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         tile_size: cli.tile_size.unwrap_or(256),
         flip_green: cli.flip_green,
         smooth_sigma: cli.smooth_sigma.unwrap_or(0.0),
+        sea_level_decoded: None,
     };
 
     bevy_landscape::bake::bake_heightmap(config, |msg| println!("{msg}")).map_err(|e| e.into())

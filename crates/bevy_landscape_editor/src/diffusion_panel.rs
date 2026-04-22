@@ -1378,6 +1378,9 @@ fn run_pipeline_inner(
         tile_size: 256,
         flip_green: false,
         smooth_sigma: config.smooth_sigma,
+        // Azgaar-to-tiff encodes heights as raw INT16 metres; i16(0) = 0 m = sea level.
+        // After tiff_result_to_f32 this maps to (0 − i16::MIN) / u16::MAX ≈ 0.5.
+        sea_level_decoded: Some((0.0_f32 - i16::MIN as f32) / u16::MAX as f32),
     };
     bevy_landscape::bake::bake_heightmap(bake_config, |line| send_log(tx, line))?;
 
