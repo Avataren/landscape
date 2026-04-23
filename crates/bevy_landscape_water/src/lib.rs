@@ -190,6 +190,7 @@ impl Plugin for LandscapeWaterPlugin {
             Update,
             (
                 (sync_water_to_terrain, update_water_patch_transforms).chain(),
+                sync_water_height,
                 toggle_water,
                 apply_water_enabled.after(toggle_water),
             ),
@@ -448,7 +449,9 @@ fn rebuild_water_tiles(
     let root = commands.spawn((
         WaterTiles,
         Name::new("Water"),
-        Transform::from_xyz(root_center.x, 0.0, root_center.y),
+        // Water height lives on the root; children use y=0 so root.y can be
+        // updated live without rebuilding child transforms.
+        Transform::from_xyz(root_center.x, water_height, root_center.y),
         Visibility::Inherited,
     )).id();
 
@@ -460,7 +463,7 @@ fn rebuild_water_tiles(
                 WaterTile { offset },
                 Name::new(format!("Water Patch L{}", p.lod_level)),
                 Transform {
-                    translation: Vec3::new(offset.x, water_height, offset.y),
+                    translation: Vec3::new(offset.x, 0.0, offset.y),
                     scale:       Vec3::new(p.level_scale_ws, 1.0, p.level_scale_ws),
                     ..default()
                 },
@@ -481,7 +484,7 @@ fn rebuild_water_tiles(
                 WaterTile { offset },
                 Name::new("Water Trim"),
                 Transform {
-                    translation: Vec3::new(offset.x, water_height, offset.y),
+                    translation: Vec3::new(offset.x, 0.0, offset.y),
                     scale:       Vec3::new(trim.level_scale_ws, 1.0, trim.level_scale_ws),
                     ..default()
                 },
@@ -655,6 +658,16 @@ fn toggle_water(keys: Res<ButtonInput<KeyCode>>, mut enabled: ResMut<WaterEnable
     if keys.just_pressed(KeyCode::F2) {
         enabled.0 = !enabled.0;
         info!("Water {} (F2)", if enabled.0 { "ON" } else { "OFF" });
+    }
+}
+
+fn sync_water_height(
+    settings:  Res<WaterSettings>,
+    mut roots: Query<&mut Transform, With<WaterTiles>>,
+) {
+    if !settings.is_changed() { return; }
+    for mut t in &mut roots {
+        t.translation.y = settings.height;
     }
 }
 

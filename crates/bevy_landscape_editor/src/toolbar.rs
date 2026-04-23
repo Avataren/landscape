@@ -1,9 +1,11 @@
+use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 use bevy_landscape::{
     MaterialLibrary, ReloadTerrainRequest, TerrainConfig, TerrainSourceDesc,
     MAX_SUPPORTED_CLIPMAP_LEVELS,
 };
+use bevy_landscape_water::{WaterEnabled, WaterSettings};
 
 use crate::cloud_panel::CloudPanelState;
 use crate::fog_panel::FogPanelState;
@@ -14,19 +16,35 @@ use crate::material_panel::MaterialPanelState;
 use crate::preferences::{AppPreferences, PreferencesDialog};
 use crate::sky_panel::SkyPanelState;
 
+/// Bundled water params — counts as a single system parameter.
+#[derive(SystemParam)]
+pub(crate) struct WaterParams<'w> {
+    settings: Option<ResMut<'w, WaterSettings>>,
+    enabled:  Option<Res<'w, WaterEnabled>>,
+}
+
+/// Bundled preferences params — counts as a single system parameter.
+#[derive(SystemParam)]
+pub(crate) struct PrefsUi<'w> {
+    prefs:  Res<'w, AppPreferences>,
+    dialog: ResMut<'w, PreferencesDialog>,
+}
+
 #[derive(Resource)]
 pub(crate) struct ToolbarState {
-    view_distance_rings: u32,
+    view_distance_rings:    u32,
     dragging_view_distance: bool,
-    pending_view_distance: Option<u32>,
+    pending_view_distance:  Option<u32>,
+    water_height:           f32,
 }
 
 impl Default for ToolbarState {
     fn default() -> Self {
         Self {
-            view_distance_rings: TerrainConfig::default().clipmap_levels,
+            view_distance_rings:    TerrainConfig::default().clipmap_levels,
             dragging_view_distance: false,
-            pending_view_distance: None,
+            pending_view_distance:  None,
+            water_height:           0.0,
         }
     }
 }
@@ -38,8 +56,7 @@ pub(crate) fn toolbar_system(
     mut material_panel: ResMut<MaterialPanelState>,
     mut import: ResMut<ImportWizard>,
     mut level_io: ResMut<LevelIoState>,
-    prefs: Res<AppPreferences>,
-    mut prefs_dialog: ResMut<PreferencesDialog>,
+    mut prefs_ui: PrefsUi<'_>,
     mut sky_panel: ResMut<SkyPanelState>,
     mut cloud_panel: ResMut<CloudPanelState>,
     mut fog_panel: ResMut<FogPanelState>,
@@ -48,6 +65,7 @@ pub(crate) fn toolbar_system(
     desc: Res<TerrainSourceDesc>,
     library: Res<MaterialLibrary>,
     mut reload_tx: MessageWriter<ReloadTerrainRequest>,
+    mut water: WaterParams<'_>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
 
@@ -59,6 +77,13 @@ pub(crate) fn toolbar_system(
         && toolbar.view_distance_rings != config.clipmap_levels
     {
         toolbar.view_distance_rings = config.clipmap_levels;
+    }
+
+    // Sync water height slider from resource (e.g. after a hot-reload sets a new level).
+    if let Some(ref ws) = water.settings {
+        if !ws.is_changed() && (toolbar.water_height - ws.height).abs() > 0.01 {
+            toolbar.water_height = ws.height;
+        }
     }
 
     egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
@@ -79,7 +104,7 @@ pub(crate) fn toolbar_system(
                 }
                 ui.separator();
                 if ui.button("Preferences…").clicked() {
-                    prefs_dialog.as_mut().open(&prefs);
+                    prefs_ui.dialog.open(&prefs_ui.prefs);
                     ui.close();
                 }
                 ui.separator();
@@ -146,6 +171,26 @@ pub(crate) fn toolbar_system(
                     source: desc.clone(),
                     material_library: library.clone(),
                 });
+            }
+
+            // --- Water height slider ---
+            let water_active = water.enabled.as_deref().map_or(false, |e| e.0);
+            if water_active {
+                ui.separator();
+                ui.label("Water Height");
+                let water_resp = ui
+                    .add_sized(
+                        [180.0, 0.0],
+                        egui::Slider::new(&mut toolbar.water_height, -100.0_f32..=100.0)
+                            .suffix(" m")
+                            .show_value(true),
+                    )
+                    .on_hover_text("Adjust the water plane height in world units (F2 to toggle water).");
+                if water_resp.changed() {
+                    if let Some(ref mut ws) = water.settings {
+                        ws.height = toolbar.water_height;
+                    }
+                }
             }
         });
     });
