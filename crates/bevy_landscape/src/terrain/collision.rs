@@ -81,7 +81,11 @@ impl TerrainCollisionCache {
         let ty_max = (max_xz.y / tile_world_size).floor() as i32;
         for ty in ty_min..=ty_max {
             for tx in tx_min..=tx_max {
-                let key = TileKey { level: 0, x: tx, y: ty };
+                let key = TileKey {
+                    level: 0,
+                    x: tx,
+                    y: ty,
+                };
                 if let Some(tile) = self.tiles.get(&key) {
                     snapshot.insert(key, tile.data.clone());
                 }

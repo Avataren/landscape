@@ -143,7 +143,8 @@ pub fn start_terrain_collider_build(
 
     // Snapshot only the tiles that overlap this coverage area.
     let half = (n as f32 - 1.0) * 0.5 * cell_size;
-    let tiles = cache.snapshot_tiles_for_region(center - Vec2::splat(half), center + Vec2::splat(half));
+    let tiles =
+        cache.snapshot_tiles_for_region(center - Vec2::splat(half), center + Vec2::splat(half));
 
     let input = BuildInput {
         center,
@@ -252,9 +253,17 @@ pub fn cancel_collider_task_on_reload(
 
 fn build_mesh_data(input: BuildInput) -> ColliderBuildResult {
     let BuildInput {
-        center, n, cell_size, height_scale,
-        tile_size, world_scale, mut tiles,
-        tile_root, max_mip_level, world_min, world_max,
+        center,
+        n,
+        cell_size,
+        height_scale,
+        tile_size,
+        world_scale,
+        mut tiles,
+        tile_root,
+        max_mip_level,
+        world_min,
+        world_max,
     } = input;
 
     let half_n = (n as f32 - 1.0) * 0.5;
@@ -271,7 +280,11 @@ fn build_mesh_data(input: BuildInput) -> ColliderBuildResult {
             let tz = (wz / tile_world_size).floor() as i32;
             let local_x = (wx - tx as f32 * tile_world_size) / tile_world_size;
             let local_z = (wz - tz as f32 * tile_world_size) / tile_world_size;
-            let key = TileKey { level: 0, x: tx, y: tz };
+            let key = TileKey {
+                level: 0,
+                x: tx,
+                y: tz,
+            };
 
             // Load from disk only if the snapshot didn't cover this tile.
             if !tiles.contains_key(&key) {
@@ -293,7 +306,9 @@ fn build_mesh_data(input: BuildInput) -> ColliderBuildResult {
 
             let h = tiles
                 .get(&key)
-                .map(|data| bilinear_sample(data, tile_size, Vec2::new(local_x, local_z)) * height_scale)
+                .map(|data| {
+                    bilinear_sample(data, tile_size, Vec2::new(local_x, local_z)) * height_scale
+                })
                 .unwrap_or(0.0);
 
             vertices.push(Vec3::new(wx, h, wz));
@@ -314,7 +329,14 @@ fn build_mesh_data(input: BuildInput) -> ColliderBuildResult {
         }
     }
 
-    ColliderBuildResult { center, n, cell_size, vertices, indices, fallback_tile_count }
+    ColliderBuildResult {
+        center,
+        n,
+        cell_size,
+        vertices,
+        indices,
+        fallback_tile_count,
+    }
 }
 
 fn bilinear_sample(data: &[f32], size: u32, uv: Vec2) -> f32 {
@@ -357,7 +379,10 @@ fn spawn_debug_mesh(
         .flat_map(|tri| tri.iter().copied())
         .collect();
 
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, debug_verts);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0_f32, 1.0, 0.0]; n * n]);
     mesh.insert_indices(Indices::U32(flat_indices));
@@ -376,7 +401,9 @@ fn spawn_debug_mesh(
         MeshMaterial3d(mat),
         Transform::IDENTITY,
         Wireframe,
-        WireframeColor { color: Color::srgb(0.0, 1.0, 0.2) },
+        WireframeColor {
+            color: Color::srgb(0.0, 1.0, 0.2),
+        },
         NoFrustumCulling,
     ));
 }

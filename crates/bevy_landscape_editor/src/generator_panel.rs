@@ -9,12 +9,12 @@ use bevy_landscape::{
     MaterialLibrary, ReloadTerrainRequest, TerrainConfig, TerrainPatchInstance, TerrainSourceDesc,
 };
 use bevy_landscape_clouds::CloudDisplayLayer;
-use bevy_landscape_water::WaterEnabled;
 use bevy_landscape_generator::{
     export::{GeneratorExportState, StartGeneratorExport},
     GeneratorErosionBuffers, GeneratorErosionControlState, GeneratorErosionParams, GeneratorParams,
     HeightfieldImage,
 };
+use bevy_landscape_water::WaterEnabled;
 
 use crate::diffusion_panel::{draw_diffusion_tab, poll_diffusion_state, DiffusionPanelState};
 use crate::preferences::AppPreferences;

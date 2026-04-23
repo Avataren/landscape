@@ -677,11 +677,7 @@ pub(crate) fn draw_diffusion_tab(ui: &mut egui::Ui, state: &mut DiffusionPanelSt
                 }
             };
             if let Some((pixels, tw, th)) = bevy_landscape::bake::load_tiff_crop_thumbnail(
-                &tiff_path,
-                crop.x0,
-                crop.y0,
-                crop.side,
-                512,
+                &tiff_path, crop.x0, crop.y0, crop.side, 512,
             ) {
                 let color_pixels: Vec<egui::Color32> =
                     pixels.iter().map(|&g| terrain_color_ramp(g)).collect();

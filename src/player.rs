@@ -355,7 +355,11 @@ fn shoot_cube(
         })),
         Transform::from_translation(spawn_pos),
         RigidBody::Dynamic,
-        Collider::cuboid(CUBE_HALF_EXTENT * 2.0, CUBE_HALF_EXTENT * 2.0, CUBE_HALF_EXTENT * 2.0),
+        Collider::cuboid(
+            CUBE_HALF_EXTENT * 2.0,
+            CUBE_HALF_EXTENT * 2.0,
+            CUBE_HALF_EXTENT * 2.0,
+        ),
         LinearVelocity(velocity),
     ));
 }
