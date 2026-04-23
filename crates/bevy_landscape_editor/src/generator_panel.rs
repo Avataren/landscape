@@ -1,5 +1,5 @@
-use std::time::Duration;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use bevy::prelude::*;
 use bevy::winit::{UpdateMode, WinitSettings};

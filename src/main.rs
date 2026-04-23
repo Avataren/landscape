@@ -53,7 +53,10 @@ fn main() {
                         .and_then(|v| serde_json::from_value(v.clone()).ok());
                     let (mut config, source, library, wmin, wmax, meta) = desc.into_runtime();
                     config.height_scale *= 1.0; // into_runtime already multiplies
-                    let water_height = meta.water_level.map(|wl| wl * config.height_scale);
+                    let water_height = meta
+                        .water_level
+                        .filter(|wl| *wl > 0.0)
+                        .map(|wl| wl * config.height_scale);
                     let water = LandscapeWaterPlugin {
                         water_height,
                         world_min: wmin,

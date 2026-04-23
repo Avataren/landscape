@@ -15,28 +15,39 @@ use bevy::prelude::*;
 /// (`patch_uv * terrain.patch_resolution`) continues to resolve individual
 /// quads independently of block size.
 pub fn build_block_mesh(m: u32) -> Mesh {
-    let verts_per_edge = m + 1;
-    let total_verts = (verts_per_edge * verts_per_edge) as usize;
-    let inv_m = 1.0 / m as f32;
+    build_rect_mesh(m, m)
+}
+
+/// Builds a rectangular terrain mesh with `nx × nz` quad columns and rows.
+///
+/// Vertex positions are at integer grid positions `(x, 0, z)` for
+/// `x ∈ [0, nx]` and `z ∈ [0, nz]`.  Used for the L-shaped GPU Gems 2
+/// trim strips that fill the 1-fine-texel gap at LOD ring inner boundaries.
+pub fn build_rect_mesh(nx: u32, nz: u32) -> Mesh {
+    let verts_per_x = nx + 1;
+    let verts_per_z = nz + 1;
+    let total_verts = (verts_per_x * verts_per_z) as usize;
+    let inv_nx = 1.0 / nx as f32;
+    let inv_nz = 1.0 / nz as f32;
 
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(total_verts);
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(total_verts);
     let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(total_verts);
 
-    for z in 0..verts_per_edge {
-        for x in 0..verts_per_edge {
+    for z in 0..verts_per_z {
+        for x in 0..verts_per_x {
             positions.push([x as f32, 0.0, z as f32]);
             normals.push([0.0, 1.0, 0.0]);
-            uvs.push([x as f32 * inv_m, z as f32 * inv_m]);
+            uvs.push([x as f32 * inv_nx, z as f32 * inv_nz]);
         }
     }
 
-    let mut indices: Vec<u32> = Vec::with_capacity((m * m) as usize * 6);
-    for z in 0..m {
-        for x in 0..m {
-            let i00 = z * verts_per_edge + x;
+    let mut indices: Vec<u32> = Vec::with_capacity((nx * nz * 6) as usize);
+    for z in 0..nz {
+        for x in 0..nx {
+            let i00 = z * verts_per_x + x;
             let i10 = i00 + 1;
-            let i01 = i00 + verts_per_edge;
+            let i01 = i00 + verts_per_x;
             let i11 = i01 + 1;
 
             indices.push(i00);

@@ -22,12 +22,13 @@ pub use world_desc::TerrainSourceDesc;
 
 use bevy::{
     camera::primitives::Aabb,
-    camera::visibility::NoAutoAabb,
+    camera::visibility::{NoAutoAabb, NoFrustumCulling},
     pbr::wireframe::{NoWireframe, WireframePlugin},
     prelude::*,
 };
 use clipmap::build_patch_instances_for_view_in_bounds;
 use clipmap::PatchInstanceCpu;
+use clipmap::{build_trim_instances_for_view, TrimInstanceCpu};
 use clipmap_texture::{
     apply_tiles_to_clipmap, begin_terrain_upload_frame, compute_clip_levels,
     compute_initial_clip_levels, create_initial_clipmap_texture,
@@ -79,13 +80,20 @@ pub struct ReloadTerrainRequest {
 /// Allows update_patch_transforms to update positions cheaply.
 #[derive(Resource, Default)]
 pub struct PatchEntities {
+    /// All spawned terrain entities: blocks first, then trim strips.
     pub entities: Vec<Entity>,
+    /// Number of block entities at the start of `entities`.
+    pub block_count: usize,
     /// Cached clip centers from last update (used to skip no-op frames).
     pub last_clip_centers: Vec<IVec2>,
-    /// Shared mesh handle used by all terrain patches.
+    /// Shared mesh handle used by all terrain block patches.
     pub mesh_handle: Handle<Mesh>,
     /// Shared material handle used by all terrain patches.
     pub material_handle: Handle<TerrainMaterial>,
+    /// Trim mesh: 1 quad wide × 2m quads tall (left / vertical strip).
+    pub trim_v_mesh_handle: Handle<Mesh>,
+    /// Trim mesh: 2m quads wide × 1 quad tall (bottom / horizontal strip).
+    pub trim_h_mesh_handle: Handle<Mesh>,
 }
 
 // ---------------------------------------------------------------------------
@@ -531,6 +539,15 @@ fn setup_terrain(
     let patch_mesh = patch_mesh::build_block_mesh(config.block_size());
     let mesh_handle = meshes.add(patch_mesh);
 
+    // --- Trim strip meshes (shared across all trim strip instances) ---
+    // The long side spans 2m quads at the coarse scale, matching the inner-hole
+    // edge length of each ring level.
+    let trim_quads = 2 * config.block_size();
+    let trim_v_mesh = patch_mesh::build_rect_mesh(1, trim_quads); // left/vertical strip
+    let trim_h_mesh = patch_mesh::build_rect_mesh(trim_quads, 1); // bottom/horizontal strip
+    let trim_v_mesh_handle = meshes.add(trim_v_mesh);
+    let trim_h_mesh_handle = meshes.add(trim_h_mesh);
+
     // --- Build initial patch list before creating the material ---
     let view = TerrainViewState::default();
     let patches: Vec<PatchInstanceCpu> =
@@ -538,6 +555,8 @@ fn setup_terrain(
 
     patch_entities.entities.clear();
     patch_entities.mesh_handle = mesh_handle.clone();
+    patch_entities.trim_v_mesh_handle = trim_v_mesh_handle;
+    patch_entities.trim_h_mesh_handle = trim_h_mesh_handle;
 
     let assets_dir = std::path::Path::new("assets");
     let pbr_albedo_handle = images.add(pbr_textures::build_albedo_array(
@@ -626,6 +645,7 @@ fn setup_terrain(
         &mut commands,
         &mut patch_entities,
         &patches,
+        &[], // no trim instances at startup — camera not yet positioned
         config.height_scale,
         config.block_size(),
     );
@@ -742,13 +762,16 @@ fn update_patch_transforms(
 
     let patches =
         build_patch_instances_for_view_in_bounds(&config, &view, desc.world_min, desc.world_max);
+    let trims = build_trim_instances_for_view(&config, &view);
+    let total = patches.len() + trims.len();
 
     let mut respawned = false;
-    if patches.len() != patch_entities.entities.len() {
+    if patches.len() != patch_entities.block_count || total != patch_entities.entities.len() {
         respawn_patch_entities(
             &mut commands,
             &mut patch_entities,
             &patches,
+            &trims,
             config.height_scale,
             config.block_size(),
         );
@@ -762,12 +785,21 @@ fn update_patch_transforms(
 
     // Only update ECS Transforms when the clip grid cell changes — these drive
     // Bevy's own visibility / AABB checks for the entity, not the vertex path.
-    for (entity, patch) in patch_entities.entities.iter().zip(patches.iter()) {
+    let n_blocks = patches.len();
+    for (entity, patch) in patch_entities.entities[..n_blocks].iter().zip(patches.iter()) {
         if let Ok((mut transform, mut instance)) = query.get_mut(*entity) {
             transform.translation = Vec3::new(patch.origin_ws.x, 0.0, patch.origin_ws.y);
             transform.scale = Vec3::new(patch.level_scale_ws, 1.0, patch.level_scale_ws);
             instance.patch_origin_ws = patch.origin_ws;
             instance.patch_scale_ws = patch.level_scale_ws;
+        }
+    }
+    for (entity, trim) in patch_entities.entities[n_blocks..].iter().zip(trims.iter()) {
+        if let Ok((mut transform, mut instance)) = query.get_mut(*entity) {
+            transform.translation = Vec3::new(trim.origin_ws.x, 0.0, trim.origin_ws.y);
+            transform.scale = Vec3::new(trim.level_scale_ws, 1.0, trim.level_scale_ws);
+            instance.patch_origin_ws = trim.origin_ws;
+            instance.patch_scale_ws = trim.level_scale_ws;
         }
     }
     patch_entities.last_clip_centers = view.clip_centers.clone();
@@ -829,6 +861,7 @@ fn reload_terrain_system(
         for entity in patch_entities.entities.drain(..) {
             commands.entity(entity).despawn();
         }
+        patch_entities.block_count = 0;
         for entity in &global_heightfield_q {
             commands.entity(entity).despawn();
         }
@@ -941,6 +974,7 @@ fn respawn_patch_entities(
     commands: &mut Commands,
     patch_entities: &mut PatchEntities,
     patches: &[PatchInstanceCpu],
+    trims: &[TrimInstanceCpu],
     height_scale: f32,
     block_size: u32,
 ) {
@@ -977,6 +1011,52 @@ fn respawn_patch_entities(
 
         patch_entities.entities.push(entity);
     }
+
+    patch_entities.block_count = patch_entities.entities.len();
+
+    let m = block_size as f32;
+    for trim in trims {
+        // Conservative AABB in local mesh space: mesh quads go from 0 to nx/nz.
+        // V strip: nx=1, nz=2m  |  H strip: nx=2m, nz=1  (coarse-scale quads)
+        // Pad by 1 unit on each geomorphed edge.
+        let (nx, nz) = if trim.is_horizontal {
+            (2.0 * m, 1.0)
+        } else {
+            (1.0, 2.0 * m)
+        };
+        let trim_aabb = Aabb::from_min_max(
+            Vec3::new(-1.0, 0.0, -1.0),
+            Vec3::new(nx + 1.0, height_scale.max(1.0), nz + 1.0),
+        );
+        let mesh = if trim.is_horizontal {
+            patch_entities.trim_h_mesh_handle.clone()
+        } else {
+            patch_entities.trim_v_mesh_handle.clone()
+        };
+        let entity = commands
+            .spawn((
+                Mesh3d(mesh),
+                MeshMaterial3d(patch_entities.material_handle.clone()),
+                Transform {
+                    translation: Vec3::new(trim.origin_ws.x, 0.0, trim.origin_ws.y),
+                    scale: Vec3::new(trim.level_scale_ws, 1.0, trim.level_scale_ws),
+                    ..default()
+                },
+                components::TerrainPatchInstance {
+                    lod_level: trim.lod_level,
+                    patch_kind: 1,
+                    patch_origin_ws: trim.origin_ws,
+                    patch_scale_ws: trim.level_scale_ws,
+                },
+                trim_aabb,
+                NoAutoAabb,
+                NoFrustumCulling,
+                NoWireframe,
+            ))
+            .id();
+
+        patch_entities.entities.push(entity);
+    }
 }
 
 fn terrain_block_local_aabb(height_scale: f32, block_size: u32) -> Aabb {
@@ -992,10 +1072,15 @@ fn terrain_block_local_aabb(height_scale: f32, block_size: u32) -> Aabb {
 
 /// Samples the toroidal height CPU buffer for a block's footprint and returns
 /// the normalized [0,1] min/max heights (multiply by height_scale for world Y).
-/// Stride-4 sampling trades tiny precision loss for cache efficiency.
+///
+/// Important: the rendered seam geometry is morphed against the next coarser
+/// clipmap level, so a fine-only scan can under-bound the outer edge and let
+/// frustum culling drop a seam patch entirely. Scan both the fine layer and the
+/// morphed coarse footprint at full resolution to keep the AABB conservative.
 fn compute_block_height_range(
     height_data: &[u8],
     lod: u32,
+    coarse_lod: u32,
     gx_start: i32,
     gz_start: i32,
     block_size: u32,
@@ -1003,38 +1088,59 @@ fn compute_block_height_range(
 ) -> (f32, f32) {
     let res = res as usize;
     let bpl = res * res * 2; // R16Unorm: 2 bytes per texel
-    let layer_base = lod as usize * bpl;
+    let fine_layer_base = lod as usize * bpl;
+    let coarse_layer_base = coarse_lod as usize * bpl;
 
-    if layer_base + bpl > height_data.len() {
+    if fine_layer_base + bpl > height_data.len() {
         return (0.0, 1.0);
     }
 
     let m = block_size as i32;
-    const STRIDE: i32 = 4;
     let mut h_min = f32::MAX;
     let mut h_max = 0.0_f32;
+    let coarse_factor = 1i32 << coarse_lod.saturating_sub(lod);
+    let has_distinct_coarse =
+        coarse_lod != lod && coarse_layer_base + bpl <= height_data.len() && coarse_factor > 1;
 
-    let mut gz = gz_start - 1;
-    while gz <= gz_start + m + 1 {
+    let mut update_range = |raw: u16| {
+        let h = raw as f32 * (1.0 / 65535.0);
+        if h < h_min {
+            h_min = h;
+        }
+        if h > h_max {
+            h_max = h;
+        }
+    };
+
+    for gz in (gz_start - 1)..=(gz_start + m + 1) {
         let tz = gz.rem_euclid(res as i32) as usize;
-        let row_base = layer_base + tz * res * 2;
-        let mut gx = gx_start - 1;
-        while gx <= gx_start + m + 1 {
+        let fine_row_base = fine_layer_base + tz * res * 2;
+
+        let coarse_row_base = if has_distinct_coarse {
+            let coarse_tz = gz.div_euclid(coarse_factor).rem_euclid(res as i32) as usize;
+            Some(coarse_layer_base + coarse_tz * res * 2)
+        } else {
+            None
+        };
+
+        for gx in (gx_start - 1)..=(gx_start + m + 1) {
             let tx = gx.rem_euclid(res as i32) as usize;
-            let off = row_base + tx * 2;
-            if off + 2 <= height_data.len() {
-                let raw = u16::from_le_bytes([height_data[off], height_data[off + 1]]);
-                let h = raw as f32 * (1.0 / 65535.0);
-                if h < h_min {
-                    h_min = h;
-                }
-                if h > h_max {
-                    h_max = h;
+            let fine_off = fine_row_base + tx * 2;
+            if fine_off + 2 <= height_data.len() {
+                let raw = u16::from_le_bytes([height_data[fine_off], height_data[fine_off + 1]]);
+                update_range(raw);
+            }
+
+            if let Some(coarse_row_base) = coarse_row_base {
+                let coarse_tx = gx.div_euclid(coarse_factor).rem_euclid(res as i32) as usize;
+                let coarse_off = coarse_row_base + coarse_tx * 2;
+                if coarse_off + 2 <= height_data.len() {
+                    let raw =
+                        u16::from_le_bytes([height_data[coarse_off], height_data[coarse_off + 1]]);
+                    update_range(raw);
                 }
             }
-            gx += STRIDE;
         }
-        gz += STRIDE;
     }
 
     if h_min > h_max {
@@ -1076,6 +1182,8 @@ fn update_patch_aabbs(
         if let Ok((instance, mut aabb)) = query.get_mut(*entity) {
             let level_scale_ws = instance.patch_scale_ws;
             let origin_ws = instance.patch_origin_ws;
+            let coarse_lod =
+                (instance.lod_level + 1).min(config.active_clipmap_levels().saturating_sub(1));
 
             let gx_start = (origin_ws.x / level_scale_ws).round() as i32;
             let gz_start = (origin_ws.y / level_scale_ws).round() as i32;
@@ -1083,6 +1191,7 @@ fn update_patch_aabbs(
             let (h_min, h_max) = compute_block_height_range(
                 &clipmap_state.height_cpu_data,
                 instance.lod_level,
+                coarse_lod,
                 gx_start,
                 gz_start,
                 m,
@@ -1109,5 +1218,49 @@ fn update_patch_aabbs(
                 *aabb = new_aabb;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_block_height_range;
+
+    fn make_height_data(layers: usize, res: u32) -> Vec<u8> {
+        vec![0u8; layers * (res * res * 2) as usize]
+    }
+
+    fn write_height(data: &mut [u8], res: u32, lod: u32, gx: i32, gz: i32, value: u16) {
+        let res = res as usize;
+        let layer_bytes = res * res * 2;
+        let layer_base = lod as usize * layer_bytes;
+        let tx = gx.rem_euclid(res as i32) as usize;
+        let tz = gz.rem_euclid(res as i32) as usize;
+        let off = layer_base + (tz * res + tx) * 2;
+        data[off..off + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    #[test]
+    fn block_height_range_sees_peaks_between_old_stride4_samples() {
+        let res = 8;
+        let mut height_data = make_height_data(1, res);
+
+        // The old stride-4 scan visited gx,gz = -1,3,7,... and would miss this.
+        write_height(&mut height_data, res, 0, 2, 2, u16::MAX);
+
+        let (_, h_max) = compute_block_height_range(&height_data, 0, 0, 0, 0, 4, res);
+        assert!(h_max > 0.99, "exact AABB scan must include unsampled peaks");
+    }
+
+    #[test]
+    fn block_height_range_includes_morphed_coarse_layer() {
+        let res = 8;
+        let mut height_data = make_height_data(2, res);
+
+        // Fine LOD is flat, but the seam morph can fully snap to the next
+        // coarser level on the outer edge. The AABB must include that height.
+        write_height(&mut height_data, res, 1, 1, 1, u16::MAX);
+
+        let (_, h_max) = compute_block_height_range(&height_data, 0, 1, 0, 0, 4, res);
+        assert!(h_max > 0.99, "AABB must include coarse seam heights");
     }
 }

@@ -106,6 +106,103 @@ fn block_intersects_world_bounds(
 }
 
 // ---------------------------------------------------------------------------
+// Interior trim strip instances  (GPU Gems 2 §2.3.3)
+// ---------------------------------------------------------------------------
+
+/// CPU-side descriptor for one (2m+1)×2 interior trim strip.
+///
+/// The trim is rendered at the **coarse** LOD scale for the ring boundary it
+/// fills.  Each strip is one coarse quad wide (in the perpendicular direction)
+/// and 2m coarse quads long (spanning the full inner-hole edge).
+///
+/// # Why coarse scale matters
+/// A fine-scale strip (1 fine texel wide) has both vertex columns snap to the
+/// **same** coarse grid position after the vertex-shader morph (floor division),
+/// collapsing the strip to zero width and rendering no pixels.  A coarse-scale
+/// strip has its two columns at neighbouring coarse grid positions and is never
+/// collapsed.
+#[derive(Clone, Debug)]
+pub struct TrimInstanceCpu {
+    /// LOD level of the **coarse** ring whose inner hole this strip borders.
+    /// The vertex shader derives this from `Transform.scale.x = level_scale_ws`.
+    pub lod_level: u32,
+    /// World-space XZ of the strip's minimum (−x, −z) corner.
+    pub origin_ws: Vec2,
+    /// One coarse grid unit in world space at this LOD (`world_scale * 2^lod`).
+    pub level_scale_ws: f32,
+    /// `false` = vertical strip (LEFT or RIGHT inner boundary edge).
+    /// `true`  = horizontal strip (BOTTOM or TOP inner boundary edge).
+    pub is_horizontal: bool,
+}
+
+/// Builds the four (2m+1)×2 interior trim strips that border every ring-level
+/// inner hole (GPU Gems 2 Figure 2-5, blue pieces).
+///
+/// Four strips — LEFT, RIGHT, BOTTOM, TOP — are emitted unconditionally for
+/// every coarse ring level L ≥ 1, each placed 1 coarse quad inward from the
+/// respective inner-hole edge.  Because they are at **coarse** scale the two
+/// columns of each strip map to *different* coarse grid positions and are never
+/// collapsed by the morph snap.
+///
+/// The strips fill both the steady-state seam and the 1-fine-texel parity gap
+/// that appears when the fine ring's clip center is odd (the gap that would
+/// otherwise show as an L-shaped crack when the camera crosses a fine-grid line).
+pub fn build_trim_instances_for_view(
+    config: &TerrainConfig,
+    view: &TerrainViewState,
+) -> Vec<TrimInstanceCpu> {
+    let m = config.block_size() as i32;
+    let mut instances = Vec::new();
+
+    for level in 1..config.active_clipmap_levels() {
+        let l = level as usize;
+        if l >= view.level_scales.len() || l >= view.clip_centers.len() {
+            break;
+        }
+
+        let s = view.level_scales[l]; // one coarse grid unit
+        let c = view.clip_centers[l];
+
+        // Inner-hole boundary corners in world space.
+        let min_x = (c.x - m) as f32 * s;
+        let min_z = (c.y - m) as f32 * s;
+        let max_x = (c.x + m) as f32 * s;
+        let max_z = (c.y + m) as f32 * s;
+
+        // LEFT: x ∈ [min_x, min_x+s], z ∈ [min_z, max_z]
+        instances.push(TrimInstanceCpu {
+            lod_level: level,
+            origin_ws: Vec2::new(min_x, min_z),
+            level_scale_ws: s,
+            is_horizontal: false,
+        });
+        // RIGHT: x ∈ [max_x-s, max_x], z ∈ [min_z, max_z]
+        instances.push(TrimInstanceCpu {
+            lod_level: level,
+            origin_ws: Vec2::new(max_x - s, min_z),
+            level_scale_ws: s,
+            is_horizontal: false,
+        });
+        // BOTTOM: x ∈ [min_x, max_x], z ∈ [min_z, min_z+s]
+        instances.push(TrimInstanceCpu {
+            lod_level: level,
+            origin_ws: Vec2::new(min_x, min_z),
+            level_scale_ws: s,
+            is_horizontal: true,
+        });
+        // TOP: x ∈ [min_x, max_x], z ∈ [max_z-s, max_z]
+        instances.push(TrimInstanceCpu {
+            lod_level: level,
+            origin_ws: Vec2::new(min_x, max_z - s),
+            level_scale_ws: s,
+            is_horizontal: true,
+        });
+    }
+
+    instances
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 

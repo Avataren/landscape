@@ -22,9 +22,6 @@ pub struct TerrainDebugConfig {
     pub show_wireframe: bool,
     pub show_normals_only: bool,
     pub show_ruler: bool,
-    /// F5 cycles: 0 = off, 1 = raw normal-map sample, 2 = ORM roughness.
-    /// Samples slot 0 directly at world UV — bypasses blending so you see
-    /// exactly what the GPU reads. Red output = uv_scale.z flag not set.
     pub show_pbr_debug: u8,
 }
 
@@ -59,6 +56,7 @@ const LOD_COLORS: [Color; 8] = [
 
 /// Runtime debug hotkeys:
 /// - F5  = cycle PBR texture debug (off / raw normal-map / ORM roughness)
+/// - F6  = ruler grid
 /// - F8  = render terrain normals as colour (no lighting/material)
 /// - F9  = stats logging
 /// - F10 = patch bounds

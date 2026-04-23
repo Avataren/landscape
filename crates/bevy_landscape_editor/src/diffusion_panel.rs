@@ -470,10 +470,7 @@ fn ensure_preview_azgaar_conditioning(
     let cache_marker = conditioning_dir.join(".landscape_azgaar_cache");
     let heightmap_path = conditioning_dir.join("heightmap.tif");
     if heightmap_path.exists()
-        && std::fs::read_to_string(&cache_marker)
-            .ok()
-            .as_deref()
-            == Some(cache_key.as_str())
+        && std::fs::read_to_string(&cache_marker).ok().as_deref() == Some(cache_key.as_str())
     {
         send_log(
             tx,

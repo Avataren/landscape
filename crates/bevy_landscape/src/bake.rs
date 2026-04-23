@@ -157,9 +157,11 @@ fn bake_heightmap_in_memory(config: BakeConfig, log: impl Fn(String)) -> Result<
             0.0
         };
         log(format!("Sea level → water_level = {water_level:.6}"));
-        TerrainMetadata { water_level: Some(water_level) }
-            .save(&config.output_dir)
-            .map_err(|e| format!("Failed to write metadata.toml: {e}"))?;
+        TerrainMetadata {
+            water_level: (water_level > 0.0).then_some(water_level),
+        }
+        .save(&config.output_dir)
+        .map_err(|e| format!("Failed to write metadata.toml: {e}"))?;
     }
     let mut height_pixels: Vec<f32> = if h_range > 1e-6 {
         height_pixels_raw
@@ -441,7 +443,12 @@ impl TiffLayout {
         let th = chunk_h as usize;
         let tpr = (src_w + tw - 1) / tw;
         let vsc = (src_h + th - 1) / th;
-        TiffLayout { tile_w: tw, tile_h: th, tiles_per_row: tpr, virtual_strip_count: vsc }
+        TiffLayout {
+            tile_w: tw,
+            tile_h: th,
+            tiles_per_row: tpr,
+            virtual_strip_count: vsc,
+        }
     }
 
     fn _is_tiled(&self, src_w: usize) -> bool {
@@ -565,10 +572,8 @@ fn scan_tiff_range(
     path: &Path,
     bake_size: usize,
 ) -> Result<(usize, usize, f32, f32, usize), String> {
-    let f =
-        BufReader::new(File::open(path).map_err(|e| format!("{}: {e}", path.display()))?);
-    let mut dec =
-        tiff::decoder::Decoder::new(f).map_err(|e| format!("tiff open: {e}"))?;
+    let f = BufReader::new(File::open(path).map_err(|e| format!("{}: {e}", path.display()))?);
+    let mut dec = tiff::decoder::Decoder::new(f).map_err(|e| format!("tiff open: {e}"))?;
     let (w, h) = dec.dimensions().map_err(|e| e.to_string())?;
     let (chunk_w, chunk_h) = dec.chunk_dimensions();
     let (src_w, src_h) = (w as usize, h as usize);
@@ -591,8 +596,12 @@ fn scan_tiff_range(
             let row_start = row * src_w;
             for col in 0..bake_size {
                 let v = values.get(row_start + col).copied().unwrap_or(0.0);
-                if v < h_min { h_min = v; }
-                if v > h_max { h_max = v; }
+                if v < h_min {
+                    h_min = v;
+                }
+                if v > h_max {
+                    h_max = v;
+                }
             }
         }
     }
@@ -601,8 +610,7 @@ fn scan_tiff_range(
 
 /// Read a u16-encoded height tile back as normalised f32 values.
 fn read_tile_as_f32(path: &Path, tile_size: usize) -> Result<Vec<f32>, String> {
-    let bytes =
-        std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
     let expected = tile_size * tile_size * 2;
     if bytes.len() != expected {
         return Err(format!(
@@ -640,8 +648,7 @@ fn bake_heightmap_streaming(config: BakeConfig, log: impl Fn(String)) -> Result<
             File::open(&config.height_path)
                 .map_err(|e| format!("{}: {e}", config.height_path.display()))?,
         );
-        let mut dec =
-            tiff::decoder::Decoder::new(f).map_err(|e| format!("tiff open: {e}"))?;
+        let mut dec = tiff::decoder::Decoder::new(f).map_err(|e| format!("tiff open: {e}"))?;
         dec.dimensions().map_err(|e| e.to_string())?
     };
     let (src_w, src_h) = (src_dims.0 as usize, src_dims.1 as usize);
@@ -663,7 +670,11 @@ fn bake_heightmap_streaming(config: BakeConfig, log: impl Fn(String)) -> Result<
     let h_range = h_max - h_min;
     log(format!(
         "Source {}×{}  decoded range [{:.4}, {:.4}]  rps={}  [{:.1}s]",
-        src_w, src_h, h_min, h_max, rps,
+        src_w,
+        src_h,
+        h_min,
+        h_max,
+        rps,
         elapsed()
     ));
 
@@ -693,9 +704,11 @@ fn bake_heightmap_streaming(config: BakeConfig, log: impl Fn(String)) -> Result<
             0.0
         };
         log(format!("Sea level → water_level = {water_level:.6}"));
-        TerrainMetadata { water_level: Some(water_level) }
-            .save(&config.output_dir)
-            .map_err(|e| format!("Failed to write metadata.toml: {e}"))?;
+        TerrainMetadata {
+            water_level: (water_level > 0.0).then_some(water_level),
+        }
+        .save(&config.output_dir)
+        .map_err(|e| format!("Failed to write metadata.toml: {e}"))?;
     }
     log(format!(
         "Baking {} levels, tile {}px → '{}'",
@@ -754,7 +767,7 @@ fn stream_bake_lod0(
     bake_size: usize,
     src_w: usize,
     src_h: usize,
-    rps: usize,    // tile_h from TiffLayout (rows per virtual strip)
+    rps: usize, // tile_h from TiffLayout (rows per virtual strip)
     h_min: f32,
     h_range: f32,
     effective_height_scale: f32,
@@ -839,10 +852,7 @@ fn stream_bake_lod0(
             let buf_idx = strip_idx.saturating_sub(buf_strip_start);
             let raw = if buf_idx < strip_buf.len() {
                 let offset = row_in_strip * src_w + sx;
-                strip_buf[buf_idx]
-                    .get(offset)
-                    .copied()
-                    .unwrap_or(0.0)
+                strip_buf[buf_idx].get(offset).copied().unwrap_or(0.0)
             } else {
                 0.0
             };
@@ -881,8 +891,8 @@ fn stream_bake_lod0(
                 let band_row = extra_rows - 1 + wy; // 0-indexed in band
                 let band_row = band_row.min(band_h - 1);
                 for wx in 0..win_size {
-                    let sx = (px_src as i32 - 1 + wx as i32)
-                        .clamp(0, bake_size as i32 - 1) as usize;
+                    let sx =
+                        (px_src as i32 - 1 + wx as i32).clamp(0, bake_size as i32 - 1) as usize;
                     window[wy * win_size + wx] = band[band_row * src_w + sx];
                 }
             }
@@ -895,7 +905,8 @@ fn stream_bake_lod0(
                     let wx = col + 1;
                     let wy = row + 1;
                     let h = window[wy * win_size + wx];
-                    tile_bytes.extend_from_slice(&((h.clamp(0.0, 1.0) * 65535.0) as u16).to_le_bytes());
+                    tile_bytes
+                        .extend_from_slice(&((h.clamp(0.0, 1.0) * 65535.0) as u16).to_le_bytes());
                     let enc = encode_normal_xz(compute_normal(
                         &window,
                         win_size,
@@ -968,8 +979,11 @@ fn bake_lod_from_children(
             let mut child_buf = vec![0.0f32; child_buf_side * child_buf_side];
             for cy in 0..2usize {
                 for cx in 0..2usize {
-                    let child_path = prev_height_dir
-                        .join(format!("{}_{}.bin", tx * 2 + cx as i32, ty * 2 + cy as i32));
+                    let child_path = prev_height_dir.join(format!(
+                        "{}_{}.bin",
+                        tx * 2 + cx as i32,
+                        ty * 2 + cy as i32
+                    ));
                     let data = read_tile_as_f32(&child_path, tile_size)
                         .unwrap_or_else(|_| vec![0.0; tile_size * tile_size]);
                     for row in 0..tile_size {
@@ -989,9 +1003,8 @@ fn bake_lod_from_children(
             for row in 0..tile_size {
                 for col in 0..tile_size {
                     let h = height_data[row * tile_size + col];
-                    tile_bytes.extend_from_slice(
-                        &((h.clamp(0.0, 1.0) * 65535.0) as u16).to_le_bytes(),
-                    );
+                    tile_bytes
+                        .extend_from_slice(&((h.clamp(0.0, 1.0) * 65535.0) as u16).to_le_bytes());
                     let enc = encode_normal_xz(compute_normal(
                         &height_data,
                         tile_size,
@@ -1115,7 +1128,12 @@ fn load_grayscale_raster(
 ) -> Result<(Vec<f32>, usize, usize), Box<dyn std::error::Error>> {
     // Try the tiff crate first so we can handle signed INT16 TIFFs (sample
     // format 2), which the `image` crate rejects.
-    if path.extension().and_then(|e| e.to_str()).map(|e| e.eq_ignore_ascii_case("tif") || e.eq_ignore_ascii_case("tiff")).unwrap_or(false) {
+    if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("tif") || e.eq_ignore_ascii_case("tiff"))
+        .unwrap_or(false)
+    {
         if let Ok(pixels) = load_tiff_as_f32(path) {
             return Ok(pixels);
         }
@@ -1131,9 +1149,7 @@ fn load_grayscale_raster(
 
 /// Read a single-band TIFF as normalised f32, handling UINT16, INT16, UINT32,
 /// INT32, and FLOAT32 sample formats.
-fn load_tiff_as_f32(
-    path: &Path,
-) -> Result<(Vec<f32>, usize, usize), Box<dyn std::error::Error>> {
+fn load_tiff_as_f32(path: &Path) -> Result<(Vec<f32>, usize, usize), Box<dyn std::error::Error>> {
     use tiff::decoder::{Decoder, DecodingResult};
     use tiff::ColorType;
 
@@ -1147,23 +1163,32 @@ fn load_tiff_as_f32(
     match color {
         ColorType::Gray(_) => {}
         _ => {
-            return Err(format!(
-                "Expected a single-band TIFF, got {color:?}"
-            )
-            .into());
+            return Err(format!("Expected a single-band TIFF, got {color:?}").into());
         }
     }
 
     let result = dec.read_image()?;
     let pixels: Vec<f32> = match result {
-        DecodingResult::U8(v)  => v.iter().map(|&x| x as f32 / u8::MAX as f32).collect(),
+        DecodingResult::U8(v) => v.iter().map(|&x| x as f32 / u8::MAX as f32).collect(),
         DecodingResult::U16(v) => v.iter().map(|&x| x as f32 / u16::MAX as f32).collect(),
         DecodingResult::U32(v) => v.iter().map(|&x| x as f32 / u32::MAX as f32).collect(),
         DecodingResult::U64(v) => v.iter().map(|&x| x as f32 / u64::MAX as f32).collect(),
-        DecodingResult::I8(v)  => v.iter().map(|&x| (x as f32 - i8::MIN as f32)  / u8::MAX as f32).collect(),
-        DecodingResult::I16(v) => v.iter().map(|&x| (x as f32 - i16::MIN as f32) / u16::MAX as f32).collect(),
-        DecodingResult::I32(v) => v.iter().map(|&x| (x as f32 - i32::MIN as f32) / u32::MAX as f32).collect(),
-        DecodingResult::I64(v) => v.iter().map(|&x| (x as f64 - i64::MIN as f64) as f32 / u64::MAX as f32).collect(),
+        DecodingResult::I8(v) => v
+            .iter()
+            .map(|&x| (x as f32 - i8::MIN as f32) / u8::MAX as f32)
+            .collect(),
+        DecodingResult::I16(v) => v
+            .iter()
+            .map(|&x| (x as f32 - i16::MIN as f32) / u16::MAX as f32)
+            .collect(),
+        DecodingResult::I32(v) => v
+            .iter()
+            .map(|&x| (x as f32 - i32::MIN as f32) / u32::MAX as f32)
+            .collect(),
+        DecodingResult::I64(v) => v
+            .iter()
+            .map(|&x| (x as f64 - i64::MIN as f64) as f32 / u64::MAX as f32)
+            .collect(),
         DecodingResult::F32(v) => v,
         DecodingResult::F64(v) => v.iter().map(|&x| x as f32).collect(),
         DecodingResult::F16(v) => v.iter().map(|x| x.to_f32()).collect(),

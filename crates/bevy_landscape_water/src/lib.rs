@@ -1,15 +1,27 @@
-use bevy::prelude::*;
+use bevy::{
+    light::{NotShadowCaster, NotShadowReceiver},
+    mesh::PlaneMeshBuilder,
+    prelude::*,
+};
 use bevy_landscape::{TerrainConfig, TerrainMetadata, TerrainSourceDesc};
 use bevy_water::{
+    water::material::{StandardWaterMaterial, WaterMaterial},
     water::{setup_water, WaterTile},
-    WaterPlugin, WaterSettings, WaterTiles,
+    WaterPlugin, WaterQuality, WaterSettings, WaterTiles, WaveDirection, WATER_SIZE,
 };
 
 #[derive(Resource, Clone, Copy)]
 pub struct WaterEnabled(pub bool);
 
 #[derive(Resource, Clone, Copy)]
-struct WaterCenter(Vec2);
+struct InitialWaterLayout(WaterLayout);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WaterLayout {
+    height: f32,
+    center: Vec2,
+    grid: Option<UVec2>,
+}
 
 pub struct LandscapeWaterPlugin {
     /// Pre-computed world-space Y of the water surface.  `None` = no water for this level.
@@ -31,51 +43,214 @@ impl Default for LandscapeWaterPlugin {
 
 impl Plugin for LandscapeWaterPlugin {
     fn build(&self, app: &mut App) {
-        const TILE_SIZE: f32 = bevy_water::water::WATER_SIZE as f32;
-
-        let extent = self.world_max - self.world_min;
-        let center = (self.world_min + self.world_max) * 0.5;
-
-        let tiles_x = (extent.x / TILE_SIZE).ceil() as u32 + 2;
-        let tiles_y = (extent.y / TILE_SIZE).ceil() as u32 + 2;
-
-        let height = self.water_height.unwrap_or(0.0);
-        let spawn_tiles = self.water_height.map(|_| UVec2::new(tiles_x, tiles_y));
+        let initial_layout = water_layout(
+            self.world_min,
+            self.world_max,
+            self.water_height.filter(|height| *height > 0.0),
+        );
 
         app.insert_resource(WaterSettings {
-            height,
-            spawn_tiles,
+            height: initial_layout.height,
+            // LandscapeWaterPlugin owns tile spawning so reloaded terrains can
+            // rebuild the grid instead of staying stuck with the startup size.
+            spawn_tiles: None,
             ..WaterSettings::default()
         });
-        app.insert_resource(WaterEnabled(self.water_height.is_some()));
-        app.insert_resource(WaterCenter(center));
+        app.insert_resource(WaterEnabled(initial_layout.grid.is_some()));
+        app.insert_resource(InitialWaterLayout(initial_layout));
         app.add_plugins(WaterPlugin);
-        app.add_systems(Startup, center_water_tiles.after(setup_water));
+        app.add_systems(Startup, spawn_initial_water_tiles.after(setup_water));
         app.add_systems(Update, (sync_water_to_terrain, toggle_water));
     }
 }
 
-/// Move the WaterTiles root to the terrain's XZ center after tiles are spawned.
-fn center_water_tiles(
-    center: Res<WaterCenter>,
-    mut water_tiles: Query<&mut Transform, With<WaterTiles>>,
+fn effective_water_level(level: Option<f32>) -> Option<f32> {
+    level.filter(|level| *level > 0.0)
+}
+
+fn water_layout(world_min: Vec2, world_max: Vec2, water_height: Option<f32>) -> WaterLayout {
+    let extent = world_max - world_min;
+    let center = (world_min + world_max) * 0.5;
+    let grid = water_height.map(|_| {
+        let tiles_x = (extent.x / WATER_SIZE as f32).ceil().max(0.0) as u32 + 2;
+        let tiles_y = (extent.y / WATER_SIZE as f32).ceil().max(0.0) as u32 + 2;
+        UVec2::new(tiles_x.max(1), tiles_y.max(1))
+    });
+
+    WaterLayout {
+        height: water_height.unwrap_or(0.0),
+        center,
+        grid,
+    }
+}
+
+fn rebuild_water_tiles(
+    commands: &mut Commands,
+    settings: &WaterSettings,
+    layout: WaterLayout,
+    existing_roots: &[Entity],
+    root_children: &Query<&Children, With<WaterTiles>>,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardWaterMaterial>,
 ) {
-    let Ok(mut t) = water_tiles.single_mut() else {
+    for root in existing_roots {
+        if let Ok(children) = root_children.get(*root) {
+            for child in children.iter() {
+                commands.entity(child).despawn();
+            }
+        }
+        commands.entity(*root).despawn();
+    }
+
+    let Some(grid) = layout.grid else {
         return;
     };
-    t.translation.x = center.0.x;
-    t.translation.z = center.0.y;
+
+    let mut plane_builder = PlaneMeshBuilder::from_length(WATER_SIZE as f32);
+    plane_builder = match settings.water_quality {
+        WaterQuality::Basic => plane_builder,
+        WaterQuality::Medium => plane_builder,
+        WaterQuality::High => plane_builder.subdivisions(WATER_SIZE / 16),
+        WaterQuality::Ultra => plane_builder.subdivisions(WATER_SIZE / 4),
+    };
+
+    let mesh = Mesh3d(meshes.add(plane_builder));
+    let root_translation = Vec3::new(layout.center.x, 0.0, layout.center.y);
+    let water_height = layout.height;
+
+    commands
+        .spawn((
+            WaterTiles,
+            Name::new("Water"),
+            Transform::from_translation(root_translation),
+            Visibility::Visible,
+        ))
+        .with_children(|parent| {
+            let grid_center_x = (WATER_SIZE * grid.x) as f32 / 2.0;
+            let grid_center_y = (WATER_SIZE * grid.y) as f32 / 2.0;
+            for x in 0..grid.x {
+                for y in 0..grid.y {
+                    let x = (x * WATER_SIZE) as f32 - grid_center_x;
+                    let y = (y * WATER_SIZE) as f32 - grid_center_y;
+                    let coord_offset = Vec2::new(x, y);
+                    let tile_hash = ((x as i32).wrapping_mul(73856093)
+                        ^ (y as i32).wrapping_mul(19349663))
+                        as f32;
+                    let tile_offset = (tile_hash.abs() % 1000.0) / 1000.0 * 0.3;
+
+                    let normalized_dir = settings.wave_direction.normalize_or_zero();
+                    let material = MeshMaterial3d(materials.add(StandardWaterMaterial {
+                        base: StandardMaterial {
+                            base_color: settings.base_color,
+                            alpha_mode: settings.alpha_mode,
+                            perceptual_roughness: 0.22,
+                            ..default()
+                        },
+                        extension: WaterMaterial {
+                            amplitude: settings.amplitude,
+                            clarity: settings.clarity,
+                            deep_color: settings.deep_color,
+                            shallow_color: settings.shallow_color,
+                            edge_color: settings.edge_color,
+                            edge_scale: settings.edge_scale,
+                            coord_offset,
+                            coord_scale: Vec2::new(WATER_SIZE as f32, WATER_SIZE as f32),
+                            wave_dir_a: normalized_dir,
+                            wave_dir_b: normalized_dir,
+                            wave_blend: 1.0,
+                            quality: settings.water_quality.into(),
+                            refraction_strength: settings.refraction_strength,
+                            foam_threshold: settings.foam_threshold,
+                            foam_color: settings.foam_color,
+                        },
+                    }));
+
+                    let mut wave_dir = WaveDirection::with_duration(
+                        settings.wave_direction,
+                        settings.wave_direction_blend_duration,
+                    );
+                    wave_dir.tile_offset = tile_offset;
+
+                    let mut tile = parent.spawn((
+                        WaterTile::new(water_height, coord_offset),
+                        mesh.clone(),
+                        material,
+                        wave_dir,
+                        NotShadowCaster,
+                    ));
+
+                    match settings.water_quality {
+                        WaterQuality::Basic | WaterQuality::Medium => {
+                            tile.insert(NotShadowReceiver);
+                        }
+                        _ => {}
+                    };
+                }
+            }
+        });
+}
+
+fn apply_water_layout(
+    commands: &mut Commands,
+    settings: &mut WaterSettings,
+    enabled: &mut WaterEnabled,
+    layout: WaterLayout,
+    water_roots: &Query<Entity, With<WaterTiles>>,
+    root_children: &Query<&Children, With<WaterTiles>>,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardWaterMaterial>,
+) {
+    settings.height = layout.height;
+    settings.spawn_tiles = layout.grid;
+    enabled.0 = layout.grid.is_some();
+
+    let roots: Vec<Entity> = water_roots.iter().collect();
+    rebuild_water_tiles(
+        commands,
+        settings,
+        layout,
+        &roots,
+        root_children,
+        meshes,
+        materials,
+    );
+}
+
+fn spawn_initial_water_tiles(
+    initial_layout: Res<InitialWaterLayout>,
+    mut settings: ResMut<WaterSettings>,
+    mut enabled: ResMut<WaterEnabled>,
+    water_roots: Query<Entity, With<WaterTiles>>,
+    root_children: Query<&Children, With<WaterTiles>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardWaterMaterial>>,
+    mut commands: Commands,
+) {
+    apply_water_layout(
+        &mut commands,
+        &mut settings,
+        &mut enabled,
+        initial_layout.0,
+        &water_roots,
+        &root_children,
+        &mut meshes,
+        &mut materials,
+    );
 }
 
 /// Runs every frame; when TerrainSourceDesc changes (terrain reload or initial load)
-/// re-reads metadata.toml to pick up the new water_level and repositions water tiles.
+/// re-reads metadata.toml to pick up the new water_level and rebuilds the water
+/// tile grid to match the terrain footprint.
 fn sync_water_to_terrain(
     source_desc: Res<TerrainSourceDesc>,
     config: Res<TerrainConfig>,
     mut settings: ResMut<WaterSettings>,
     mut enabled: ResMut<WaterEnabled>,
-    mut water_root: Query<(&mut Transform, &mut Visibility), With<WaterTiles>>,
-    mut tile_transforms: Query<&mut Transform, (With<WaterTile>, Without<WaterTiles>)>,
+    water_roots: Query<Entity, With<WaterTiles>>,
+    root_children: Query<&Children, With<WaterTiles>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardWaterMaterial>>,
+    mut commands: Commands,
 ) {
     if !source_desc.is_changed() {
         return;
@@ -87,37 +262,24 @@ fn sync_water_to_terrain(
         .map(|p| TerrainMetadata::load(p))
         .unwrap_or_default();
 
-    let new_height = meta
-        .water_level
-        .map(|wl| wl * config.height_scale)
-        .unwrap_or(0.0);
-    let has_water = meta.water_level.is_some();
+    let water_height = effective_water_level(meta.water_level).map(|wl| wl * config.height_scale);
+    let layout = water_layout(source_desc.world_min, source_desc.world_max, water_height);
 
-    settings.height = new_height;
-    enabled.0 = has_water;
-
-    let new_cx = (source_desc.world_min.x + source_desc.world_max.x) * 0.5;
-    let new_cz = (source_desc.world_min.y + source_desc.world_max.y) * 0.5;
-    let vis = if has_water {
-        Visibility::Visible
-    } else {
-        Visibility::Hidden
-    };
-
-    if let Ok((mut root_t, mut root_v)) = water_root.single_mut() {
-        root_t.translation.x = new_cx;
-        root_t.translation.z = new_cz;
-        *root_v = vis;
-    }
-
-    for mut t in &mut tile_transforms {
-        t.translation.y = new_height;
-    }
+    apply_water_layout(
+        &mut commands,
+        &mut settings,
+        &mut enabled,
+        layout,
+        &water_roots,
+        &root_children,
+        &mut meshes,
+        &mut materials,
+    );
 
     info!(
         "Water level: {} (F2 to toggle)",
-        if has_water {
-            format!("{:.1}m", new_height)
+        if let Some(height) = water_height {
+            format!("{:.1}m", height)
         } else {
             "none".into()
         }
@@ -142,4 +304,29 @@ fn toggle_water(
         *v = vis;
     }
     info!("Water {} (F2)", if enabled.0 { "ON" } else { "OFF" });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{effective_water_level, water_layout};
+    use bevy::prelude::*;
+
+    #[test]
+    fn zero_water_level_is_treated_as_no_water() {
+        assert_eq!(effective_water_level(Some(0.0)), None);
+        assert_eq!(effective_water_level(Some(0.25)), Some(0.25));
+    }
+
+    #[test]
+    fn layout_scales_grid_with_terrain_extent() {
+        let layout = water_layout(
+            Vec2::new(-15_360.0, -7_680.0),
+            Vec2::new(15_360.0, 7_680.0),
+            Some(120.0),
+        );
+
+        assert_eq!(layout.center, Vec2::ZERO);
+        assert_eq!(layout.grid, Some(UVec2::new(122, 62)));
+        assert_eq!(layout.height, 120.0);
+    }
 }
