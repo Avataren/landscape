@@ -1,6 +1,8 @@
+use std::time::Duration;
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
+use bevy::winit::{UpdateMode, WinitSettings};
 use bevy_egui::{
     egui::{self, TextureId},
     EguiContexts, EguiPrimaryContextPass,
@@ -62,10 +64,34 @@ impl Default for GeneratorPanelState {
 
 pub(crate) struct GeneratorPanelPlugin;
 
+const DIFFUSION_THROTTLED_FPS: f64 = 5.0;
+
 impl Plugin for GeneratorPanelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GeneratorPanelState>()
+            .add_systems(Update, update_diffusion_render_throttle)
             .add_systems(EguiPrimaryContextPass, generator_panel_system);
+    }
+}
+
+fn update_diffusion_render_throttle(
+    panel: Res<GeneratorPanelState>,
+    mut winit_settings: ResMut<WinitSettings>,
+) {
+    let desired = if panel.diffusion.should_throttle_rendering() {
+        let wait = Duration::from_secs_f64(1.0 / DIFFUSION_THROTTLED_FPS);
+        WinitSettings {
+            focused_mode: UpdateMode::reactive_low_power(wait),
+            unfocused_mode: UpdateMode::reactive_low_power(wait),
+        }
+    } else {
+        WinitSettings::game()
+    };
+
+    if winit_settings.focused_mode != desired.focused_mode
+        || winit_settings.unfocused_mode != desired.unfocused_mode
+    {
+        *winit_settings = desired;
     }
 }
 

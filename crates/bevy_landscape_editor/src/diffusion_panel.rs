@@ -15,14 +15,14 @@ use bevy_landscape::{
 
 use crate::preferences::AppPreferences;
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum DiffusionWorkflow {
     #[default]
     AzgaarJson,
     ConditioningFolder,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum DiffusionDevice {
     #[default]
     Auto,
@@ -48,7 +48,7 @@ impl DiffusionDevice {
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum DiffusionDtype {
     #[default]
     Fp32,
@@ -67,6 +67,7 @@ impl DiffusionDtype {
 }
 
 const AZGAAR_REGION_CELL_OPTIONS: &[u32] = &[4, 8, 16, 32, 64, 128, 256, 512];
+const GENERATED_PREVIEW_SELECTED_MAX_SIDE: u32 = 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DiffusionPickTarget {
@@ -81,6 +82,7 @@ enum DiffusionPickTarget {
 enum DiffusionRunKind {
     Generate,
     Probe,
+    Preview,
 }
 
 impl DiffusionRunKind {
@@ -88,6 +90,7 @@ impl DiffusionRunKind {
         match self {
             Self::Generate => "Run Log",
             Self::Probe => "Probe Log",
+            Self::Preview => "Preview Log",
         }
     }
 
@@ -95,6 +98,7 @@ impl DiffusionRunKind {
         match self {
             Self::Generate => "Terrain diffusion job is running...",
             Self::Probe => "Diffusion runtime probe is running...",
+            Self::Preview => "Diffusion preview job is running...",
         }
     }
 
@@ -102,13 +106,36 @@ impl DiffusionRunKind {
         match self {
             Self::Generate => "Diffusion pipeline failed",
             Self::Probe => "Diffusion runtime probe failed",
+            Self::Preview => "Diffusion preview failed",
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GeneratedPreviewMode {
+    Coarse,
+}
+
+impl GeneratedPreviewMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Coarse => "Generated selection preview (fast coarse)",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct DiffusionPreviewArtifacts {
+    overview_image: Option<PathBuf>,
+    selected_image: PathBuf,
+    selected_mode: GeneratedPreviewMode,
+    preview_key: String,
 }
 
 enum DiffusionOutcome {
     Generated(PathBuf),
     Probed,
+    Previewed(DiffusionPreviewArtifacts),
 }
 
 enum DiffusionMsg {
@@ -204,6 +231,20 @@ pub(crate) struct DiffusionPanelState {
     preview_texture: Option<egui::TextureHandle>,
     /// Raster size the preview texture was built for (to detect staleness).
     preview_loaded_for: Option<(u32, u32)>,
+    /// Generated diffusion overview preview texture.
+    generated_overview_texture: Option<egui::TextureHandle>,
+    /// Generated selected-area preview texture.
+    generated_selected_texture: Option<egui::TextureHandle>,
+    /// Last generated overview preview image path.
+    generated_overview_image: Option<PathBuf>,
+    /// Last generated selected preview image path.
+    generated_selected_image: Option<PathBuf>,
+    /// Whether the selected preview was rendered from native detail or coarse output.
+    generated_selected_mode: Option<GeneratedPreviewMode>,
+    /// Tracks whether the loaded previews match the current UI settings.
+    generated_preview_key: Option<String>,
+    /// Cache-buster for egui textures when preview files are overwritten.
+    generated_preview_revision: u64,
 }
 
 impl DiffusionPanelState {
@@ -214,16 +255,16 @@ impl DiffusionPanelState {
             workflow: DiffusionWorkflow::AzgaarJson,
             repo_path: repo_path.display().to_string(),
             python_bin: detect_python_bin(&repo_path).display().to_string(),
-            model_path: "xandergos/terrain-diffusion-90m".into(),
+            model_path: "xandergos/terrain-diffusion-30m".into(),
             azgaar_json_path: String::new(),
             azgaar_region_cells: 8,
             azgaar_center_x: 0.5,
             azgaar_center_y: 0.5,
             conditioning_dir: format!("{working_dir}/conditioning"),
-            conditioning_scale_km: 23.0,
+            conditioning_scale_km: 7.7,
             working_dir,
             tile_output_dir: "assets/tiles_diffusion".into(),
-            world_scale: 90.0,
+            world_scale: 30.0,
             final_height_span_m: 8192.0,
             smooth_sigma: 1.0,
             clipmap_levels: TerrainConfig::default().clipmap_levels,
@@ -233,13 +274,20 @@ impl DiffusionPanelState {
             batch_size: "1,2,4,8".into(),
             cache_size: "1G".into(),
             seed: String::new(),
-            use_compile: false,
+            use_compile: true,
             extra_env: "HSA_OVERRIDE_GFX_VERSION=11.0.0".into(),
             run_state: DiffusionRunState::Idle,
             prefs_applied: false,
             conditioning_raster_size: None,
             preview_texture: None,
             preview_loaded_for: None,
+            generated_overview_texture: None,
+            generated_selected_texture: None,
+            generated_overview_image: None,
+            generated_selected_image: None,
+            generated_selected_mode: None,
+            generated_preview_key: None,
+            generated_preview_revision: 0,
         }
     }
 
@@ -264,6 +312,17 @@ impl DiffusionPanelState {
         )
     }
 
+    pub(crate) fn should_throttle_rendering(&self) -> bool {
+        matches!(
+            self.run_state,
+            DiffusionRunState::Running {
+                kind: DiffusionRunKind::Generate | DiffusionRunKind::Preview,
+                finished: false,
+                ..
+            }
+        )
+    }
+
     pub(crate) fn apply_startup_preferences(&mut self, prefs: &AppPreferences) {
         if self.prefs_applied {
             return;
@@ -283,6 +342,220 @@ impl DiffusionPanelState {
         }
         self.prefs_applied = true;
     }
+}
+
+#[derive(Clone, Copy)]
+struct AzgaarCropWindow {
+    source_width: u32,
+    source_height: u32,
+    side: u32,
+    x0: u32,
+    y0: u32,
+}
+
+impl AzgaarCropWindow {
+    fn uv_rect(self) -> egui::Rect {
+        let min = egui::pos2(
+            self.x0 as f32 / self.source_width as f32,
+            self.y0 as f32 / self.source_height as f32,
+        );
+        let max = egui::pos2(
+            (self.x0 + self.side) as f32 / self.source_width as f32,
+            (self.y0 + self.side) as f32 / self.source_height as f32,
+        );
+        egui::Rect::from_min_max(min, max)
+    }
+
+    fn preview_rect(self, rect: egui::Rect) -> egui::Rect {
+        let uv = self.uv_rect();
+        egui::Rect::from_min_max(
+            egui::pos2(
+                rect.left() + uv.left() * rect.width(),
+                rect.top() + uv.top() * rect.height(),
+            ),
+            egui::pos2(
+                rect.left() + uv.right() * rect.width(),
+                rect.top() + uv.bottom() * rect.height(),
+            ),
+        )
+    }
+
+    fn area_fraction(self) -> f32 {
+        (self.side as f32 * self.side as f32)
+            / (self.source_width as f32 * self.source_height as f32)
+    }
+}
+
+fn max_azgaar_crop_side(source_width: u32, source_height: u32) -> Option<u32> {
+    let min_dim = source_width.min(source_height);
+    if min_dim == 0 {
+        return None;
+    }
+    Some(1u32 << (u32::BITS - 1 - min_dim.leading_zeros()))
+}
+
+fn compute_azgaar_crop_window(
+    source_width: u32,
+    source_height: u32,
+    requested_side: u32,
+    center_x: f32,
+    center_y: f32,
+) -> Option<AzgaarCropWindow> {
+    let max_side = max_azgaar_crop_side(source_width, source_height)?;
+    let side = requested_side.min(max_side);
+    if side == 0 {
+        return None;
+    }
+
+    let px = source_width.saturating_sub(1) as f32 * center_x.clamp(0.0, 1.0);
+    let py = source_height.saturating_sub(1) as f32 * center_y.clamp(0.0, 1.0);
+    let max_x0 = source_width.saturating_sub(side) as i32;
+    let max_y0 = source_height.saturating_sub(side) as i32;
+    let x0 = ((px - side as f32 / 2.0).round() as i32).clamp(0, max_x0) as u32;
+    let y0 = ((py - side as f32 / 2.0).round() as i32).clamp(0, max_y0) as u32;
+
+    Some(AzgaarCropWindow {
+        source_width,
+        source_height,
+        side,
+        x0,
+        y0,
+    })
+}
+
+fn generated_preview_mode_for_crop(crop: AzgaarCropWindow) -> GeneratedPreviewMode {
+    let _ = crop;
+    GeneratedPreviewMode::Coarse
+}
+
+fn azgaar_conditioning_cache_key(config: &DiffusionJobConfig) -> Result<String, String> {
+    let source_path = PathBuf::from(&config.azgaar_json_path);
+    let canonical_source = source_path
+        .canonicalize()
+        .unwrap_or_else(|_| source_path.clone());
+    let metadata = std::fs::metadata(&source_path).map_err(|e| {
+        format!(
+            "Failed to read Azgaar JSON metadata from {}: {e}",
+            source_path.display()
+        )
+    })?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|ts| ts.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|dur| dur.as_secs_f64())
+        .unwrap_or(0.0);
+    Ok(format!(
+        "source={}\nsize={}\nmodified={modified:.3}\nscale={:.6}\n",
+        canonical_source.display(),
+        metadata.len(),
+        config.conditioning_scale_km,
+    ))
+}
+
+fn ensure_preview_azgaar_conditioning(
+    config: &DiffusionJobConfig,
+    repo_path: &Path,
+    conditioning_dir: &Path,
+    tx: &mpsc::Sender<DiffusionMsg>,
+) -> Result<(), String> {
+    std::fs::create_dir_all(conditioning_dir).map_err(|e| {
+        format!(
+            "Failed to create conditioning directory {}: {e}",
+            conditioning_dir.display()
+        )
+    })?;
+
+    let cache_key = azgaar_conditioning_cache_key(config)?;
+    let cache_marker = conditioning_dir.join(".landscape_azgaar_cache");
+    let heightmap_path = conditioning_dir.join("heightmap.tif");
+    if heightmap_path.exists()
+        && std::fs::read_to_string(&cache_marker)
+            .ok()
+            .as_deref()
+            == Some(cache_key.as_str())
+    {
+        send_log(
+            tx,
+            format!(
+                "Reusing cached Azgaar conditioning TIFFs in {}",
+                conditioning_dir.display()
+            ),
+        );
+        return Ok(());
+    }
+
+    send_log(
+        tx,
+        format!(
+            "Converting Azgaar export to conditioning TIFFs in {}",
+            conditioning_dir.display()
+        ),
+    );
+    let scale = format!("{:.3}", config.conditioning_scale_km);
+    let args = vec![
+        "-m".to_string(),
+        "terrain_diffusion".to_string(),
+        "azgaar-to-tiff".to_string(),
+        config.azgaar_json_path.clone(),
+        conditioning_dir.display().to_string(),
+        "--scale".to_string(),
+        scale,
+    ];
+    run_logged_command(&config.python_bin, &args, repo_path, &config.extra_env, tx)?;
+    std::fs::write(&cache_marker, cache_key).map_err(|e| {
+        format!(
+            "Failed to write conditioning cache metadata {}: {e}",
+            cache_marker.display()
+        )
+    })?;
+    Ok(())
+}
+
+fn build_preview_key(
+    config: &DiffusionJobConfig,
+    source_size: Option<(u32, u32)>,
+    crop: Option<AzgaarCropWindow>,
+    selected_mode: Option<GeneratedPreviewMode>,
+) -> String {
+    format!(
+        concat!(
+            "workflow={:?}|repo={}|python={}|model={}|azgaar={}|cells={}|cx={:.6}|cy={:.6}|",
+            "cond_dir={}|cond_scale={:.3}|seed={}|snr={}|batch={}|cache={}|device={:?}|dtype={:?}|",
+            "compile={}|source={:?}|crop={:?}|selected_mode={:?}"
+        ),
+        config.workflow,
+        config.repo_path,
+        config.python_bin,
+        config.model_path,
+        config.azgaar_json_path,
+        config.azgaar_region_cells,
+        config.azgaar_center_x,
+        config.azgaar_center_y,
+        config.conditioning_dir,
+        config.conditioning_scale_km,
+        config.seed,
+        config.snr,
+        config.batch_size,
+        config.cache_size,
+        config.device,
+        config.dtype,
+        config.use_compile,
+        source_size,
+        crop.map(|c| (c.x0, c.y0, c.side, c.source_width, c.source_height)),
+        selected_mode,
+    )
+}
+
+fn load_preview_texture(
+    ctx: &egui::Context,
+    path: &Path,
+    cache_key: impl Into<String>,
+) -> Option<egui::TextureHandle> {
+    let img = image::open(path).ok()?.to_rgba8();
+    let (w, h) = img.dimensions();
+    let ci = egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &img);
+    Some(ctx.load_texture(cache_key.into(), ci, egui::TextureOptions::LINEAR))
 }
 
 pub(crate) fn poll_diffusion_state(
@@ -324,10 +597,8 @@ pub(crate) fn draw_diffusion_tab(ui: &mut egui::Ui, state: &mut DiffusionPanelSt
                 bevy_landscape::bake::load_tiff_thumbnail(&tiff_path, 512)
             {
                 // Apply a terrain colour ramp: deep blue → beach → green → white.
-                let color_pixels: Vec<egui::Color32> = pixels
-                    .iter()
-                    .map(|&g| terrain_color_ramp(g))
-                    .collect();
+                let color_pixels: Vec<egui::Color32> =
+                    pixels.iter().map(|&g| terrain_color_ramp(g)).collect();
                 let img = egui::ColorImage {
                     size: [tw, th],
                     source_size: egui::vec2(tw as f32, th as f32),
@@ -343,130 +614,176 @@ pub(crate) fn draw_diffusion_tab(ui: &mut egui::Ui, state: &mut DiffusionPanelSt
         state.preview_loaded_for = state.conditioning_raster_size;
     }
 
+    if state.generated_overview_texture.is_none() {
+        if let Some(path) = &state.generated_overview_image {
+            state.generated_overview_texture = load_preview_texture(
+                ui.ctx(),
+                path,
+                format!(
+                    "diffusion_generated_overview_{}",
+                    state.generated_preview_revision
+                ),
+            );
+        }
+    }
+    if state.generated_selected_texture.is_none() {
+        if let Some(path) = &state.generated_selected_image {
+            state.generated_selected_texture = load_preview_texture(
+                ui.ctx(),
+                path,
+                format!(
+                    "diffusion_generated_selected_{}",
+                    state.generated_preview_revision
+                ),
+            );
+        }
+    }
+
+    let azgaar_crop = state.conditioning_raster_size.and_then(|(src_w, src_h)| {
+        compute_azgaar_crop_window(
+            src_w,
+            src_h,
+            state.azgaar_region_cells,
+            state.azgaar_center_x,
+            state.azgaar_center_y,
+        )
+    });
+    let effective_region_cells = azgaar_crop
+        .map(|crop| crop.side)
+        .unwrap_or(state.azgaar_region_cells);
+
     let mut pick_target = None;
+    let mut preview_requested = false;
     let mut probe_requested = false;
     let mut start_requested = false;
     let mut clear_requested = false;
     let running = state.is_running();
+    let log_visible = matches!(state.run_state, DiffusionRunState::Running { .. });
+    let log_reserved_height = if log_visible { 320.0 } else { 0.0 };
+    let controls_max_height = (ui.available_height() - log_reserved_height).max(180.0);
 
-    ui.horizontal(|ui| {
-        ui.heading("Diffusion Pipeline");
-        if running {
-            ui.add_space(8.0);
-            ui.spinner();
-            ui.label("Running");
-        } else if matches!(state.run_state, DiffusionRunState::PickingFile { .. }) {
-            ui.add_space(8.0);
-            ui.spinner();
-            ui.label("Waiting for file selection");
-        }
-    });
-    ui.separator();
-
-    ui.horizontal(|ui| {
-        ui.label("Workflow");
-        ui.selectable_value(
-            &mut state.workflow,
-            DiffusionWorkflow::AzgaarJson,
-            "Azgaar JSON",
-        );
-        ui.selectable_value(
-            &mut state.workflow,
-            DiffusionWorkflow::ConditioningFolder,
-            "Conditioning Folder",
-        );
-    });
-    ui.add_space(6.0);
-
-    egui::Grid::new("diffusion_paths")
-        .num_columns(3)
-        .spacing([8.0, 6.0])
+    egui::ScrollArea::vertical()
+        .id_salt("diffusion_controls_scroll")
+        .max_height(controls_max_height)
         .show(ui, |ui| {
-            path_row(
-                ui,
-                "Terrain Diffusion repo",
-                &mut state.repo_path,
-                "Path to the terrain-diffusion checkout",
-                &mut pick_target,
-                Some(DiffusionPickTarget::RepoPath),
-                !running,
-            );
-            text_row(
-                ui,
-                "Python executable",
-                &mut state.python_bin,
-                "python3 or path to a venv Python with torch + deps",
-                !running,
-            );
-            path_row(
-                ui,
-                "Work directory",
-                &mut state.working_dir,
-                "Temporary TIFFs and generated GeoTIFFs",
-                &mut pick_target,
-                Some(DiffusionPickTarget::WorkingDir),
-                !running,
-            );
-            path_row(
-                ui,
-                "Tile output",
-                &mut state.tile_output_dir,
-                "Baked landscape tile hierarchy",
-                &mut pick_target,
-                Some(DiffusionPickTarget::TileOutputDir),
-                !running,
-            );
-            match state.workflow {
-                DiffusionWorkflow::AzgaarJson => {
-                    path_row(
-                        ui,
-                        "Azgaar full JSON",
-                        &mut state.azgaar_json_path,
-                        "Tools -> Export -> Export To JSON -> Full",
-                        &mut pick_target,
-                        Some(DiffusionPickTarget::AzgaarJson),
-                        !running,
-                    );
-                }
-                DiffusionWorkflow::ConditioningFolder => {
-                    path_row(
-                        ui,
-                        "Conditioning folder",
-                        &mut state.conditioning_dir,
-                        "Folder with heightmap.tif / temperature.tif / ...",
-                        &mut pick_target,
-                        Some(DiffusionPickTarget::ConditioningDir),
-                        !running,
-                    );
-                }
-            }
-        });
-
-    ui.add_space(8.0);
-    ui.heading("Model & Scale");
-    ui.separator();
-
-    egui::Grid::new("diffusion_model")
-        .num_columns(2)
-        .spacing([8.0, 6.0])
-        .show(ui, |ui| {
-            ui.label("Model");
             ui.horizontal(|ui| {
-                ui.add_enabled_ui(!running, |ui| {
-                    ui.text_edit_singleline(&mut state.model_path);
-                    if ui.small_button("30m").clicked() {
-                        state.model_path = "xandergos/terrain-diffusion-30m".into();
-                        state.world_scale = 30.0;
-                        state.conditioning_scale_km = 7.7;
-                    }
-                    if ui.small_button("90m").clicked() {
-                        state.model_path = "xandergos/terrain-diffusion-90m".into();
-                        state.world_scale = 90.0;
-                        state.conditioning_scale_km = 23.0;
+                ui.heading("Diffusion Pipeline");
+                if running {
+                    ui.add_space(8.0);
+                    ui.spinner();
+                    ui.label("Running");
+                } else if matches!(state.run_state, DiffusionRunState::PickingFile { .. }) {
+                    ui.add_space(8.0);
+                    ui.spinner();
+                    ui.label("Waiting for file selection");
+                }
+            });
+            ui.separator();
+
+            ui.horizontal(|ui| {
+                ui.label("Workflow");
+                ui.selectable_value(
+                    &mut state.workflow,
+                    DiffusionWorkflow::AzgaarJson,
+                    "Azgaar JSON",
+                );
+                ui.selectable_value(
+                    &mut state.workflow,
+                    DiffusionWorkflow::ConditioningFolder,
+                    "Conditioning Folder",
+                );
+            });
+            ui.add_space(6.0);
+
+            egui::Grid::new("diffusion_paths")
+                .num_columns(3)
+                .spacing([8.0, 6.0])
+                .show(ui, |ui| {
+                    path_row(
+                        ui,
+                        "Terrain Diffusion repo",
+                        &mut state.repo_path,
+                        "Path to the terrain-diffusion checkout",
+                        &mut pick_target,
+                        Some(DiffusionPickTarget::RepoPath),
+                        !running,
+                    );
+                    text_row(
+                        ui,
+                        "Python executable",
+                        &mut state.python_bin,
+                        "python3 or path to a venv Python with torch + deps",
+                        !running,
+                    );
+                    path_row(
+                        ui,
+                        "Work directory",
+                        &mut state.working_dir,
+                        "Temporary TIFFs and generated GeoTIFFs",
+                        &mut pick_target,
+                        Some(DiffusionPickTarget::WorkingDir),
+                        !running,
+                    );
+                    path_row(
+                        ui,
+                        "Tile output",
+                        &mut state.tile_output_dir,
+                        "Baked landscape tile hierarchy",
+                        &mut pick_target,
+                        Some(DiffusionPickTarget::TileOutputDir),
+                        !running,
+                    );
+                    match state.workflow {
+                        DiffusionWorkflow::AzgaarJson => {
+                            path_row(
+                                ui,
+                                "Azgaar full JSON",
+                                &mut state.azgaar_json_path,
+                                "Tools -> Export -> Export To JSON -> Full",
+                                &mut pick_target,
+                                Some(DiffusionPickTarget::AzgaarJson),
+                                !running,
+                            );
+                        }
+                        DiffusionWorkflow::ConditioningFolder => {
+                            path_row(
+                                ui,
+                                "Conditioning folder",
+                                &mut state.conditioning_dir,
+                                "Folder with heightmap.tif / temperature.tif / ...",
+                                &mut pick_target,
+                                Some(DiffusionPickTarget::ConditioningDir),
+                                !running,
+                            );
+                        }
                     }
                 });
-            });
-            ui.end_row();
+
+            ui.add_space(8.0);
+            ui.heading("Model & Scale");
+            ui.separator();
+
+            egui::Grid::new("diffusion_model")
+                .num_columns(2)
+                .spacing([8.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Model");
+                    ui.horizontal(|ui| {
+                        ui.add_enabled_ui(!running, |ui| {
+                            ui.text_edit_singleline(&mut state.model_path);
+                            if ui.small_button("30m").clicked() {
+                                state.model_path = "xandergos/terrain-diffusion-30m".into();
+                                state.world_scale = 30.0;
+                                state.conditioning_scale_km = 7.7;
+                            }
+                            if ui.small_button("90m").clicked() {
+                                state.model_path = "xandergos/terrain-diffusion-90m".into();
+                                state.world_scale = 90.0;
+                                state.conditioning_scale_km = 23.0;
+                            }
+                        });
+                    });
+                    ui.end_row();
 
             ui.label("Azgaar scale (km/px)")
                 .on_hover_text(
@@ -526,65 +843,112 @@ pub(crate) fn draw_diffusion_tab(ui: &mut egui::Ui, state: &mut DiffusionPanelSt
                     if raster_size.is_some() {
                         let (response, painter) = ui.allocate_painter(
                             egui::vec2(preview_w, preview_h),
-                            if running { egui::Sense::hover() } else { egui::Sense::click_and_drag() },
+                            if running {
+                                egui::Sense::hover()
+                            } else {
+                                egui::Sense::click_and_drag()
+                            },
                         );
                         let rect = response.rect;
+
+                        if !running {
+                            if let Some(pos) = response.interact_pointer_pos() {
+                                state.azgaar_center_x =
+                                    ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                                state.azgaar_center_y =
+                                    ((pos.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
+                            }
+                        }
+                        let azgaar_crop = compute_azgaar_crop_window(
+                            src_w,
+                            src_h,
+                            state.azgaar_region_cells,
+                            state.azgaar_center_x,
+                            state.azgaar_center_y,
+                        );
 
                         // World background — heightmap texture if loaded, plain rect otherwise.
                         if let Some(tex) = &state.preview_texture {
                             painter.image(
                                 tex.id(),
                                 rect,
-                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                                egui::Rect::from_min_max(
+                                    egui::pos2(0.0, 0.0),
+                                    egui::pos2(1.0, 1.0),
+                                ),
                                 egui::Color32::WHITE,
                             );
                         } else {
                             painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(50, 70, 45));
                         }
                         painter.rect_stroke(
-                            rect, 2.0,
+                            rect,
+                            2.0,
                             egui::Stroke::new(1.0, egui::Color32::from_gray(120)),
                             egui::StrokeKind::Outside,
                         );
 
                         // Crop region overlay.
-                        let crop_frac_w = (state.azgaar_region_cells as f32 / src_w as f32).min(1.0);
-                        let crop_frac_h = (state.azgaar_region_cells as f32 / src_h as f32).min(1.0);
-                        let cx = rect.left() + state.azgaar_center_x * rect.width();
-                        let cy = rect.top() + state.azgaar_center_y * rect.height();
-                        let hw = crop_frac_w * rect.width() * 0.5;
-                        let hh = crop_frac_h * rect.height() * 0.5;
-                        let crop_rect = egui::Rect::from_min_max(
-                            egui::pos2((cx - hw).max(rect.left()), (cy - hh).max(rect.top())),
-                            egui::pos2((cx + hw).min(rect.right()), (cy + hh).min(rect.bottom())),
+                        let crop_rect = azgaar_crop.map(|crop| crop.preview_rect(rect));
+                        let crop_area_fraction = azgaar_crop.map(|crop| crop.area_fraction());
+                        if let Some(crop_rect) = crop_rect {
+                            painter.rect_filled(
+                                crop_rect,
+                                0.0,
+                                egui::Color32::from_rgba_premultiplied(255, 200, 50, 70),
+                            );
+                            painter.rect_stroke(
+                                crop_rect,
+                                0.0,
+                                egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 220, 50)),
+                                egui::StrokeKind::Outside,
+                            );
+                        }
+
+                        ui.add_space(6.0);
+                        ui.label("Selected region preview");
+                        let (zoom_response, zoom_painter) = ui.allocate_painter(
+                            egui::vec2(preview_w, preview_w),
+                            egui::Sense::hover(),
                         );
-                        painter.rect_filled(
-                            crop_rect, 0.0,
-                            egui::Color32::from_rgba_premultiplied(255, 200, 50, 70),
-                        );
-                        painter.rect_stroke(
-                            crop_rect, 0.0,
-                            egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 220, 50)),
+                        let zoom_rect = zoom_response.rect;
+                        if let (Some(tex), Some(crop)) = (&state.preview_texture, azgaar_crop) {
+                            zoom_painter.image(
+                                tex.id(),
+                                zoom_rect,
+                                crop.uv_rect(),
+                                egui::Color32::WHITE,
+                            );
+                        } else {
+                            zoom_painter.rect_filled(
+                                zoom_rect,
+                                2.0,
+                                egui::Color32::from_rgb(50, 70, 45),
+                            );
+                        }
+                        zoom_painter.rect_stroke(
+                            zoom_rect,
+                            2.0,
+                            egui::Stroke::new(1.0, egui::Color32::from_gray(120)),
                             egui::StrokeKind::Outside,
                         );
 
-                        // Click/drag to set center.
-                        if !running {
-                            if let Some(pos) = response.interact_pointer_pos() {
-                                state.azgaar_center_x = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                                state.azgaar_center_y = ((pos.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
-                            }
-                        }
-
                         // Coverage info below the map.
-                        let coverage = crop_frac_w.min(crop_frac_h / (src_h as f32 / src_w as f32));
-                        let coverage_area = (crop_frac_w * crop_frac_h * 100.0).min(100.0);
+                        let coverage_area = crop_area_fraction.unwrap_or(0.0) * 100.0;
                         ui.label(format!(
                             "{src_w}×{src_h} source  |  {:.0}×{:.0} km crop  |  {coverage_area:.1}% area",
-                            state.azgaar_region_cells as f32 * state.conditioning_scale_km,
-                            state.azgaar_region_cells as f32 * state.conditioning_scale_km,
+                            effective_region_cells as f32 * state.conditioning_scale_km,
+                            effective_region_cells as f32 * state.conditioning_scale_km,
                         ));
-                        let _ = coverage;
+                        if effective_region_cells != state.azgaar_region_cells {
+                            ui.small(format!(
+                                "Requested {} cells, clamped to {} to fit the current {}×{} source.",
+                                state.azgaar_region_cells,
+                                effective_region_cells,
+                                src_w,
+                                src_h,
+                            ));
+                        }
                     } else {
                         ui.label("(run once to see world preview)");
                     }
@@ -592,47 +956,96 @@ pub(crate) fn draw_diffusion_tab(ui: &mut egui::Ui, state: &mut DiffusionPanelSt
                     // Whole World button: fill the available cells with the largest square.
                     if !running {
                         if let Some((w, h)) = raster_size {
-                            let max_dim = w.min(h);
-                            let max_cells = 1u32 << (32 - max_dim.leading_zeros() - 1); // next lower PoT
-                            let whole_cells = AZGAAR_REGION_CELL_OPTIONS
+                            let max_cells = max_azgaar_crop_side(w, h).unwrap_or(0);
+                            if let Some(whole_cells) = AZGAAR_REGION_CELL_OPTIONS
                                 .iter()
                                 .copied()
                                 .filter(|&c| c <= max_cells)
                                 .last()
-                                .unwrap_or(4);
-                            if ui
-                                .button(format!("⛶ Whole World ({whole_cells} cells)"))
-                                .on_hover_text("Center crop and set cells to the largest available square covering the full world.")
-                                .clicked()
                             {
-                                state.azgaar_region_cells = whole_cells;
-                                state.azgaar_center_x = 0.5;
-                                state.azgaar_center_y = 0.5;
+                                if ui
+                                    .button(format!("⛶ Whole World ({whole_cells} cells)"))
+                                    .on_hover_text("Center crop and set cells to the largest available square covering the full world.")
+                                    .clicked()
+                                {
+                                    state.azgaar_region_cells = whole_cells;
+                                    state.azgaar_center_x = 0.5;
+                                    state.azgaar_center_y = 0.5;
+                                }
                             }
                         }
+                    }
+
+                    let preview_mode = azgaar_crop.map(generated_preview_mode_for_crop);
+                    let preview_key = build_preview_key(
+                        &build_job_config(state),
+                        state.conditioning_raster_size,
+                        azgaar_crop,
+                        preview_mode,
+                    );
+                    let preview_is_current =
+                        state.generated_preview_key.as_deref() == Some(preview_key.as_str());
+
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                !state.is_busy(),
+                                egui::Button::new("Generate Selected Diffusion Preview"),
+                            )
+                            .clicked()
+                        {
+                            preview_requested = true;
+                        }
+                        if preview_is_current {
+                            ui.small("Generated previews match the current region.");
+                        } else if state.generated_preview_key.is_some() {
+                            ui.small("Generated previews are stale for the current region/settings.");
+                        }
+                    });
+
+                    if let Some(tex) = &state.generated_overview_texture {
+                        let size = tex.size_vec2();
+                        let aspect = (size.x / size.y).max(0.01);
+                        let display_size =
+                            egui::vec2(preview_w, (preview_w / aspect).clamp(40.0, 180.0));
+                        ui.add_space(4.0);
+                        ui.label("Generated world overview");
+                        ui.add(egui::Image::new((tex.id(), display_size)));
+                    }
+
+                    if let Some(tex) = &state.generated_selected_texture {
+                        ui.add_space(6.0);
+                        ui.label(
+                            state
+                                .generated_selected_mode
+                                .unwrap_or(GeneratedPreviewMode::Coarse)
+                                .label(),
+                        );
+                        ui.add(egui::Image::new((tex.id(), egui::vec2(preview_w, preview_w))));
                     }
                 });
                 ui.end_row();
 
-                ui.label("Approx region span");
+                ui.label("Selected region span");
                 ui.label(format!(
                     "{:.1} km/side",
-                    state.azgaar_region_cells as f32 * state.conditioning_scale_km
+                    effective_region_cells as f32 * state.conditioning_scale_km
                 ));
                 ui.end_row();
 
                 ui.label("Generated raster");
                 ui.label(format!(
                     "{} x {} px",
-                    state.azgaar_region_cells * 256,
-                    state.azgaar_region_cells * 256
+                    effective_region_cells * 256,
+                    effective_region_cells * 256
                 ));
                 ui.end_row();
 
                 ui.label("Loaded terrain span");
                 ui.label(format!(
                     "{:.1} km/side",
-                    state.azgaar_region_cells as f32 * 256.0 * state.world_scale / 1000.0
+                    effective_region_cells as f32 * 256.0 * state.world_scale / 1000.0
                 ));
                 ui.end_row();
 
@@ -688,118 +1101,122 @@ pub(crate) fn draw_diffusion_tab(ui: &mut egui::Ui, state: &mut DiffusionPanelSt
                     .range(0.0..=10.0),
             );
             ui.end_row();
-        });
-
-    ui.add_space(8.0);
-    ui.heading("Runtime");
-    ui.separator();
-
-    egui::Grid::new("diffusion_runtime")
-        .num_columns(2)
-        .spacing([8.0, 6.0])
-        .show(ui, |ui| {
-            ui.label("Device")
-                .on_hover_text("For ROCm-backed PyTorch, use Auto or GPU. PyTorch exposes ROCm through the `cuda` device string.");
-            egui::ComboBox::from_id_salt("diffusion_device")
-                .selected_text(state.device.label())
-                .show_ui(ui, |ui| {
-                    ui.add_enabled_ui(!running, |ui| {
-                        ui.selectable_value(&mut state.device, DiffusionDevice::Auto, DiffusionDevice::Auto.label());
-                        ui.selectable_value(&mut state.device, DiffusionDevice::Gpu, DiffusionDevice::Gpu.label());
-                        ui.selectable_value(&mut state.device, DiffusionDevice::Cpu, DiffusionDevice::Cpu.label());
-                    });
                 });
-            ui.end_row();
 
-            ui.label("Dtype");
-            egui::ComboBox::from_id_salt("diffusion_dtype")
-                .selected_text(state.dtype.label())
-                .show_ui(ui, |ui| {
+            ui.add_space(8.0);
+            ui.heading("Runtime");
+            ui.separator();
+
+            egui::Grid::new("diffusion_runtime")
+                .num_columns(2)
+                .spacing([8.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Device")
+                        .on_hover_text("For ROCm-backed PyTorch, use Auto or GPU. PyTorch exposes ROCm through the `cuda` device string.");
+                    egui::ComboBox::from_id_salt("diffusion_device")
+                        .selected_text(state.device.label())
+                        .show_ui(ui, |ui| {
+                            ui.add_enabled_ui(!running, |ui| {
+                                ui.selectable_value(&mut state.device, DiffusionDevice::Auto, DiffusionDevice::Auto.label());
+                                ui.selectable_value(&mut state.device, DiffusionDevice::Gpu, DiffusionDevice::Gpu.label());
+                                ui.selectable_value(&mut state.device, DiffusionDevice::Cpu, DiffusionDevice::Cpu.label());
+                            });
+                        });
+                    ui.end_row();
+
+                    ui.label("Dtype");
+                    egui::ComboBox::from_id_salt("diffusion_dtype")
+                        .selected_text(state.dtype.label())
+                        .show_ui(ui, |ui| {
+                            ui.add_enabled_ui(!running, |ui| {
+                                ui.selectable_value(&mut state.dtype, DiffusionDtype::Fp32, "fp32");
+                                ui.selectable_value(&mut state.dtype, DiffusionDtype::Bf16, "bf16");
+                                ui.selectable_value(&mut state.dtype, DiffusionDtype::Fp16, "fp16");
+                            });
+                        });
+                    ui.end_row();
+
+                    text_grid_row(ui, "Seed", &mut state.seed, "Optional", !running);
+                    text_grid_row(
+                        ui,
+                        "Batch sizes",
+                        &mut state.batch_size,
+                        "Example: 1,2,4,8",
+                        !running,
+                    );
+                    text_grid_row(
+                        ui,
+                        "Cache size",
+                        &mut state.cache_size,
+                        "Example: 1G",
+                        !running,
+                    );
+                    text_grid_row(
+                        ui,
+                        "SNR",
+                        &mut state.snr,
+                        "0.2,0.2,1.0,0.2,1.0",
+                        !running,
+                    );
+                    text_grid_row(
+                        ui,
+                        "Extra env",
+                        &mut state.extra_env,
+                        "HSA_OVERRIDE_GFX_VERSION=11.0.0",
+                        !running,
+                    );
+
+                    ui.label("torch.compile");
                     ui.add_enabled_ui(!running, |ui| {
-                        ui.selectable_value(&mut state.dtype, DiffusionDtype::Fp32, "fp32");
-                        ui.selectable_value(&mut state.dtype, DiffusionDtype::Bf16, "bf16");
-                        ui.selectable_value(&mut state.dtype, DiffusionDtype::Fp16, "fp16");
+                        ui.checkbox(&mut state.use_compile, "")
+                            .on_hover_text("Leave disabled for the safest first pass on ROCm.");
                     });
+                    ui.end_row();
                 });
-            ui.end_row();
 
-            text_grid_row(ui, "Seed", &mut state.seed, "Optional", !running);
-            text_grid_row(
-                ui,
-                "Batch sizes",
-                &mut state.batch_size,
-                "Example: 1,2,4,8",
-                !running,
-            );
-            text_grid_row(
-                ui,
-                "Cache size",
-                &mut state.cache_size,
-                "Example: 1G",
-                !running,
-            );
-            text_grid_row(
-                ui,
-                "SNR",
-                &mut state.snr,
-                "0.2,0.2,1.0,0.2,1.0",
-                !running,
-            );
-            text_grid_row(
-                ui,
-                "Extra env",
-                &mut state.extra_env,
-                "HSA_OVERRIDE_GFX_VERSION=11.0.0",
-                !running,
-            );
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let can_start = !state.is_busy();
+                if ui
+                    .add_enabled(can_start, egui::Button::new("Probe Runtime"))
+                    .clicked()
+                {
+                    probe_requested = true;
+                }
 
-            ui.label("torch.compile");
-            ui.add_enabled_ui(!running, |ui| {
-                ui.checkbox(&mut state.use_compile, "")
-                    .on_hover_text("Leave disabled for the safest first pass on ROCm.");
+                if ui
+                    .add_enabled(can_start, egui::Button::new("Generate & Load"))
+                    .clicked()
+                {
+                    start_requested = true;
+                }
+
+                if matches!(
+                    state.run_state,
+                    DiffusionRunState::Running { finished: true, .. }
+                ) && ui.button("Clear Log").clicked()
+                {
+                    clear_requested = true;
+                }
             });
-            ui.end_row();
+
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(
+                    "This first integration pass runs the upstream CLI in the background, then bakes the generated GeoTIFF into the existing landscape tile format.",
+                )
+                .small()
+                .color(egui::Color32::GRAY),
+            );
         });
-
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        let can_start = !state.is_busy();
-        if ui
-            .add_enabled(can_start, egui::Button::new("Probe Runtime"))
-            .clicked()
-        {
-            probe_requested = true;
-        }
-
-        if ui
-            .add_enabled(can_start, egui::Button::new("Generate & Load"))
-            .clicked()
-        {
-            start_requested = true;
-        }
-
-        if matches!(
-            state.run_state,
-            DiffusionRunState::Running { finished: true, .. }
-        ) && ui.button("Clear Log").clicked()
-        {
-            clear_requested = true;
-        }
-    });
-
-    ui.add_space(6.0);
-    ui.label(
-        egui::RichText::new(
-            "This first integration pass runs the upstream CLI in the background, then bakes the generated GeoTIFF into the existing landscape tile format.",
-        )
-        .small()
-        .color(egui::Color32::GRAY),
-    );
 
     draw_run_log(ui, state);
 
     if let Some(target) = pick_target {
         spawn_file_picker(state, target);
+    }
+    if preview_requested {
+        start_preview(state);
     }
     if probe_requested {
         start_probe(state);
@@ -813,19 +1230,29 @@ pub(crate) fn draw_diffusion_tab(ui: &mut egui::Ui, state: &mut DiffusionPanelSt
 }
 
 fn draw_run_log(ui: &mut egui::Ui, state: &DiffusionPanelState) {
-    let Some((kind, finished, error, reloaded, log_lines, progress, stage)) = (match &state.run_state {
-        DiffusionRunState::Running {
-            kind,
-            finished,
-            error,
-            reloaded,
-            log_lines,
-            progress,
-            stage,
-            ..
-        } => Some((*kind, *finished, error.as_ref(), *reloaded, log_lines, *progress, stage.as_str())),
-        _ => None,
-    }) else {
+    let Some((kind, finished, error, reloaded, log_lines, progress, stage)) =
+        (match &state.run_state {
+            DiffusionRunState::Running {
+                kind,
+                finished,
+                error,
+                reloaded,
+                log_lines,
+                progress,
+                stage,
+                ..
+            } => Some((
+                *kind,
+                *finished,
+                error.as_ref(),
+                *reloaded,
+                log_lines,
+                *progress,
+                stage.as_str(),
+            )),
+            _ => None,
+        })
+    else {
         return;
     };
 
@@ -836,7 +1263,11 @@ fn draw_run_log(ui: &mut egui::Ui, state: &DiffusionPanelState) {
     if !finished {
         ui.horizontal(|ui| {
             ui.spinner();
-            ui.label(if stage.is_empty() { kind.running_label() } else { stage });
+            ui.label(if stage.is_empty() {
+                kind.running_label()
+            } else {
+                stage
+            });
         });
         // Progress bar — only show once there's meaningful progress.
         if progress > 0.01 {
@@ -866,6 +1297,8 @@ fn draw_run_log(ui: &mut egui::Ui, state: &DiffusionPanelState) {
                 .small()
                 .color(egui::Color32::GRAY),
         );
+    } else if kind == DiffusionRunKind::Preview {
+        ui.colored_label(egui::Color32::GREEN, "Diffusion previews are ready.");
     } else if kind == DiffusionRunKind::Probe {
         ui.colored_label(egui::Color32::GREEN, "Diffusion runtime probe succeeded.");
     } else {
@@ -873,7 +1306,11 @@ fn draw_run_log(ui: &mut egui::Ui, state: &DiffusionPanelState) {
     }
 
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Log").small().color(egui::Color32::GRAY));
+        ui.label(
+            egui::RichText::new("Log")
+                .small()
+                .color(egui::Color32::GRAY),
+        );
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.small_button("📋 Copy log").clicked() {
                 ui.ctx().output_mut(|o| {
@@ -928,6 +1365,34 @@ fn start_run(state: &mut DiffusionPanelState) {
     };
     // Force texture reload after run completes.
     state.preview_loaded_for = None;
+}
+
+fn start_preview(state: &mut DiffusionPanelState) {
+    if state.is_busy() {
+        return;
+    }
+
+    if let Err(err) = validate_preview_settings(state) {
+        set_finished_error(state, DiffusionRunKind::Preview, err);
+        return;
+    }
+
+    let config = build_job_config(state);
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || run_preview(config, tx));
+
+    state.run_state = DiffusionRunState::Running {
+        kind: DiffusionRunKind::Preview,
+        log_lines: Vec::new(),
+        rx: Mutex::new(rx),
+        finished: false,
+        error: None,
+        reloaded: false,
+        progress: 0.0,
+        stage: "Preparing previews…".into(),
+    };
+    state.preview_loaded_for = None;
+    state.preview_texture = None;
 }
 
 fn start_probe(state: &mut DiffusionPanelState) {
@@ -1003,6 +1468,37 @@ fn validate_probe_settings(state: &DiffusionPanelState) -> Result<(), String> {
     }
     if state.python_bin.trim().is_empty() {
         return Err("Python executable is required.".into());
+    }
+    Ok(())
+}
+
+fn validate_preview_settings(state: &DiffusionPanelState) -> Result<(), String> {
+    validate_probe_settings(state)?;
+    if state.model_path.trim().is_empty() {
+        return Err("Model path is required.".into());
+    }
+    if state.working_dir.trim().is_empty() {
+        return Err("Work directory is required.".into());
+    }
+    match state.workflow {
+        DiffusionWorkflow::AzgaarJson => {
+            if state.azgaar_json_path.trim().is_empty() {
+                return Err("Azgaar full JSON export path is required.".into());
+            }
+            if !AZGAAR_REGION_CELL_OPTIONS.contains(&state.azgaar_region_cells) {
+                return Err(format!(
+                    "Azgaar region must be one of {} cells per side.",
+                    AZGAAR_REGION_CELL_OPTIONS
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+        DiffusionWorkflow::ConditioningFolder => {
+            return Err("Generated diffusion previews are currently implemented for Azgaar JSON workflow only.".into());
+        }
     }
     Ok(())
 }
@@ -1127,12 +1623,12 @@ fn update_progress_from_log(line: &str, progress: &mut f32, stage: &mut String) 
             // Map within-stage percentage to the overall pipeline range.
             let new_p = if stage.starts_with("Baking") {
                 // Bake is roughly 80..100% of the overall pipeline.
-                0.80 + pct * 0.002  // 0.80 + (pct/100)*0.20
+                0.80 + pct * 0.002 // 0.80 + (pct/100)*0.20
             } else if stage.starts_with("AI") {
                 // Inference is roughly 20..80%.
-                0.20 + pct * 0.006  // 0.20 + (pct/100)*0.60
+                0.20 + pct * 0.006 // 0.20 + (pct/100)*0.60
             } else {
-                *progress  // don't regress for other stages
+                *progress // don't regress for other stages
             };
             if new_p > *progress {
                 *progress = new_p.min(0.99);
@@ -1142,7 +1638,8 @@ fn update_progress_from_log(line: &str, progress: &mut f32, stage: &mut String) 
 }
 
 /// Parse "Output shape: WxH" from a line of azgaar-to-tiff output.
-fn parse_output_shape(line: &str) -> Option<(u32, u32)> {    let idx = line.find("Output shape: ")?;
+fn parse_output_shape(line: &str) -> Option<(u32, u32)> {
+    let idx = line.find("Output shape: ")?;
     let rest = &line[idx + "Output shape: ".len()..];
     let (w_str, rest) = rest.split_once('x')?;
     let h_str = rest.split_ascii_whitespace().next()?;
@@ -1159,12 +1656,12 @@ fn terrain_color_ramp(g: u8) -> egui::Color32 {
     let t = g as f32 / 255.0;
     // Colour stops: (threshold, R, G, B)
     const STOPS: &[(f32, u8, u8, u8)] = &[
-        (0.00,  10,  20, 100), // deep ocean
-        (0.30,  30,  80, 180), // shallow
+        (0.00, 10, 20, 100),   // deep ocean
+        (0.30, 30, 80, 180),   // shallow
         (0.38, 180, 175, 120), // beach
-        (0.42,  60, 130,  40), // lowland green
-        (0.60,  80, 100,  50), // highland
-        (0.75, 100,  90,  70), // rocky
+        (0.42, 60, 130, 40),   // lowland green
+        (0.60, 80, 100, 50),   // highland
+        (0.75, 100, 90, 70),   // rocky
         (0.88, 220, 220, 215), // high snow
         (1.00, 255, 255, 255), // peak
     ];
@@ -1183,7 +1680,8 @@ fn terrain_color_ramp(g: u8) -> egui::Color32 {
     egui::Color32::from_rgb(lerp(lo.1, hi.1), lerp(lo.2, hi.2), lerp(lo.3, hi.3))
 }
 
-fn probe_conditioning_tiff_size(conditioning_dir: &str) -> Option<(u32, u32)> {    let path = PathBuf::from(conditioning_dir).join("heightmap.tif");
+fn probe_conditioning_tiff_size(conditioning_dir: &str) -> Option<(u32, u32)> {
+    let path = PathBuf::from(conditioning_dir).join("heightmap.tif");
     if !path.exists() {
         return None;
     }
@@ -1208,7 +1706,13 @@ fn poll_run(
         match msg {
             None => break,
             Some(DiffusionMsg::Log(line)) => {
-                if let DiffusionRunState::Running { log_lines, progress, stage, .. } = &mut state.run_state {
+                if let DiffusionRunState::Running {
+                    log_lines,
+                    progress,
+                    stage,
+                    ..
+                } = &mut state.run_state
+                {
                     update_progress_from_log(&line, progress, stage);
                     log_lines.push(line);
                 }
@@ -1248,6 +1752,19 @@ fn poll_run(
                                 *stage = "Done".into();
                             }
                         }
+                        Ok(DiffusionOutcome::Previewed(artifacts)) => {
+                            log_lines.push("✓ Diffusion selected preview generated.".into());
+                            *progress = 1.0;
+                            *stage = "Done".into();
+                            state.generated_overview_image = artifacts.overview_image;
+                            state.generated_selected_image = Some(artifacts.selected_image);
+                            state.generated_selected_mode = Some(artifacts.selected_mode);
+                            state.generated_preview_key = Some(artifacts.preview_key);
+                            state.generated_preview_revision =
+                                state.generated_preview_revision.wrapping_add(1);
+                            state.generated_overview_texture = None;
+                            state.generated_selected_texture = None;
+                        }
                         Err(err) => {
                             log_lines.push(format!("✗ {err}"));
                             *error = Some(err);
@@ -1256,9 +1773,13 @@ fn poll_run(
                     *finished = true;
                 }
                 // After marking done, try to extract conditioning raster size from log.
-                if let DiffusionRunState::Running { log_lines, error, .. } = &state.run_state {
+                if let DiffusionRunState::Running {
+                    log_lines, error, ..
+                } = &state.run_state
+                {
                     if error.is_none() {
-                        if let Some(sz) = log_lines.iter().rev().find_map(|l| parse_output_shape(l)) {
+                        if let Some(sz) = log_lines.iter().rev().find_map(|l| parse_output_shape(l))
+                        {
                             state.conditioning_raster_size = Some(sz);
                         }
                     }
@@ -1307,6 +1828,11 @@ fn run_pipeline(config: DiffusionJobConfig, tx: mpsc::Sender<DiffusionMsg>) {
 
 fn run_probe(config: DiffusionJobConfig, tx: mpsc::Sender<DiffusionMsg>) {
     let result = run_probe_inner(&config, &tx).map(|()| DiffusionOutcome::Probed);
+    let _ = tx.send(DiffusionMsg::Done(result));
+}
+
+fn run_preview(config: DiffusionJobConfig, tx: mpsc::Sender<DiffusionMsg>) {
+    let result = run_preview_inner(&config, &tx).map(DiffusionOutcome::Previewed);
     let _ = tx.send(DiffusionMsg::Done(result));
 }
 
@@ -1389,6 +1915,103 @@ fn run_probe_inner(
     Ok(())
 }
 
+fn run_preview_inner(
+    config: &DiffusionJobConfig,
+    tx: &mpsc::Sender<DiffusionMsg>,
+) -> Result<DiffusionPreviewArtifacts, String> {
+    let repo_path = PathBuf::from(&config.repo_path);
+    if !repo_path.exists() {
+        return Err(format!(
+            "Terrain Diffusion repo not found: {}",
+            repo_path.display()
+        ));
+    }
+
+    let working_dir = PathBuf::from(&config.working_dir);
+    std::fs::create_dir_all(&working_dir).map_err(|e| {
+        format!(
+            "Failed to create work directory {}: {e}",
+            working_dir.display()
+        )
+    })?;
+    let working_dir = working_dir.canonicalize().map_err(|e| {
+        format!(
+            "Failed to resolve work directory {}: {e}",
+            working_dir.display()
+        )
+    })?;
+
+    let conditioning_dir = working_dir.join("conditioning");
+    match config.workflow {
+        DiffusionWorkflow::AzgaarJson => {
+            ensure_preview_azgaar_conditioning(config, &repo_path, &conditioning_dir, tx)?;
+        }
+        DiffusionWorkflow::ConditioningFolder => {
+            return Err(
+                "Generated diffusion previews are currently implemented for Azgaar JSON workflow only."
+                    .into(),
+            );
+        }
+    }
+
+    let conditioning_dir_str = conditioning_dir.to_string_lossy().into_owned();
+    let Some((source_width, source_height)) = probe_conditioning_tiff_size(&conditioning_dir_str)
+    else {
+        return Err(format!(
+            "Failed to read conditioning TIFF dimensions from {}",
+            conditioning_dir.display()
+        ));
+    };
+    let crop = compute_azgaar_crop_window(
+        source_width,
+        source_height,
+        config.azgaar_region_cells,
+        config.azgaar_center_x,
+        config.azgaar_center_y,
+    )
+    .ok_or_else(|| {
+        format!(
+            "Conditioning TIFF dimensions are invalid for preview: {}x{}",
+            source_width, source_height
+        )
+    })?;
+    let selected_mode = generated_preview_mode_for_crop(crop);
+
+    let preview_dir = working_dir.join("preview");
+    std::fs::create_dir_all(&preview_dir).map_err(|e| {
+        format!(
+            "Failed to create preview directory {}: {e}",
+            preview_dir.display()
+        )
+    })?;
+    let selected_image = preview_dir.join("generated_selected.png");
+
+    send_log(
+        tx,
+        "Generating fast diffusion preview for the selected region…",
+    );
+    run_preview_command(
+        config,
+        &repo_path,
+        &conditioning_dir,
+        crop,
+        &selected_image,
+        tx,
+    )?;
+
+    Ok(DiffusionPreviewArtifacts {
+        overview_image: None,
+        selected_image,
+        selected_mode,
+        preview_key: build_preview_key(
+            config,
+            Some((source_width, source_height)),
+            Some(crop),
+            Some(selected_mode),
+        ),
+    })
+}
+
 fn run_pipeline_inner(
     config: &DiffusionJobConfig,
     tx: &mpsc::Sender<DiffusionMsg>,
@@ -1430,11 +2053,9 @@ fn run_pipeline_inner(
 
     let conditioning_dir = match config.workflow {
         DiffusionWorkflow::AzgaarJson => working_dir.join("conditioning"),
-        DiffusionWorkflow::ConditioningFolder => {
-            PathBuf::from(&config.conditioning_dir)
-                .canonicalize()
-                .unwrap_or_else(|_| PathBuf::from(&config.conditioning_dir))
-        }
+        DiffusionWorkflow::ConditioningFolder => PathBuf::from(&config.conditioning_dir)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(&config.conditioning_dir)),
     };
     let cropped_conditioning_dir = working_dir.join("conditioning_region");
     let generated_tiff = working_dir.join("generated_heightmap.tif");
@@ -1607,6 +2228,169 @@ fn run_logged_command(
         ));
     }
     Ok(())
+}
+
+fn run_preview_command(
+    config: &DiffusionJobConfig,
+    repo_path: &Path,
+    conditioning_dir: &Path,
+    crop: AzgaarCropWindow,
+    selected_image: &Path,
+    tx: &mpsc::Sender<DiffusionMsg>,
+) -> Result<(), String> {
+    let script = r#"
+import math
+import sys
+from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import rasterio
+import torch
+
+from terrain_diffusion.common.cli_helpers import parse_cache_size
+from terrain_diffusion.inference.relief_map import get_relief_map
+from terrain_diffusion.inference.tiff_export import CHANNEL_FILES, PADDING, _load_and_pad
+from terrain_diffusion.inference.world_pipeline import WorldPipeline
+from terrain_diffusion.models.edm_unet import EDMUnet2D
+
+
+def downsample_mean(arr: np.ndarray, stride: int) -> np.ndarray:
+    if stride <= 1:
+        return np.asarray(arr, dtype=np.float32)
+    tensor = torch.from_numpy(np.asarray(arr, dtype=np.float32))[None, None]
+    return torch.nn.functional.avg_pool2d(
+        tensor,
+        kernel_size=stride,
+        stride=stride,
+        ceil_mode=True,
+    )[0, 0].cpu().numpy()
+
+
+def save_relief(arr: np.ndarray, resolution_m: float, out_path: Path, relief: float) -> None:
+    rgb = get_relief_map(arr, None, None, None, resolution=resolution_m, relief=relief)
+    plt.imsave(out_path, np.clip(rgb, 0.0, 1.0))
+
+
+def upsample_preview(arr: np.ndarray, target_side: int) -> tuple[np.ndarray, float]:
+    longest = max(arr.shape)
+    if longest >= target_side:
+        return arr, 1.0
+    scale = target_side / longest
+    out_h = max(1, int(round(arr.shape[0] * scale)))
+    out_w = max(1, int(round(arr.shape[1] * scale)))
+    tensor = torch.from_numpy(np.asarray(arr, dtype=np.float32))[None, None]
+    upsampled = torch.nn.functional.interpolate(
+        tensor,
+        size=(out_h, out_w),
+        mode="bilinear",
+        align_corners=False,
+    )[0, 0].cpu().numpy()
+    return upsampled, scale
+
+
+conditioning_dir = Path(sys.argv[1])
+selected_image = Path(sys.argv[2])
+model_path = sys.argv[3]
+snr = sys.argv[4]
+batch_size = sys.argv[5]
+cache_size = sys.argv[6]
+seed = None if sys.argv[7] == "" else int(sys.argv[7])
+device = None if sys.argv[8] == "" else sys.argv[8]
+dtype = None if sys.argv[9] == "fp32" else sys.argv[9]
+selected_max_side = max(1, int(sys.argv[10]))
+crop_x0 = int(sys.argv[11])
+crop_y0 = int(sys.argv[12])
+crop_side = int(sys.argv[13])
+conditioning_scale_km = float(sys.argv[14])
+
+if device is None:
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+batch_sizes = [int(x) for x in batch_size.split(",")] if "," in batch_size else int(batch_size)
+world_config = {
+    **WorldPipeline.load_config(model_path),
+    "seed": seed,
+    "latents_batch_size": batch_sizes,
+    "log_mode": "info",
+    "torch_compile": False,
+    "dtype": dtype,
+    "caching_strategy": "direct",
+    "cache_limit": parse_cache_size(cache_size),
+}
+world = WorldPipeline(**world_config)
+world.coarse_model = EDMUnet2D.from_pretrained(model_path, subfolder=WorldPipeline.COARSE_MODEL_FOLDER)
+world._apply_dtype_and_compile()
+world.to(device)
+
+if snr:
+    snr_vals = [float(x.strip()) for x in snr.split(",")]
+    world.set_cond_snr(snr_vals)
+
+src_h = src_w = None
+for filename, channel, internal_scale, default_value in CHANNEL_FILES:
+    path = conditioning_dir / filename
+    if not path.exists():
+        continue
+    with rasterio.open(path) as ds:
+        if src_h is None:
+            src_h, src_w = ds.height, ds.width
+    padded = _load_and_pad(path, channel, internal_scale, default_value)
+    world.set_custom_conditioning_import(channel, padded, 0, 0, default_value=default_value)
+
+if src_h is None or src_w is None:
+    raise RuntimeError(f"No conditioning TIFFs found in {conditioning_dir}")
+
+world._init_tile_store(None, None, None, None)
+world._init_conditioning()
+world.coarse = world._build_coarse_stage()
+
+with world:
+    ci0, ci1 = PADDING + crop_y0, PADDING + crop_y0 + crop_side
+    cj0, cj1 = PADDING + crop_x0, PADDING + crop_x0 + crop_side
+    coarse_raw = world.coarse[:, ci0:ci1, cj0:cj1]
+    coarse_elev = (coarse_raw[:-1] / (coarse_raw[-1:] + 1e-8))[0].detach().cpu().numpy()
+    coarse_elev = np.sign(coarse_elev) * np.square(coarse_elev)
+
+    crop_stride = max(1, math.ceil(max(coarse_elev.shape) / selected_max_side))
+    selected_preview = downsample_mean(coarse_elev, crop_stride)
+    selected_resolution = conditioning_scale_km * 1000.0 * crop_stride
+    target_side = min(selected_max_side, max(256, max(selected_preview.shape)))
+    selected_preview, display_scale = upsample_preview(selected_preview, target_side)
+    selected_resolution /= display_scale
+    print(
+        f"Generated selected coarse preview from coarse field {coarse_elev.shape[1]}x{coarse_elev.shape[0]} "
+        f"-> {selected_preview.shape[1]}x{selected_preview.shape[0]} stride={crop_stride}"
+    )
+
+    save_relief(selected_preview, selected_resolution, selected_image, relief=1.0)
+"#;
+
+    let args = vec![
+        "-c".to_string(),
+        script.to_string(),
+        conditioning_dir.display().to_string(),
+        selected_image.display().to_string(),
+        config.model_path.clone(),
+        config.snr.clone(),
+        config.batch_size.clone(),
+        config.cache_size.clone(),
+        config.seed.trim().to_string(),
+        config
+            .device
+            .cli_value()
+            .map(str::to_string)
+            .unwrap_or_default(),
+        config.dtype.label().to_string(),
+        GENERATED_PREVIEW_SELECTED_MAX_SIDE.to_string(),
+        crop.x0.to_string(),
+        crop.y0.to_string(),
+        crop.side.to_string(),
+        format!("{:.6}", config.conditioning_scale_km),
+    ];
+    run_logged_command(&config.python_bin, &args, repo_path, &config.extra_env, tx)
 }
 
 fn validate_synthetic_climate_assets(repo_path: &Path) -> Result<(), String> {
