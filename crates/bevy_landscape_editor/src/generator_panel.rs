@@ -1,13 +1,15 @@
 use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 use bevy::prelude::*;
-use bevy::winit::{UpdateMode, WinitSettings};
 use bevy_egui::{
     egui::{self, TextureId},
     EguiContexts, EguiPrimaryContextPass,
 };
-use bevy_landscape::{MaterialLibrary, ReloadTerrainRequest, TerrainConfig, TerrainSourceDesc};
+use bevy_landscape::{
+    MaterialLibrary, ReloadTerrainRequest, TerrainConfig, TerrainPatchInstance, TerrainSourceDesc,
+};
+use bevy_landscape_clouds::CloudDisplayLayer;
+use bevy_landscape_water::WaterEnabled;
 use bevy_landscape_generator::{
     export::{GeneratorExportState, StartGeneratorExport},
     GeneratorErosionBuffers, GeneratorErosionControlState, GeneratorErosionParams, GeneratorParams,
@@ -64,34 +66,50 @@ impl Default for GeneratorPanelState {
 
 pub(crate) struct GeneratorPanelPlugin;
 
-const DIFFUSION_THROTTLED_FPS: f64 = 5.0;
-
 impl Plugin for GeneratorPanelPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GeneratorPanelState>()
-            .add_systems(Update, update_diffusion_render_throttle)
+            .add_systems(Update, update_diffusion_render_visibility)
             .add_systems(EguiPrimaryContextPass, generator_panel_system);
     }
 }
 
-fn update_diffusion_render_throttle(
+/// During diffusion inference, hide terrain, clouds, and water so the GPU is
+/// free for compute.  Re-shows everything the frame inference stops.
+///
+/// Uses `Local<bool>` to only fire the visibility changes on transitions, not
+/// every frame.  This avoids fighting with other systems that set Visibility.
+fn update_diffusion_render_visibility(
     panel: Res<GeneratorPanelState>,
-    mut winit_settings: ResMut<WinitSettings>,
+    mut last_inference: Local<bool>,
+    mut terrain_q: Query<&mut Visibility, (With<TerrainPatchInstance>, Without<CloudDisplayLayer>)>,
+    mut cloud_q: Query<&mut Visibility, (With<CloudDisplayLayer>, Without<TerrainPatchInstance>)>,
+    mut water_enabled: Option<ResMut<WaterEnabled>>,
 ) {
-    let desired = if panel.diffusion.should_throttle_rendering() {
-        let wait = Duration::from_secs_f64(1.0 / DIFFUSION_THROTTLED_FPS);
-        WinitSettings {
-            focused_mode: UpdateMode::reactive_low_power(wait),
-            unfocused_mode: UpdateMode::reactive_low_power(wait),
-        }
+    let inference = panel.diffusion.should_throttle_rendering();
+    if inference == *last_inference {
+        return;
+    }
+    *last_inference = inference;
+
+    let vis = if inference {
+        Visibility::Hidden
     } else {
-        WinitSettings::game()
+        Visibility::Inherited
     };
 
-    if winit_settings.focused_mode != desired.focused_mode
-        || winit_settings.unfocused_mode != desired.unfocused_mode
-    {
-        *winit_settings = desired;
+    for mut v in &mut terrain_q {
+        *v = vis;
+    }
+    for mut v in &mut cloud_q {
+        *v = vis;
+    }
+    if let Some(ref mut we) = water_enabled {
+        // Only touch WaterEnabled when it actually needs to flip so we don't
+        // clobber a user-initiated F2 toggle.
+        if we.0 == inference {
+            we.0 = !inference;
+        }
     }
 }
 

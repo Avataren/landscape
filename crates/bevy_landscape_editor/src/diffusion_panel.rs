@@ -245,6 +245,10 @@ pub(crate) struct DiffusionPanelState {
     generated_preview_key: Option<String>,
     /// Cache-buster for egui textures when preview files are overwritten.
     generated_preview_revision: u64,
+    /// High-resolution thumbnail of just the selected crop region.
+    crop_preview_texture: Option<egui::TextureHandle>,
+    /// Crop params the thumbnail was built for: (x0, y0, side, src_w, src_h).
+    crop_preview_key: Option<(u32, u32, u32, u32, u32)>,
 }
 
 impl DiffusionPanelState {
@@ -288,6 +292,8 @@ impl DiffusionPanelState {
             generated_selected_mode: None,
             generated_preview_key: None,
             generated_preview_revision: 0,
+            crop_preview_texture: None,
+            crop_preview_key: None,
         }
     }
 
@@ -649,6 +655,54 @@ pub(crate) fn draw_diffusion_tab(ui: &mut egui::Ui, state: &mut DiffusionPanelSt
         .map(|crop| crop.side)
         .unwrap_or(state.azgaar_region_cells);
 
+    // Lazily load a high-resolution crop thumbnail for the selected region.
+    // This is separate from the low-res world thumbnail; it reads only the crop
+    // strips so the zoomed view doesn't look blurry.
+    if let Some(crop) = azgaar_crop {
+        let new_key = (
+            crop.x0,
+            crop.y0,
+            crop.side,
+            crop.source_width,
+            crop.source_height,
+        );
+        if state.crop_preview_key != Some(new_key) {
+            state.crop_preview_texture = None;
+            let tiff_path = match state.workflow {
+                DiffusionWorkflow::AzgaarJson => {
+                    PathBuf::from(&state.working_dir).join("conditioning/heightmap.tif")
+                }
+                DiffusionWorkflow::ConditioningFolder => {
+                    PathBuf::from(&state.conditioning_dir).join("heightmap.tif")
+                }
+            };
+            if let Some((pixels, tw, th)) = bevy_landscape::bake::load_tiff_crop_thumbnail(
+                &tiff_path,
+                crop.x0,
+                crop.y0,
+                crop.side,
+                512,
+            ) {
+                let color_pixels: Vec<egui::Color32> =
+                    pixels.iter().map(|&g| terrain_color_ramp(g)).collect();
+                let img = egui::ColorImage {
+                    size: [tw, th],
+                    source_size: egui::vec2(tw as f32, th as f32),
+                    pixels: color_pixels,
+                };
+                state.crop_preview_texture = Some(ui.ctx().load_texture(
+                    "world_crop_preview",
+                    img,
+                    egui::TextureOptions::LINEAR,
+                ));
+            }
+            state.crop_preview_key = Some(new_key);
+        }
+    } else {
+        state.crop_preview_texture = None;
+        state.crop_preview_key = None;
+    }
+
     let mut pick_target = None;
     let mut preview_requested = false;
     let mut probe_requested = false;
@@ -828,201 +882,6 @@ pub(crate) fn draw_diffusion_tab(ui: &mut egui::Ui, state: &mut DiffusionPanelSt
                 );
                 ui.end_row();
 
-                // --- World preview mini-map ---
-                ui.label("World preview");
-                ui.vertical(|ui| {
-                    let raster_size = state.conditioning_raster_size;
-                    let (src_w, src_h) = raster_size.unwrap_or((1, 1));
-                    let aspect = src_w as f32 / src_h as f32;
-                    let preview_w = 220.0_f32;
-                    let preview_h = (preview_w / aspect).clamp(40.0, 180.0);
-
-                    if raster_size.is_some() {
-                        let (response, painter) = ui.allocate_painter(
-                            egui::vec2(preview_w, preview_h),
-                            if running {
-                                egui::Sense::hover()
-                            } else {
-                                egui::Sense::click_and_drag()
-                            },
-                        );
-                        let rect = response.rect;
-
-                        if !running {
-                            if let Some(pos) = response.interact_pointer_pos() {
-                                state.azgaar_center_x =
-                                    ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                                state.azgaar_center_y =
-                                    ((pos.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
-                            }
-                        }
-                        let azgaar_crop = compute_azgaar_crop_window(
-                            src_w,
-                            src_h,
-                            state.azgaar_region_cells,
-                            state.azgaar_center_x,
-                            state.azgaar_center_y,
-                        );
-
-                        // World background — heightmap texture if loaded, plain rect otherwise.
-                        if let Some(tex) = &state.preview_texture {
-                            painter.image(
-                                tex.id(),
-                                rect,
-                                egui::Rect::from_min_max(
-                                    egui::pos2(0.0, 0.0),
-                                    egui::pos2(1.0, 1.0),
-                                ),
-                                egui::Color32::WHITE,
-                            );
-                        } else {
-                            painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(50, 70, 45));
-                        }
-                        painter.rect_stroke(
-                            rect,
-                            2.0,
-                            egui::Stroke::new(1.0, egui::Color32::from_gray(120)),
-                            egui::StrokeKind::Outside,
-                        );
-
-                        // Crop region overlay.
-                        let crop_rect = azgaar_crop.map(|crop| crop.preview_rect(rect));
-                        let crop_area_fraction = azgaar_crop.map(|crop| crop.area_fraction());
-                        if let Some(crop_rect) = crop_rect {
-                            painter.rect_filled(
-                                crop_rect,
-                                0.0,
-                                egui::Color32::from_rgba_premultiplied(255, 200, 50, 70),
-                            );
-                            painter.rect_stroke(
-                                crop_rect,
-                                0.0,
-                                egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 220, 50)),
-                                egui::StrokeKind::Outside,
-                            );
-                        }
-
-                        ui.add_space(6.0);
-                        ui.label("Selected region preview");
-                        let (zoom_response, zoom_painter) = ui.allocate_painter(
-                            egui::vec2(preview_w, preview_w),
-                            egui::Sense::hover(),
-                        );
-                        let zoom_rect = zoom_response.rect;
-                        if let (Some(tex), Some(crop)) = (&state.preview_texture, azgaar_crop) {
-                            zoom_painter.image(
-                                tex.id(),
-                                zoom_rect,
-                                crop.uv_rect(),
-                                egui::Color32::WHITE,
-                            );
-                        } else {
-                            zoom_painter.rect_filled(
-                                zoom_rect,
-                                2.0,
-                                egui::Color32::from_rgb(50, 70, 45),
-                            );
-                        }
-                        zoom_painter.rect_stroke(
-                            zoom_rect,
-                            2.0,
-                            egui::Stroke::new(1.0, egui::Color32::from_gray(120)),
-                            egui::StrokeKind::Outside,
-                        );
-
-                        // Coverage info below the map.
-                        let coverage_area = crop_area_fraction.unwrap_or(0.0) * 100.0;
-                        ui.label(format!(
-                            "{src_w}×{src_h} source  |  {:.0}×{:.0} km crop  |  {coverage_area:.1}% area",
-                            effective_region_cells as f32 * state.conditioning_scale_km,
-                            effective_region_cells as f32 * state.conditioning_scale_km,
-                        ));
-                        if effective_region_cells != state.azgaar_region_cells {
-                            ui.small(format!(
-                                "Requested {} cells, clamped to {} to fit the current {}×{} source.",
-                                state.azgaar_region_cells,
-                                effective_region_cells,
-                                src_w,
-                                src_h,
-                            ));
-                        }
-                    } else {
-                        ui.label("(run once to see world preview)");
-                    }
-
-                    // Whole World button: fill the available cells with the largest square.
-                    if !running {
-                        if let Some((w, h)) = raster_size {
-                            let max_cells = max_azgaar_crop_side(w, h).unwrap_or(0);
-                            if let Some(whole_cells) = AZGAAR_REGION_CELL_OPTIONS
-                                .iter()
-                                .copied()
-                                .filter(|&c| c <= max_cells)
-                                .last()
-                            {
-                                if ui
-                                    .button(format!("⛶ Whole World ({whole_cells} cells)"))
-                                    .on_hover_text("Center crop and set cells to the largest available square covering the full world.")
-                                    .clicked()
-                                {
-                                    state.azgaar_region_cells = whole_cells;
-                                    state.azgaar_center_x = 0.5;
-                                    state.azgaar_center_y = 0.5;
-                                }
-                            }
-                        }
-                    }
-
-                    let preview_mode = azgaar_crop.map(generated_preview_mode_for_crop);
-                    let preview_key = build_preview_key(
-                        &build_job_config(state),
-                        state.conditioning_raster_size,
-                        azgaar_crop,
-                        preview_mode,
-                    );
-                    let preview_is_current =
-                        state.generated_preview_key.as_deref() == Some(preview_key.as_str());
-
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(
-                                !state.is_busy(),
-                                egui::Button::new("Generate Selected Diffusion Preview"),
-                            )
-                            .clicked()
-                        {
-                            preview_requested = true;
-                        }
-                        if preview_is_current {
-                            ui.small("Generated previews match the current region.");
-                        } else if state.generated_preview_key.is_some() {
-                            ui.small("Generated previews are stale for the current region/settings.");
-                        }
-                    });
-
-                    if let Some(tex) = &state.generated_overview_texture {
-                        let size = tex.size_vec2();
-                        let aspect = (size.x / size.y).max(0.01);
-                        let display_size =
-                            egui::vec2(preview_w, (preview_w / aspect).clamp(40.0, 180.0));
-                        ui.add_space(4.0);
-                        ui.label("Generated world overview");
-                        ui.add(egui::Image::new((tex.id(), display_size)));
-                    }
-
-                    if let Some(tex) = &state.generated_selected_texture {
-                        ui.add_space(6.0);
-                        ui.label(
-                            state
-                                .generated_selected_mode
-                                .unwrap_or(GeneratedPreviewMode::Coarse)
-                                .label(),
-                        );
-                        ui.add(egui::Image::new((tex.id(), egui::vec2(preview_w, preview_w))));
-                    }
-                });
-                ui.end_row();
 
                 ui.label("Selected region span");
                 ui.label(format!(
@@ -1099,6 +958,198 @@ pub(crate) fn draw_diffusion_tab(ui: &mut egui::Ui, state: &mut DiffusionPanelSt
             );
             ui.end_row();
                 });
+
+            // World preview at full dialog width — outside the grid so it can expand freely.
+            if matches!(state.workflow, DiffusionWorkflow::AzgaarJson) {
+                let raster_size = state.conditioning_raster_size;
+                let (src_w, src_h) = raster_size.unwrap_or((1, 1));
+                let preview_w = ui.available_width();
+                let aspect = src_w as f32 / src_h as f32;
+                let preview_h = (preview_w / aspect).max(40.0);
+
+                ui.add_space(8.0);
+                ui.label("World preview");
+                if raster_size.is_some() {
+                    let (response, painter) = ui.allocate_painter(
+                        egui::vec2(preview_w, preview_h),
+                        if running {
+                            egui::Sense::hover()
+                        } else {
+                            egui::Sense::click_and_drag()
+                        },
+                    );
+                    let rect = response.rect;
+
+                    if !running {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            state.azgaar_center_x =
+                                ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                            state.azgaar_center_y =
+                                ((pos.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
+                        }
+                    }
+                    // Recompute after any click so the overlay reflects the new position
+                    // on the same frame rather than lagging one frame behind.
+                    let azgaar_crop_view = compute_azgaar_crop_window(
+                        src_w,
+                        src_h,
+                        state.azgaar_region_cells,
+                        state.azgaar_center_x,
+                        state.azgaar_center_y,
+                    );
+
+                    if let Some(tex) = &state.preview_texture {
+                        painter.image(
+                            tex.id(),
+                            rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    } else {
+                        painter.rect_filled(rect, 2.0, egui::Color32::from_rgb(50, 70, 45));
+                    }
+                    painter.rect_stroke(
+                        rect,
+                        2.0,
+                        egui::Stroke::new(1.0, egui::Color32::from_gray(120)),
+                        egui::StrokeKind::Outside,
+                    );
+
+                    let crop_area_fraction = azgaar_crop_view.map(|c| c.area_fraction());
+                    if let Some(crop_rect) = azgaar_crop_view.map(|c| c.preview_rect(rect)) {
+                        painter.rect_filled(
+                            crop_rect,
+                            0.0,
+                            egui::Color32::from_rgba_premultiplied(255, 200, 50, 70),
+                        );
+                        painter.rect_stroke(
+                            crop_rect,
+                            0.0,
+                            egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 220, 50)),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+
+                    ui.add_space(6.0);
+                    ui.label("Selected region");
+                    let (zoom_response, zoom_painter) = ui.allocate_painter(
+                        egui::vec2(preview_w, preview_w),
+                        egui::Sense::hover(),
+                    );
+                    let zoom_rect = zoom_response.rect;
+                    if let Some(tex) = &state.crop_preview_texture {
+                        zoom_painter.image(
+                            tex.id(),
+                            zoom_rect,
+                            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                            egui::Color32::WHITE,
+                        );
+                    } else if let (Some(tex), Some(crop)) =
+                        (&state.preview_texture, azgaar_crop_view)
+                    {
+                        zoom_painter.image(tex.id(), zoom_rect, crop.uv_rect(), egui::Color32::WHITE);
+                    } else {
+                        zoom_painter.rect_filled(zoom_rect, 2.0, egui::Color32::from_rgb(50, 70, 45));
+                    }
+                    zoom_painter.rect_stroke(
+                        zoom_rect,
+                        2.0,
+                        egui::Stroke::new(1.0, egui::Color32::from_gray(120)),
+                        egui::StrokeKind::Outside,
+                    );
+
+                    let coverage_area = crop_area_fraction.unwrap_or(0.0) * 100.0;
+                    let local_cells =
+                        azgaar_crop_view.map(|c| c.side).unwrap_or(state.azgaar_region_cells);
+                    ui.label(format!(
+                        "{src_w}×{src_h} source  |  {:.0}×{:.0} km crop  |  {coverage_area:.1}% area",
+                        local_cells as f32 * state.conditioning_scale_km,
+                        local_cells as f32 * state.conditioning_scale_km,
+                    ));
+                    if local_cells != state.azgaar_region_cells {
+                        ui.small(format!(
+                            "Requested {} cells, clamped to {} to fit the current {}×{} source.",
+                            state.azgaar_region_cells, local_cells, src_w, src_h,
+                        ));
+                    }
+                } else {
+                    ui.label("(run once to see world preview)");
+                }
+
+                if !running {
+                    if let Some((w, h)) = raster_size {
+                        let max_cells = max_azgaar_crop_side(w, h).unwrap_or(0);
+                        if let Some(whole_cells) = AZGAAR_REGION_CELL_OPTIONS
+                            .iter()
+                            .copied()
+                            .filter(|&c| c <= max_cells)
+                            .last()
+                        {
+                            if ui
+                                .button(format!("⛶ Whole World ({whole_cells} cells)"))
+                                .on_hover_text(
+                                    "Center crop and set cells to the largest available square.",
+                                )
+                                .clicked()
+                            {
+                                state.azgaar_region_cells = whole_cells;
+                                state.azgaar_center_x = 0.5;
+                                state.azgaar_center_y = 0.5;
+                            }
+                        }
+                    }
+                }
+
+                let preview_mode = azgaar_crop.map(generated_preview_mode_for_crop);
+                let preview_key = build_preview_key(
+                    &build_job_config(state),
+                    state.conditioning_raster_size,
+                    azgaar_crop,
+                    preview_mode,
+                );
+                let preview_is_current =
+                    state.generated_preview_key.as_deref() == Some(preview_key.as_str());
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            !state.is_busy(),
+                            egui::Button::new("Generate Selected Diffusion Preview"),
+                        )
+                        .clicked()
+                    {
+                        preview_requested = true;
+                    }
+                    if preview_is_current {
+                        ui.small("Generated previews match the current region.");
+                    } else if state.generated_preview_key.is_some() {
+                        ui.small("Generated previews are stale for the current region/settings.");
+                    }
+                });
+
+                if let Some(tex) = &state.generated_overview_texture {
+                    let size = tex.size_vec2();
+                    let tex_aspect = (size.x / size.y).max(0.01);
+                    ui.add_space(4.0);
+                    ui.label("Generated world overview");
+                    ui.add(egui::Image::new((
+                        tex.id(),
+                        egui::vec2(preview_w, (preview_w / tex_aspect).max(40.0)),
+                    )));
+                }
+
+                if let Some(tex) = &state.generated_selected_texture {
+                    ui.add_space(6.0);
+                    ui.label(
+                        state
+                            .generated_selected_mode
+                            .unwrap_or(GeneratedPreviewMode::Coarse)
+                            .label(),
+                    );
+                    ui.add(egui::Image::new((tex.id(), egui::vec2(preview_w, preview_w))));
+                }
+            }
 
             ui.add_space(8.0);
             ui.heading("Runtime");

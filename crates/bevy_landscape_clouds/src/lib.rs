@@ -16,7 +16,7 @@ use render::{CloudsDisplayMaterial, CloudsRenderPlugin};
 use uniforms::{CloudsImage, CloudsUniform};
 
 #[derive(Component, Clone, Copy, Debug, Default)]
-struct CloudDisplayLayer;
+pub struct CloudDisplayLayer;
 
 pub struct VolumetricCloudsPlugin;
 

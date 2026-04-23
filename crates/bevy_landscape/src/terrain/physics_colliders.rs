@@ -10,6 +10,8 @@ use crate::terrain::{
     world_desc::TerrainSourceDesc,
 };
 
+type FallbackTileCache = HashMap<(i32, i32), Vec<f32>>;
+
 #[derive(Component)]
 pub struct GlobalTerrainHeightfield;
 
@@ -161,13 +163,18 @@ pub fn spawn_global_heightfield_for_desc(
 /// ~256 m square, which is more than enough for any character movement.
 ///
 /// It is rebuilt (old despawned, new spawned) whenever the camera moves
-/// more than 64 world units from the last build centre.  At a walk speed
-/// of 8 m/s that is roughly once every 8 seconds — cheap.
+/// more than 32 world units from the last build centre.
+///
+/// When the collision cache doesn't yet have a tile (new area being streamed
+/// in), the missing samples are filled by reading the tile from disk
+/// synchronously — the same approach used by `spawn_global_heightfield`.
+/// This prevents height=0 holes that would let the player fall through terrain.
 pub fn update_local_terrain_collider(
     mut state: ResMut<LocalColliderState>,
     view: Res<TerrainViewState>,
     cache: Res<TerrainCollisionCache>,
     config: Res<TerrainConfig>,
+    desc: Res<TerrainSourceDesc>,
     collider_q: Query<Entity, With<LocalTerrainCollider>>,
     mut commands: Commands,
 ) {
@@ -182,7 +189,7 @@ pub fn update_local_terrain_collider(
     // Target ~256 world-unit coverage.  Cap at 257 samples per axis so
     // rebuilds stay cheap even on very fine world_scales.
     const COVERAGE: f32 = 256.0;
-    const REBUILD_DIST: f32 = COVERAGE * 0.25; // 64 m at default coverage
+    const REBUILD_DIST: f32 = COVERAGE * 0.125; // 32 m — keeps the high-res collider centred
     let n = ((COVERAGE / cell_size).ceil() as usize + 1).min(257).max(9);
 
     if (camera_xz - state.last_center).length() <= REBUILD_DIST {
@@ -195,6 +202,10 @@ pub fn update_local_terrain_collider(
     let center = Vec2::new(cx, cz);
     let half_n = (n as f32 - 1.0) * 0.5;
 
+    // Tiles loaded synchronously as fallback when the streaming cache misses.
+    let tile_world_size = config.tile_size as f32 * cell_size;
+    let mut fallback: FallbackTileCache = HashMap::default();
+
     // Build heights[column][row] (Avian heightfield convention).
     let heights: Vec<Vec<f32>> = (0..n)
         .map(|xi| {
@@ -202,7 +213,37 @@ pub fn update_local_terrain_collider(
                 .map(|zi| {
                     let wx = center.x + (xi as f32 - half_n) * cell_size;
                     let wz = center.y + (zi as f32 - half_n) * cell_size;
-                    cache.sample_height(Vec2::new(wx, wz)).unwrap_or(0.0)
+                    cache
+                        .sample_height(Vec2::new(wx, wz))
+                        .unwrap_or_else(|| {
+                            // Cache miss — read the LOD-0 tile from disk so there are no
+                            // height=0 holes that let the player fall through terrain.
+                            let tx = (wx / tile_world_size).floor() as i32;
+                            let tz = (wz / tile_world_size).floor() as i32;
+                            let data = fallback.entry((tx, tz)).or_insert_with(|| {
+                                load_tile_data(
+                                    TileKey { level: 0, x: tx, y: tz },
+                                    config.tile_size,
+                                    config.world_scale,
+                                    1.0,
+                                    desc.max_mip_level,
+                                    desc.tile_root.as_deref(),
+                                    None,
+                                    Some((desc.world_min, desc.world_max)),
+                                    false,
+                                )
+                                .data
+                            });
+                            let lx = ((wx - tx as f32 * tile_world_size) / cell_size)
+                                .round()
+                                .clamp(0.0, (config.tile_size - 1) as f32)
+                                as usize;
+                            let lz = ((wz - tz as f32 * tile_world_size) / cell_size)
+                                .round()
+                                .clamp(0.0, (config.tile_size - 1) as f32)
+                                as usize;
+                            data[lz * config.tile_size as usize + lx] * config.height_scale
+                        })
                 })
                 .collect()
         })
@@ -222,10 +263,18 @@ pub fn update_local_terrain_collider(
         Transform::from_xyz(center.x, 0.0, center.y),
     ));
 
-    info!(
-        "[Terrain] Local heightfield rebuilt: {}×{} @ {:.1} m/cell, centre ({:.0}, {:.0})",
-        n, n, cell_size, center.x, center.y
-    );
+    let fallback_tiles = fallback.len();
+    if fallback_tiles > 0 {
+        info!(
+            "[Terrain] Local heightfield rebuilt: {}×{} @ {:.1} m/cell, centre ({:.0}, {:.0}) [{} tile(s) from disk]",
+            n, n, cell_size, center.x, center.y, fallback_tiles
+        );
+    } else {
+        info!(
+            "[Terrain] Local heightfield rebuilt: {}×{} @ {:.1} m/cell, centre ({:.0}, {:.0})",
+            n, n, cell_size, center.x, center.y
+        );
+    }
 
     state.last_center = center;
 }

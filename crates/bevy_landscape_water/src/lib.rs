@@ -21,6 +21,10 @@ struct WaterLayout {
     height: f32,
     center: Vec2,
     grid: Option<UVec2>,
+    /// World-space size of each tile plane.  Equals `WATER_SIZE` for small
+    /// worlds; auto-scales up for large worlds so the grid stays ≤ 256 tiles
+    /// per axis and still covers the full terrain footprint.
+    tile_size: f32,
 }
 
 pub struct LandscapeWaterPlugin {
@@ -60,7 +64,14 @@ impl Plugin for LandscapeWaterPlugin {
         app.insert_resource(InitialWaterLayout(initial_layout));
         app.add_plugins(WaterPlugin);
         app.add_systems(Startup, spawn_initial_water_tiles.after(setup_water));
-        app.add_systems(Update, (sync_water_to_terrain, toggle_water));
+        app.add_systems(
+            Update,
+            (
+                sync_water_to_terrain,
+                toggle_water,
+                apply_water_enabled.after(toggle_water),
+            ),
+        );
     }
 }
 
@@ -71,16 +82,39 @@ fn effective_water_level(level: Option<f32>) -> Option<f32> {
 fn water_layout(world_min: Vec2, world_max: Vec2, water_height: Option<f32>) -> WaterLayout {
     let extent = world_max - world_min;
     let center = (world_min + world_max) * 0.5;
-    let grid = water_height.map(|_| {
-        let tiles_x = (extent.x / WATER_SIZE as f32).ceil().max(0.0) as u32 + 2;
-        let tiles_y = (extent.y / WATER_SIZE as f32).ceil().max(0.0) as u32 + 2;
-        UVec2::new(tiles_x.max(1), tiles_y.max(1))
-    });
+
+    // Keep the tile grid ≤ MAX_TILES_PER_AXIS on each axis.  When the world is
+    // wider than that many 256 m tiles, the tile footprint scales up by the
+    // smallest integer that keeps the count in budget while still covering the
+    // full terrain footprint.
+    const MAX_TILES_PER_AXIS: u32 = 256;
+
+    let (grid, tile_size) = match water_height {
+        None => (None, WATER_SIZE as f32),
+        Some(_) => {
+            let raw_x = (extent.x / WATER_SIZE as f32).ceil() as u32 + 2;
+            let raw_y = (extent.y / WATER_SIZE as f32).ceil() as u32 + 2;
+            let scale = ((raw_x.max(raw_y) as f32 / MAX_TILES_PER_AXIS as f32).ceil() as u32)
+                .max(1);
+            let tile_size = WATER_SIZE as f32 * scale as f32;
+            // +1 so the scaled grid still reaches the edge of the world extent.
+            let tiles_x = (raw_x / scale + 1).min(MAX_TILES_PER_AXIS).max(1);
+            let tiles_y = (raw_y / scale + 1).min(MAX_TILES_PER_AXIS).max(1);
+            if scale > 1 {
+                info!(
+                    "[Water] World is {:.0}×{:.0} m — scaling water tiles {}× to {:.0} m ({tiles_x}×{tiles_y} grid).",
+                    extent.x, extent.y, scale, tile_size
+                );
+            }
+            (Some(UVec2::new(tiles_x, tiles_y)), tile_size)
+        }
+    };
 
     WaterLayout {
         height: water_height.unwrap_or(0.0),
         center,
         grid,
+        tile_size,
     }
 }
 
@@ -106,7 +140,8 @@ fn rebuild_water_tiles(
         return;
     };
 
-    let mut plane_builder = PlaneMeshBuilder::from_length(WATER_SIZE as f32);
+    let tile_size = layout.tile_size;
+    let mut plane_builder = PlaneMeshBuilder::from_length(tile_size);
     plane_builder = match settings.water_quality {
         WaterQuality::Basic => plane_builder,
         WaterQuality::Medium => plane_builder,
@@ -123,15 +158,15 @@ fn rebuild_water_tiles(
             WaterTiles,
             Name::new("Water"),
             Transform::from_translation(root_translation),
-            Visibility::Visible,
+            Visibility::Inherited,
         ))
         .with_children(|parent| {
-            let grid_center_x = (WATER_SIZE * grid.x) as f32 / 2.0;
-            let grid_center_y = (WATER_SIZE * grid.y) as f32 / 2.0;
-            for x in 0..grid.x {
-                for y in 0..grid.y {
-                    let x = (x * WATER_SIZE) as f32 - grid_center_x;
-                    let y = (y * WATER_SIZE) as f32 - grid_center_y;
+            let grid_center_x = tile_size * grid.x as f32 / 2.0;
+            let grid_center_y = tile_size * grid.y as f32 / 2.0;
+            for xi in 0..grid.x {
+                for yi in 0..grid.y {
+                    let x = tile_size * xi as f32 - grid_center_x;
+                    let y = tile_size * yi as f32 - grid_center_y;
                     let coord_offset = Vec2::new(x, y);
                     let tile_hash = ((x as i32).wrapping_mul(73856093)
                         ^ (y as i32).wrapping_mul(19349663))
@@ -154,7 +189,7 @@ fn rebuild_water_tiles(
                             edge_color: settings.edge_color,
                             edge_scale: settings.edge_scale,
                             coord_offset,
-                            coord_scale: Vec2::new(WATER_SIZE as f32, WATER_SIZE as f32),
+                            coord_scale: Vec2::new(tile_size, tile_size),
                             wave_dir_a: normalized_dir,
                             wave_dir_b: normalized_dir,
                             wave_blend: 1.0,
@@ -289,21 +324,32 @@ fn sync_water_to_terrain(
 fn toggle_water(
     keys: Res<ButtonInput<KeyCode>>,
     mut enabled: ResMut<WaterEnabled>,
+) {
+    if keys.just_pressed(KeyCode::F2) {
+        enabled.0 = !enabled.0;
+        info!("Water {} (F2)", if enabled.0 { "ON" } else { "OFF" });
+    }
+}
+
+/// Reactively syncs water tile visibility whenever `WaterEnabled` changes.
+/// This allows external code (e.g. the editor during diffusion inference) to
+/// hide/show water by simply setting `WaterEnabled` without needing to hold a
+/// `WaterTiles` query themselves.
+fn apply_water_enabled(
+    enabled: Res<WaterEnabled>,
     mut water_tiles: Query<&mut Visibility, With<WaterTiles>>,
 ) {
-    if !keys.just_pressed(KeyCode::F2) {
+    if !enabled.is_changed() {
         return;
     }
-    enabled.0 = !enabled.0;
     let vis = if enabled.0 {
-        Visibility::Visible
+        Visibility::Inherited
     } else {
         Visibility::Hidden
     };
     for mut v in &mut water_tiles {
         *v = vis;
     }
-    info!("Water {} (F2)", if enabled.0 { "ON" } else { "OFF" });
 }
 
 #[cfg(test)]

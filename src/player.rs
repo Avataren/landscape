@@ -90,9 +90,13 @@ impl Plugin for PlayerPlugin {
                     player_move.after(player_look),
                 ),
             )
-            // PostUpdate runs after FixedPostUpdate (where Avian writeback lives),
-            // so sync_camera_to_body always sees the settled physics Transform.
-            .add_systems(PostUpdate, sync_camera_to_body);
+            // PostUpdate runs after FixedPostUpdate (where Avian writeback lives).
+            // clamp_player_to_terrain must run before sync_camera_to_body so the
+            // camera sees the corrected position on the same frame.
+            .add_systems(
+                PostUpdate,
+                (clamp_player_to_terrain, sync_camera_to_body).chain(),
+            );
     }
 }
 
@@ -249,6 +253,34 @@ fn player_move(
 
     if keys.just_pressed(KeyCode::Space) && vel.y.abs() < 1.0 {
         vel.y += JUMP_SPEED;
+    }
+}
+
+/// Safety net: if physics tunnels through a heightfield hole, snap the player
+/// back above terrain and cancel any downward velocity.  Runs before
+/// `sync_camera_to_body` so the correction is visible on the same frame.
+fn clamp_player_to_terrain(
+    mode: Res<CameraMode>,
+    cache: Res<TerrainCollisionCache>,
+    mut body_q: Query<(&mut Position, &mut LinearVelocity, &mut Transform), With<PlayerBody>>,
+) {
+    if *mode != CameraMode::Walking {
+        return;
+    }
+    let Ok((mut pos, mut vel, mut transform)) = body_q.single_mut() else {
+        return;
+    };
+    let Some(ground_y) = cache.sample_height(pos.0.xz()) else {
+        return;
+    };
+    let foot_y = pos.0.y - CAPSULE_RADIUS - CAPSULE_LENGTH * 0.5;
+    if foot_y < ground_y {
+        let corrected_y = ground_y + CAPSULE_RADIUS + CAPSULE_LENGTH * 0.5;
+        pos.0.y = corrected_y;
+        transform.translation.y = corrected_y;
+        if vel.y < 0.0 {
+            vel.y = 0.0;
+        }
     }
 }
 

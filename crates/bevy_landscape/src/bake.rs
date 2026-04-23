@@ -564,6 +564,88 @@ pub fn load_tiff_thumbnail(path: &Path, max_side: usize) -> Option<(Vec<u8>, usi
     Some((pixels, thumb_w, thumb_h))
 }
 
+/// Load a high-resolution thumbnail of a specific crop sub-region of a TIFF heightmap.
+///
+/// `crop_x`, `crop_y`, `crop_side` are in source pixels. The result is subsampled so
+/// the thumbnail fits within `max_side × max_side`. Returns `(grayscale_u8, thumb_w, thumb_h)`,
+/// the same format as `load_tiff_thumbnail`.
+pub fn load_tiff_crop_thumbnail(
+    path: &Path,
+    crop_x: u32,
+    crop_y: u32,
+    crop_side: u32,
+    max_side: usize,
+) -> Option<(Vec<u8>, usize, usize)> {
+    let f = File::open(path).ok()?;
+    let mut dec = tiff::decoder::Decoder::new(BufReader::new(f)).ok()?;
+    let (w, h) = dec.dimensions().ok()?;
+    let (chunk_w, chunk_h) = dec.chunk_dimensions();
+    let (src_w, src_h) = (w as usize, h as usize);
+    let layout = TiffLayout::from_dims(chunk_w, chunk_h, src_w, src_h);
+
+    let cx0 = crop_x as usize;
+    let cy0 = crop_y as usize;
+    let cside = (crop_side as usize)
+        .min(src_w.saturating_sub(cx0))
+        .min(src_h.saturating_sub(cy0));
+    if cside == 0 {
+        return None;
+    }
+
+    let step = ((cside + max_side - 1) / max_side).max(1);
+    let thumb_w = (cside + step - 1) / step;
+    let thumb_h = (cside + step - 1) / step;
+
+    let first_vs = cy0 / layout.tile_h;
+    let last_vs = ((cy0 + cside).saturating_sub(1)) / layout.tile_h;
+
+    let mut grid: Vec<f32> = vec![0.0; thumb_w * thumb_h];
+    let mut h_min = f32::INFINITY;
+    let mut h_max = f32::NEG_INFINITY;
+
+    for vs in first_vs..=last_vs.min(layout.virtual_strip_count.saturating_sub(1)) {
+        let strip_row_start = vs * layout.tile_h;
+        let vals = read_virtual_strip(&mut dec, vs, &layout, src_w).ok()?;
+
+        for row in 0..layout.tile_h {
+            let abs_row = strip_row_start + row;
+            if abs_row < cy0 || abs_row >= cy0 + cside {
+                continue;
+            }
+            let rel_row = abs_row - cy0;
+            if rel_row % step != 0 {
+                continue;
+            }
+            let ty = rel_row / step;
+            if ty >= thumb_h {
+                continue;
+            }
+            for tx in 0..thumb_w {
+                let sx = cx0 + (tx * step).min(cside - 1);
+                if sx >= src_w {
+                    continue;
+                }
+                let v = vals.get(row * src_w + sx).copied().unwrap_or(0.0);
+                grid[ty * thumb_w + tx] = v;
+                if v < h_min {
+                    h_min = v;
+                }
+                if v > h_max {
+                    h_max = v;
+                }
+            }
+        }
+    }
+
+    let range = (h_max - h_min).max(1e-6);
+    let pixels: Vec<u8> = grid
+        .iter()
+        .map(|&v| (((v - h_min) / range) * 255.0) as u8)
+        .collect();
+
+    Some((pixels, thumb_w, thumb_h))
+}
+
 /// Scan a TIFF heightmap for its value range within the `bake_size`×`bake_size` domain.
 ///
 /// Returns `(src_w, src_h, h_min, h_max, rows_per_virtual_strip)`.
