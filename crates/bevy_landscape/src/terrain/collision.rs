@@ -64,6 +64,32 @@ impl TerrainCollisionCache {
         Some(bilinear_sample(&tile.data, tile.tile_size, local) * self.height_scale)
     }
 
+    /// Clone all level-0 tile data whose world footprint overlaps the given XZ rectangle.
+    pub fn snapshot_tiles_for_region(
+        &self,
+        min_xz: Vec2,
+        max_xz: Vec2,
+    ) -> std::collections::HashMap<TileKey, Vec<f32>> {
+        let mut snapshot = std::collections::HashMap::new();
+        if self.tile_size == 0 || self.world_scale <= 0.0 {
+            return snapshot;
+        }
+        let tile_world_size = self.tile_size as f32 * self.world_scale;
+        let tx_min = (min_xz.x / tile_world_size).floor() as i32;
+        let tx_max = (max_xz.x / tile_world_size).floor() as i32;
+        let ty_min = (min_xz.y / tile_world_size).floor() as i32;
+        let ty_max = (max_xz.y / tile_world_size).floor() as i32;
+        for ty in ty_min..=ty_max {
+            for tx in tx_min..=tx_max {
+                let key = TileKey { level: 0, x: tx, y: ty };
+                if let Some(tile) = self.tiles.get(&key) {
+                    snapshot.insert(key, tile.data.clone());
+                }
+            }
+        }
+        snapshot
+    }
+
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------

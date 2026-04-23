@@ -46,7 +46,8 @@ use pbr_textures::{
     rebuild_pbr_textures_system, PbrRebuildProgress, PbrRebuildState, PbrTexturesDirty,
 };
 use physics_colliders::{
-    update_local_terrain_collider, LocalColliderState, ShowTerrainCollision,
+    apply_terrain_collider_result, cancel_collider_task_on_reload, start_terrain_collider_build,
+    LocalColliderState, LocalColliderTask, ShowTerrainCollision,
 };
 use render::TerrainRenderPlugin;
 use residency::update_required_tiles;
@@ -131,6 +132,7 @@ impl Plugin for TerrainPlugin {
             .init_resource::<TerrainStreamQueue>()
             .init_resource::<TerrainCollisionCache>()
             .init_resource::<LocalColliderState>()
+            .init_resource::<LocalColliderTask>()
             .init_resource::<ShowTerrainCollision>()
             .init_resource::<PatchEntities>()
             .init_resource::<TerrainClipmapUploads>()
@@ -158,9 +160,13 @@ impl Plugin for TerrainPlugin {
             )
             .add_systems(
                 Update,
-                update_local_terrain_collider
-                    .after(update_collision_tiles)
-                    .after(update_terrain_view_state),
+                (
+                    start_terrain_collider_build
+                        .after(update_collision_tiles)
+                        .after(update_terrain_view_state),
+                    apply_terrain_collider_result,
+                    cancel_collider_task_on_reload,
+                ),
             )
             .add_systems(
                 Update,
