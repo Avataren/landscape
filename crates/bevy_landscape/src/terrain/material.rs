@@ -154,6 +154,10 @@ impl Material for TerrainMaterial {
         "shaders/terrain_prepass.wgsl".into()
     }
 
+    fn prepass_fragment_shader() -> ShaderRef {
+        "shaders/terrain_prepass.wgsl".into()
+    }
+
     fn specialize(
         _pipeline: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,

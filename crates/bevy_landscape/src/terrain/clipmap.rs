@@ -202,6 +202,45 @@ pub fn build_trim_instances_for_view(
     instances
 }
 
+/// Filters trim instances to those that overlap the terrain footprint.
+/// When bounds are degenerate (world_min == world_max) all trims pass.
+pub fn build_trim_instances_for_view_in_bounds(
+    config: &TerrainConfig,
+    view: &TerrainViewState,
+    world_min: Vec2,
+    world_max: Vec2,
+) -> Vec<TrimInstanceCpu> {
+    let trims = build_trim_instances_for_view(config, view);
+    if world_min == world_max {
+        return trims;
+    }
+    let block_size = config.block_size() as f32;
+    trims
+        .into_iter()
+        .filter(|trim| trim_intersects_world_bounds(trim, block_size, world_min, world_max))
+        .collect()
+}
+
+fn trim_intersects_world_bounds(
+    trim: &TrimInstanceCpu,
+    block_size: f32,
+    world_min: Vec2,
+    world_max: Vec2,
+) -> bool {
+    let trim_min = trim.origin_ws;
+    let trim_extent = if trim.is_horizontal {
+        Vec2::new(2.0 * block_size * trim.level_scale_ws, trim.level_scale_ws)
+    } else {
+        Vec2::new(trim.level_scale_ws, 2.0 * block_size * trim.level_scale_ws)
+    };
+    let trim_max = trim_min + trim_extent;
+
+    trim_max.x > world_min.x
+        && trim_min.x < world_max.x
+        && trim_max.y > world_min.y
+        && trim_min.y < world_max.y
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
@@ -297,5 +336,37 @@ mod tests {
 
         assert!(!filtered.is_empty());
         assert!(filtered.len() < full.len());
+    }
+
+    #[test]
+    fn trim_bounds_filter_removes_off_world_trims() {
+        let config = TerrainConfig::default();
+        let view = make_view(&config, Vec3::ZERO);
+
+        let trims = build_trim_instances_for_view_in_bounds(
+            &config,
+            &view,
+            Vec2::new(-64.0, -64.0),
+            Vec2::new(64.0, 64.0),
+        );
+
+        assert!(trims.is_empty());
+    }
+
+    #[test]
+    fn trim_bounds_filter_keeps_partial_overlap() {
+        let config = TerrainConfig::default();
+        let view = make_view(&config, Vec3::ZERO);
+
+        let trims = build_trim_instances_for_view_in_bounds(
+            &config,
+            &view,
+            Vec2::new(-300.0, -64.0),
+            Vec2::new(-200.0, 64.0),
+        );
+
+        assert_eq!(trims.len(), 1);
+        assert!(!trims[0].is_horizontal, "expected left vertical trim");
+        assert_eq!(trims[0].lod_level, 1);
     }
 }

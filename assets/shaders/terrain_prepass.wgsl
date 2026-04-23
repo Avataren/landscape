@@ -8,7 +8,7 @@
 #import bevy_pbr::{
     mesh_functions::get_world_from_local,
     view_transformations::position_world_to_clip,
-    prepass_io::{Vertex, VertexOutput},
+    prepass_io::{FragmentOutput, Vertex, VertexOutput},
 }
 
 struct MaterialSlotGpu {
@@ -35,6 +35,11 @@ struct TerrainParams {
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var height_tex:  texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var height_samp: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var<uniform> terrain: TerrainParams;
+
+fn in_world_bounds(world_xz: vec2<f32>) -> bool {
+    return all(world_xz >= terrain.world_bounds.xy)
+        && all(world_xz <= terrain.world_bounds.zw);
+}
 
 fn bounds_fade_at(xz: vec2<f32>) -> f32 {
     let fade_dist = max(terrain.bounds_fade.x, 1.0);
@@ -109,5 +114,18 @@ fn vertex(v: Vertex) -> VertexOutput {
     var out: VertexOutput;
     out.world_position = vec4<f32>(pos, 1.0);
     out.position       = position_world_to_clip(pos);
+    return out;
+}
+
+@fragment
+fn fragment(in: VertexOutput) -> FragmentOutput {
+    if !in_world_bounds(in.world_position.xz) {
+        discard;
+    }
+
+    var out: FragmentOutput;
+#ifdef UNCLIPPED_DEPTH_ORTHO_EMULATION
+    out.frag_depth = in.unclipped_depth;
+#endif
     return out;
 }

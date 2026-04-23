@@ -28,7 +28,7 @@ use bevy::{
 };
 use clipmap::build_patch_instances_for_view_in_bounds;
 use clipmap::PatchInstanceCpu;
-use clipmap::{build_trim_instances_for_view, TrimInstanceCpu};
+use clipmap::{build_trim_instances_for_view_in_bounds, TrimInstanceCpu};
 use clipmap_texture::{
     apply_tiles_to_clipmap, begin_terrain_upload_frame, compute_clip_levels,
     compute_initial_clip_levels, create_initial_clipmap_texture,
@@ -764,7 +764,8 @@ fn update_patch_transforms(
 
     let patches =
         build_patch_instances_for_view_in_bounds(&config, &view, desc.world_min, desc.world_max);
-    let trims = build_trim_instances_for_view(&config, &view);
+    let trims =
+        build_trim_instances_for_view_in_bounds(&config, &view, desc.world_min, desc.world_max);
     let total = patches.len() + trims.len();
 
     let mut respawned = false;
@@ -788,7 +789,10 @@ fn update_patch_transforms(
     // Only update ECS Transforms when the clip grid cell changes — these drive
     // Bevy's own visibility / AABB checks for the entity, not the vertex path.
     let n_blocks = patches.len();
-    for (entity, patch) in patch_entities.entities[..n_blocks].iter().zip(patches.iter()) {
+    for (entity, patch) in patch_entities.entities[..n_blocks]
+        .iter()
+        .zip(patches.iter())
+    {
         if let Ok((mut transform, mut instance)) = query.get_mut(*entity) {
             transform.translation = Vec3::new(patch.origin_ws.x, 0.0, patch.origin_ws.y);
             transform.scale = Vec3::new(patch.level_scale_ws, 1.0, patch.level_scale_ws);
@@ -965,7 +969,6 @@ fn reload_terrain_system(
             &mut residency,
             &mut collision,
         );
-
     }
 }
 

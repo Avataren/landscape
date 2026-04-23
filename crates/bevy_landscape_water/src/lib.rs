@@ -27,6 +27,11 @@ struct WaterLayout {
     tile_size: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct WaterChunkLayout {
+    grid: UVec2,
+}
+
 pub struct LandscapeWaterPlugin {
     /// Pre-computed world-space Y of the water surface.  `None` = no water for this level.
     pub water_height: Option<f32>,
@@ -55,6 +60,9 @@ impl Plugin for LandscapeWaterPlugin {
 
         app.insert_resource(WaterSettings {
             height: initial_layout.height,
+            amplitude: 8.0,
+            clarity: 0.9,
+            foam_threshold: 1.5,
             // LandscapeWaterPlugin owns tile spawning so reloaded terrains can
             // rebuild the grid instead of staying stuck with the startup size.
             spawn_tiles: None,
@@ -94,8 +102,8 @@ fn water_layout(world_min: Vec2, world_max: Vec2, water_height: Option<f32>) -> 
         Some(_) => {
             let raw_x = (extent.x / WATER_SIZE as f32).ceil() as u32 + 2;
             let raw_y = (extent.y / WATER_SIZE as f32).ceil() as u32 + 2;
-            let scale = ((raw_x.max(raw_y) as f32 / MAX_TILES_PER_AXIS as f32).ceil() as u32)
-                .max(1);
+            let scale =
+                ((raw_x.max(raw_y) as f32 / MAX_TILES_PER_AXIS as f32).ceil() as u32).max(1);
             let tile_size = WATER_SIZE as f32 * scale as f32;
             // +1 so the scaled grid still reaches the edge of the world extent.
             let tiles_x = (raw_x / scale + 1).min(MAX_TILES_PER_AXIS).max(1);
@@ -116,6 +124,34 @@ fn water_layout(world_min: Vec2, world_max: Vec2, water_height: Option<f32>) -> 
         grid,
         tile_size,
     }
+}
+
+fn ocean_subdivisions(world_size: Vec2) -> u32 {
+    const TARGET_VERTEX_SPACING_M: f32 = 8.0;
+    const MIN_SUBDIVISIONS: u32 = 96;
+    const MAX_SUBDIVISIONS: u32 = 384;
+
+    ((world_size.max_element() / TARGET_VERTEX_SPACING_M).ceil() as u32)
+        .saturating_sub(2)
+        .clamp(MIN_SUBDIVISIONS, MAX_SUBDIVISIONS)
+}
+
+fn water_chunk_layout(world_size: Vec2) -> WaterChunkLayout {
+    const MAX_CHUNK_SIZE_M: f32 = 2_048.0;
+
+    WaterChunkLayout {
+        grid: UVec2::new(
+            (world_size.x / MAX_CHUNK_SIZE_M).ceil().max(1.0) as u32,
+            (world_size.y / MAX_CHUNK_SIZE_M).ceil().max(1.0) as u32,
+        ),
+    }
+}
+
+fn water_chunk_size(world_size: Vec2, chunk_layout: WaterChunkLayout) -> Vec2 {
+    Vec2::new(
+        world_size.x / chunk_layout.grid.x as f32,
+        world_size.y / chunk_layout.grid.y as f32,
+    )
 }
 
 fn rebuild_water_tiles(
@@ -140,13 +176,16 @@ fn rebuild_water_tiles(
         return;
     };
 
-    // Single plane covering the full world extent — 1 draw call, 1 material.
     let world_size = Vec2::new(
         layout.tile_size * grid.x as f32,
         layout.tile_size * grid.y as f32,
     );
-    let mesh = Mesh3d(meshes.add(PlaneMeshBuilder::from_size(world_size)));
-    let root_translation = Vec3::new(layout.center.x, 0.0, layout.center.y);
+    let chunk_layout = water_chunk_layout(world_size);
+    let chunk_size = water_chunk_size(world_size, chunk_layout);
+    let mesh =
+        Mesh3d(meshes.add(
+            PlaneMeshBuilder::from_size(chunk_size).subdivisions(ocean_subdivisions(chunk_size)),
+        ));
     let water_height = layout.height;
 
     let material = MeshMaterial3d(materials.add(StandardWaterMaterial {
@@ -175,23 +214,32 @@ fn rebuild_water_tiles(
         .spawn((
             WaterTiles,
             Name::new("Water"),
-            Transform::from_translation(root_translation),
+            Transform::from_xyz(layout.center.x, 0.0, layout.center.y),
             Visibility::Inherited,
         ))
         .with_children(|parent| {
-            parent.spawn((
-                WaterTile { offset: Vec2::ZERO },
-                Name::new("Water Tile"),
-                Transform::from_xyz(0.0, water_height, 0.0),
-                mesh,
-                material,
-                WaveDirection::with_duration(
-                    settings.wave_direction,
-                    settings.wave_direction_blend_duration,
-                ),
-                NotShadowCaster,
-                NotShadowReceiver,
-            ));
+            for tile_y in 0..chunk_layout.grid.y {
+                for tile_x in 0..chunk_layout.grid.x {
+                    let offset = Vec2::new(
+                        (tile_x as f32 + 0.5) * chunk_size.x - world_size.x * 0.5,
+                        (tile_y as f32 + 0.5) * chunk_size.y - world_size.y * 0.5,
+                    );
+
+                    parent.spawn((
+                        WaterTile { offset },
+                        Name::new(format!("Water Tile {tile_x}x{tile_y}")),
+                        Transform::from_xyz(offset.x, water_height, offset.y),
+                        mesh.clone(),
+                        material.clone(),
+                        WaveDirection::with_duration(
+                            settings.wave_direction,
+                            settings.wave_direction_blend_duration,
+                        ),
+                        NotShadowCaster,
+                        NotShadowReceiver,
+                    ));
+                }
+            }
         });
 }
 
@@ -291,10 +339,7 @@ fn sync_water_to_terrain(
     );
 }
 
-fn toggle_water(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut enabled: ResMut<WaterEnabled>,
-) {
+fn toggle_water(keys: Res<ButtonInput<KeyCode>>, mut enabled: ResMut<WaterEnabled>) {
     if keys.just_pressed(KeyCode::F2) {
         enabled.0 = !enabled.0;
         info!("Water {} (F2)", if enabled.0 { "ON" } else { "OFF" });
@@ -324,7 +369,10 @@ fn apply_water_enabled(
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_water_level, water_layout};
+    use super::{
+        effective_water_level, ocean_subdivisions, water_chunk_layout, water_chunk_size,
+        water_layout,
+    };
     use bevy::prelude::*;
 
     #[test]
@@ -342,7 +390,26 @@ mod tests {
         );
 
         assert_eq!(layout.center, Vec2::ZERO);
-        assert_eq!(layout.grid, Some(UVec2::new(122, 62)));
+        assert_eq!(layout.grid, Some(UVec2::new(123, 63)));
         assert_eq!(layout.height, 120.0);
+    }
+
+    #[test]
+    fn ocean_subdivision_budget_is_clamped() {
+        assert_eq!(ocean_subdivisions(Vec2::splat(512.0)), 96);
+        assert_eq!(ocean_subdivisions(Vec2::splat(1_024.0)), 126);
+        assert_eq!(ocean_subdivisions(Vec2::splat(4_096.0)), 384);
+    }
+
+    #[test]
+    fn chunk_layout_caps_tile_extent() {
+        let world_size = Vec2::new(15_360.0, 7_680.0);
+        let layout = water_chunk_layout(world_size);
+
+        assert_eq!(layout.grid, UVec2::new(8, 4));
+        assert_eq!(
+            water_chunk_size(world_size, layout),
+            Vec2::new(1_920.0, 1_920.0)
+        );
     }
 }

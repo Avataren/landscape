@@ -499,7 +499,8 @@ fn in_world_bounds(world_xz: vec2<f32>) -> bool {
 fn macro_color_uv(world_xz: vec2<f32>) -> vec2<f32> {
     let world_min  = terrain.world_bounds.xy;
     let world_span = max(terrain.world_bounds.zw - world_min, vec2<f32>(1.0, 1.0));
-    var uv = (world_xz - world_min) / world_span;
+    let sample_xz = clamp(world_xz, world_min, terrain.world_bounds.zw);
+    var uv = (sample_xz - world_min) / world_span;
     if terrain.bounds_fade.z > 0.5 {
         uv.y = 1.0 - uv.y;
     }
@@ -619,8 +620,11 @@ fn patch_grid_wireframe(patch_uv: vec2<f32>) -> f32 {
 
 @fragment
 fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
-    // Discard patches that extend beyond the heightmap footprint.
-    if !in_world_bounds(in.macro_xz_ws) {
+    // Discard fragments based on the post-morph world position. Using the
+    // pre-morph XZ here lets coarse LOD boundary snaps grow visible geometry
+    // beyond the terrain footprint, which shows up as black rectangles at the
+    // map edge when the depth prepass and main pass disagree.
+    if !in_world_bounds(in.world_pos.xz) {
         discard;
     }
 
