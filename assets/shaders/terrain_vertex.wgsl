@@ -68,45 +68,26 @@ struct TerrainVOut {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn bounds_fade_at(xz: vec2<f32>) -> f32 {
-    let fade_dist = max(terrain.bounds_fade.x, 1.0);
-    let world_min = terrain.world_bounds.xy;
-    let world_max = terrain.world_bounds.zw;
-    let edge_dist = min(
-        min(xz.x - world_min.x, world_max.x - xz.x),
-        min(xz.y - world_min.y, world_max.y - xz.y),
-    );
-    // Inside terrain (edge_dist >= 0): full height. Only fade vertices that
-    // land outside the terrain boundary (edge_dist < 0) due to patches
-    // slightly overshooting the bounds.
-    return smoothstep(-fade_dist, 0.0, edge_dist);
+fn in_world_bounds(world_xz: vec2<f32>) -> bool {
+    return all(world_xz >= terrain.world_bounds.xy)
+        && all(world_xz <= terrain.world_bounds.zw);
 }
 
-/// Sample height from the given LOD level's clipmap layer and fade it out once
-/// the world position leaves the baked dataset footprint.
 fn height_at(lod: u32, xz: vec2<f32>) -> f32 {
+    // Return 0 for out-of-bounds positions so outside-bounds vertices form a
+    // flat ground plane rather than extruding the boundary heightmap value
+    // outward, which creates the dark "slab" artifact at the terrain edge.
+    if !in_world_bounds(xz) {
+        return 0.0;
+    }
     let lvl = terrain.clip_levels[lod];
     let world_min = terrain.world_bounds.xy;
     let world_max = terrain.world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
     let sample_xz = clamp(xz, world_min, world_max);
-    // lvl.z = 1 / ring_span,  lvl.w = texel_world_size (scale_L)
-    //
-    // Shift by +0.5 texels before computing UV so that integer world-space
-    // vertex positions land exactly at texel CENTRES rather than at the
-    // boundary between two texels.  Without this shift a vertex at integer
-    // world coordinate n maps to UV = n / N (exactly between texel n-1 and
-    // texel n), and the linear filter straddles the toroidal seam at UV = 0.5
-    // — mixing heights from opposite ends of the ring window.  The resulting
-    // wrong height leaks into normal computation and produces dark bands that
-    // move with the seam as the clip center shifts (shimmering).
-    //
-    // With the half-texel offset every sample point is at (n + 0.5) / N which
-    // sits squarely inside texel n; the seam at UV = 0.5 can only be reached by
-    // a non-integer n + 0.5 = N/2, impossible for integer n.
     let uv = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
     let sampled_height = textureSampleLevel(height_tex, height_samp, uv, i32(lod), 0.0).r
         * terrain.height_scale;
-    return sampled_height * bounds_fade_at(xz);
+    return sampled_height;
 }
 
 /// Sample the baked RGBA8Snorm normal array (RG = fine XZ, BA = coarse XZ) and

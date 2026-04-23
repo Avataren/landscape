@@ -41,21 +41,10 @@ fn in_world_bounds(world_xz: vec2<f32>) -> bool {
         && all(world_xz <= terrain.world_bounds.zw);
 }
 
-fn bounds_fade_at(xz: vec2<f32>) -> f32 {
-    let fade_dist = max(terrain.bounds_fade.x, 1.0);
-    let world_min = terrain.world_bounds.xy;
-    let world_max = terrain.world_bounds.zw;
-    let edge_dist = min(
-        min(xz.x - world_min.x, world_max.x - xz.x),
-        min(xz.y - world_min.y, world_max.y - xz.y),
-    );
-    // Inside terrain (edge_dist >= 0): full height. Only fade vertices that
-    // land outside the terrain boundary (edge_dist < 0) due to patches
-    // slightly overshooting the bounds.
-    return smoothstep(-fade_dist, 0.0, edge_dist);
-}
-
 fn height_at(lod: u32, xz: vec2<f32>) -> f32 {
+    if !in_world_bounds(xz) {
+        return 0.0;
+    }
     let lvl = terrain.clip_levels[lod];
     let world_min = terrain.world_bounds.xy;
     let world_max = terrain.world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
@@ -63,7 +52,7 @@ fn height_at(lod: u32, xz: vec2<f32>) -> f32 {
     let uv = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
     let h = textureSampleLevel(height_tex, height_samp, uv, i32(lod), 0.0).r
         * terrain.height_scale;
-    return h * bounds_fade_at(xz);
+    return h;
 }
 
 @vertex
@@ -114,12 +103,25 @@ fn vertex(v: Vertex) -> VertexOutput {
     var out: VertexOutput;
     out.world_position = vec4<f32>(pos, 1.0);
     out.position       = position_world_to_clip(pos);
+
+    // Push out-of-bounds vertices to the far plane (z=0 in Bevy's reversed-Z).
+    // The depth prepass is vertex-only for opaque materials — no fragment stage
+    // runs to discard these pixels.  If we leave the normal clip depth, the
+    // prepass writes a finite depth value that blocks sky rendering, making
+    // the out-of-bounds quads appear as black rectangles.  Writing depth=0
+    // (far plane) lets the sky renderer overwrite those pixels.
+    if !in_world_bounds(world_xz) {
+        out.position.z = 0.0;
+    }
+
     return out;
 }
 
 // Only emit a fragment function when the renderer expects prepass fragment output
 // (normal/motion-vector/deferred prepass).  Shadow and plain depth passes have
-// PREPASS_FRAGMENT undefined and write depth automatically via rasterization.
+// PREPASS_FRAGMENT undefined and write depth automatically via rasterization —
+// but we still need a fragment stage to discard out-of-bounds geometry so it
+// does not cast incorrect shadows.
 #ifdef PREPASS_FRAGMENT
 @fragment
 fn fragment(in: VertexOutput) -> FragmentOutput {
@@ -132,5 +134,15 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
     out.frag_depth = in.unclipped_depth;
 #endif
     return out;
+}
+#else
+@fragment
+fn fragment(in: VertexOutput) {
+    // Shadow / depth-only pass: no FragmentOutput needed, but we must discard
+    // vertices outside the terrain boundary so the out-of-bounds height-0 rim
+    // does not occlude lights or cast rectangular shadow bands.
+    if !in_world_bounds(in.world_position.xz) {
+        discard;
+    }
 }
 #endif // PREPASS_FRAGMENT
