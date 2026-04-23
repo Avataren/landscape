@@ -7,7 +7,7 @@ use bevy_landscape::{TerrainConfig, TerrainMetadata, TerrainSourceDesc};
 use bevy_water::{
     water::material::{StandardWaterMaterial, WaterMaterial},
     water::{setup_water, WaterTile},
-    WaterPlugin, WaterQuality, WaterSettings, WaterTiles, WaveDirection, WATER_SIZE,
+    WaterPlugin, WaterSettings, WaterTiles, WaveDirection, WATER_SIZE,
 };
 
 #[derive(Resource, Clone, Copy)]
@@ -140,18 +140,36 @@ fn rebuild_water_tiles(
         return;
     };
 
-    let tile_size = layout.tile_size;
-    let mut plane_builder = PlaneMeshBuilder::from_length(tile_size);
-    plane_builder = match settings.water_quality {
-        WaterQuality::Basic => plane_builder,
-        WaterQuality::Medium => plane_builder,
-        WaterQuality::High => plane_builder.subdivisions(WATER_SIZE / 16),
-        WaterQuality::Ultra => plane_builder.subdivisions(WATER_SIZE / 4),
-    };
-
-    let mesh = Mesh3d(meshes.add(plane_builder));
+    // Single plane covering the full world extent — 1 draw call, 1 material.
+    let world_size = Vec2::new(
+        layout.tile_size * grid.x as f32,
+        layout.tile_size * grid.y as f32,
+    );
+    let mesh = Mesh3d(meshes.add(PlaneMeshBuilder::from_size(world_size)));
     let root_translation = Vec3::new(layout.center.x, 0.0, layout.center.y);
     let water_height = layout.height;
+
+    let material = MeshMaterial3d(materials.add(StandardWaterMaterial {
+        base: StandardMaterial {
+            base_color: settings.base_color,
+            alpha_mode: settings.alpha_mode,
+            perceptual_roughness: 0.22,
+            ..default()
+        },
+        extension: WaterMaterial {
+            amplitude: settings.amplitude,
+            clarity: settings.clarity,
+            deep_color: settings.deep_color,
+            shallow_color: settings.shallow_color,
+            edge_color: settings.edge_color,
+            edge_scale: settings.edge_scale,
+            wave_speed: settings.wave_speed,
+            quality: settings.water_quality.into(),
+            refraction_strength: settings.refraction_strength,
+            foam_threshold: settings.foam_threshold,
+            foam_color: settings.foam_color,
+        },
+    }));
 
     commands
         .spawn((
@@ -161,67 +179,19 @@ fn rebuild_water_tiles(
             Visibility::Inherited,
         ))
         .with_children(|parent| {
-            let grid_center_x = tile_size * grid.x as f32 / 2.0;
-            let grid_center_y = tile_size * grid.y as f32 / 2.0;
-            for xi in 0..grid.x {
-                for yi in 0..grid.y {
-                    let x = tile_size * xi as f32 - grid_center_x;
-                    let y = tile_size * yi as f32 - grid_center_y;
-                    let coord_offset = Vec2::new(x, y);
-                    let tile_hash = ((x as i32).wrapping_mul(73856093)
-                        ^ (y as i32).wrapping_mul(19349663))
-                        as f32;
-                    let tile_offset = (tile_hash.abs() % 1000.0) / 1000.0 * 0.3;
-
-                    let normalized_dir = settings.wave_direction.normalize_or_zero();
-                    let material = MeshMaterial3d(materials.add(StandardWaterMaterial {
-                        base: StandardMaterial {
-                            base_color: settings.base_color,
-                            alpha_mode: settings.alpha_mode,
-                            perceptual_roughness: 0.22,
-                            ..default()
-                        },
-                        extension: WaterMaterial {
-                            amplitude: settings.amplitude,
-                            clarity: settings.clarity,
-                            deep_color: settings.deep_color,
-                            shallow_color: settings.shallow_color,
-                            edge_color: settings.edge_color,
-                            edge_scale: settings.edge_scale,
-                            coord_offset,
-                            coord_scale: Vec2::new(tile_size, tile_size),
-                            wave_dir_a: normalized_dir,
-                            wave_dir_b: normalized_dir,
-                            wave_blend: 1.0,
-                            quality: settings.water_quality.into(),
-                            refraction_strength: settings.refraction_strength,
-                            foam_threshold: settings.foam_threshold,
-                            foam_color: settings.foam_color,
-                        },
-                    }));
-
-                    let mut wave_dir = WaveDirection::with_duration(
-                        settings.wave_direction,
-                        settings.wave_direction_blend_duration,
-                    );
-                    wave_dir.tile_offset = tile_offset;
-
-                    let mut tile = parent.spawn((
-                        WaterTile::new(water_height, coord_offset),
-                        mesh.clone(),
-                        material,
-                        wave_dir,
-                        NotShadowCaster,
-                    ));
-
-                    match settings.water_quality {
-                        WaterQuality::Basic | WaterQuality::Medium => {
-                            tile.insert(NotShadowReceiver);
-                        }
-                        _ => {}
-                    };
-                }
-            }
+            parent.spawn((
+                WaterTile { offset: Vec2::ZERO },
+                Name::new("Water Tile"),
+                Transform::from_xyz(0.0, water_height, 0.0),
+                mesh,
+                material,
+                WaveDirection::with_duration(
+                    settings.wave_direction,
+                    settings.wave_direction_blend_duration,
+                ),
+                NotShadowCaster,
+                NotShadowReceiver,
+            ));
         });
 }
 

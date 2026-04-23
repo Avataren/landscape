@@ -2,7 +2,7 @@ mod player;
 
 use bevy::{
     camera::Exposure,
-    core_pipeline::tonemapping::Tonemapping,
+    core_pipeline::{prepass::DepthPrepass, tonemapping::Tonemapping},
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     input::mouse::AccumulatedMouseMotion,
     light::{
@@ -152,6 +152,7 @@ fn setup_scene(
     // to decide which tiles to load first.
     commands.spawn((
         Camera3d::default(),
+        DepthPrepass,
         Msaa::Sample4,
         Projection::Perspective(PerspectiveProjection {
             near: 0.1,
