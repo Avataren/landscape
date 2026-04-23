@@ -1,13 +1,12 @@
 use bevy::{
     light::{NotShadowCaster, NotShadowReceiver},
-    mesh::PlaneMeshBuilder,
     prelude::*,
 };
-use bevy_landscape::{TerrainConfig, TerrainMetadata, TerrainSourceDesc};
+use bevy_landscape::{TerrainCamera, TerrainConfig, TerrainMetadata, TerrainSourceDesc};
 use bevy_water::{
     water::material::{StandardWaterMaterial, WaterMaterial},
     water::{setup_water, WaterTile},
-    WaterPlugin, WaterSettings, WaterTiles, WaveDirection, WATER_SIZE,
+    WaterPlugin, WaterSettings, WaterTiles, WaveDirection,
 };
 
 #[derive(Resource, Clone, Copy)]
@@ -20,22 +19,40 @@ struct InitialWaterLayout(WaterLayout);
 struct WaterLayout {
     height: f32,
     center: Vec2,
-    grid: Option<UVec2>,
-    /// World-space size of each tile plane.  Equals `WATER_SIZE` for small
-    /// worlds; auto-scales up for large worlds so the grid stays ≤ 256 tiles
-    /// per axis and still covers the full terrain footprint.
-    tile_size: f32,
+    clipmap: Option<WaterClipmapLayout>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct WaterChunkLayout {
-    grid: UVec2,
+struct WaterClipmapLayout {
+    levels: u32,
+}
+
+#[derive(Clone, Debug)]
+struct PatchInstanceCpu {
+    lod_level: u32,
+    origin_ws: Vec2,
+    level_scale_ws: f32,
+}
+
+#[derive(Clone, Debug)]
+struct TrimInstanceCpu {
+    lod_level: u32,
+    origin_ws: Vec2,
+    level_scale_ws: f32,
+    is_horizontal: bool,
+}
+
+#[derive(Resource, Default)]
+struct WaterPatchEntities {
+    entities: Vec<Entity>,
+    block_count: usize,
+    last_clip_centers: Vec<IVec2>,
 }
 
 pub struct LandscapeWaterPlugin {
     /// Pre-computed world-space Y of the water surface.  `None` = no water for this level.
     pub water_height: Option<f32>,
-    /// World XZ extents used to size the tile grid to cover the terrain footprint.
+    /// World XZ extents used to choose clipmap coverage for the terrain footprint.
     pub world_min: Vec2,
     pub world_max: Vec2,
 }
@@ -63,19 +80,20 @@ impl Plugin for LandscapeWaterPlugin {
             amplitude: 8.0,
             clarity: 0.9,
             foam_threshold: 1.5,
-            // LandscapeWaterPlugin owns tile spawning so reloaded terrains can
-            // rebuild the grid instead of staying stuck with the startup size.
+            // LandscapeWaterPlugin owns patch spawning so reloaded terrains can
+            // rebuild the clipmap instead of staying stuck with the startup layout.
             spawn_tiles: None,
             ..WaterSettings::default()
         });
-        app.insert_resource(WaterEnabled(initial_layout.grid.is_some()));
+        app.insert_resource(WaterEnabled(initial_layout.clipmap.is_some()));
         app.insert_resource(InitialWaterLayout(initial_layout));
+        app.init_resource::<WaterPatchEntities>();
         app.add_plugins(WaterPlugin);
         app.add_systems(Startup, spawn_initial_water_tiles.after(setup_water));
         app.add_systems(
             Update,
             (
-                sync_water_to_terrain,
+                (sync_water_to_terrain, update_water_patch_transforms).chain(),
                 toggle_water,
                 apply_water_enabled.after(toggle_water),
             ),
@@ -87,77 +105,191 @@ fn effective_water_level(level: Option<f32>) -> Option<f32> {
     level.filter(|level| *level > 0.0)
 }
 
+const WATER_CLIPMAP_BLOCK_SIZE: u32 = 64;
+const WATER_CLIPMAP_BASE_SCALE: f32 = 4.0;
+const WATER_CLIPMAP_MIN_LEVELS: u32 = 6;
+const WATER_CLIPMAP_MAX_LEVELS: u32 = 8;
+const WATER_CLIPMAP_MIN_OUTER_HALF_EXTENT: f32 = 16_384.0;
+
 fn water_layout(world_min: Vec2, world_max: Vec2, water_height: Option<f32>) -> WaterLayout {
     let extent = world_max - world_min;
     let center = (world_min + world_max) * 0.5;
 
-    // Keep the tile grid ≤ MAX_TILES_PER_AXIS on each axis.  When the world is
-    // wider than that many 256 m tiles, the tile footprint scales up by the
-    // smallest integer that keeps the count in budget while still covering the
-    // full terrain footprint.
-    const MAX_TILES_PER_AXIS: u32 = 256;
-
-    let (grid, tile_size) = match water_height {
-        None => (None, WATER_SIZE as f32),
-        Some(_) => {
-            let raw_x = (extent.x / WATER_SIZE as f32).ceil() as u32 + 2;
-            let raw_y = (extent.y / WATER_SIZE as f32).ceil() as u32 + 2;
-            let scale =
-                ((raw_x.max(raw_y) as f32 / MAX_TILES_PER_AXIS as f32).ceil() as u32).max(1);
-            let tile_size = WATER_SIZE as f32 * scale as f32;
-            // +1 so the scaled grid still reaches the edge of the world extent.
-            let tiles_x = (raw_x / scale + 1).min(MAX_TILES_PER_AXIS).max(1);
-            let tiles_y = (raw_y / scale + 1).min(MAX_TILES_PER_AXIS).max(1);
-            if scale > 1 {
-                info!(
-                    "[Water] World is {:.0}×{:.0} m — scaling water tiles {}× to {:.0} m ({tiles_x}×{tiles_y} grid).",
-                    extent.x, extent.y, scale, tile_size
-                );
-            }
-            (Some(UVec2::new(tiles_x, tiles_y)), tile_size)
-        }
-    };
-
     WaterLayout {
         height: water_height.unwrap_or(0.0),
         center,
-        grid,
-        tile_size,
+        clipmap: water_height.map(|_| water_clipmap_layout(extent)),
     }
 }
 
-fn ocean_subdivisions(world_size: Vec2) -> u32 {
-    const TARGET_VERTEX_SPACING_M: f32 = 8.0;
-    const MIN_SUBDIVISIONS: u32 = 96;
-    const MAX_SUBDIVISIONS: u32 = 384;
-
-    ((world_size.max_element() / TARGET_VERTEX_SPACING_M).ceil() as u32)
-        .saturating_sub(2)
-        .clamp(MIN_SUBDIVISIONS, MAX_SUBDIVISIONS)
+fn water_level_scale(level: u32) -> f32 {
+    WATER_CLIPMAP_BASE_SCALE * (1u32 << level) as f32
 }
 
-fn water_chunk_layout(world_size: Vec2) -> WaterChunkLayout {
-    const MAX_CHUNK_SIZE_M: f32 = 2_048.0;
+fn water_ring_half_extent(level: u32) -> f32 {
+    2.0 * WATER_CLIPMAP_BLOCK_SIZE as f32 * water_level_scale(level)
+}
 
-    WaterChunkLayout {
-        grid: UVec2::new(
-            (world_size.x / MAX_CHUNK_SIZE_M).ceil().max(1.0) as u32,
-            (world_size.y / MAX_CHUNK_SIZE_M).ceil().max(1.0) as u32,
-        ),
+fn water_clipmap_layout(extent: Vec2) -> WaterClipmapLayout {
+    let target_half_extent = (extent.max_element() * 0.75).max(WATER_CLIPMAP_MIN_OUTER_HALF_EXTENT);
+    let mut levels = 1;
+    let mut outer_half_extent = water_ring_half_extent(0);
+
+    while outer_half_extent < target_half_extent && levels < WATER_CLIPMAP_MAX_LEVELS {
+        outer_half_extent *= 2.0;
+        levels += 1;
+    }
+
+    WaterClipmapLayout {
+        levels: levels.max(WATER_CLIPMAP_MIN_LEVELS),
     }
 }
 
-fn water_chunk_size(world_size: Vec2, chunk_layout: WaterChunkLayout) -> Vec2 {
-    Vec2::new(
-        world_size.x / chunk_layout.grid.x as f32,
-        world_size.y / chunk_layout.grid.y as f32,
+fn snap_camera_to_level_grid(camera_xz: Vec2, level_scale: f32) -> IVec2 {
+    IVec2::new(
+        (camera_xz.x / level_scale).floor() as i32,
+        (camera_xz.y / level_scale).floor() as i32,
     )
+}
+
+fn build_water_clip_centers(camera_xz: Vec2, levels: u32) -> Vec<IVec2> {
+    let fine_center = snap_camera_to_level_grid(camera_xz, water_level_scale(0));
+    (0..levels)
+        .map(|level| {
+            let shift = level as i32;
+            IVec2::new(fine_center.x >> shift, fine_center.y >> shift)
+        })
+        .collect()
+}
+
+fn build_block_origins(center: IVec2, scale: f32, m: u32, has_inner_hole: bool) -> Vec<Vec2> {
+    let m = m as i32;
+    let cols = [-2 * m, -m, 0, m];
+    let mut origins = Vec::with_capacity(if has_inner_hole { 12 } else { 16 });
+
+    for &bz in &cols {
+        for &bx in &cols {
+            if has_inner_hole && bx >= -m && bx < m && bz >= -m && bz < m {
+                continue;
+            }
+            origins.push(Vec2::new(
+                (center.x + bx) as f32 * scale,
+                (center.y + bz) as f32 * scale,
+            ));
+        }
+    }
+
+    origins
+}
+
+fn build_patch_instances(clip_centers: &[IVec2]) -> Vec<PatchInstanceCpu> {
+    let mut out = Vec::new();
+
+    for (level, center) in clip_centers.iter().copied().enumerate() {
+        let level = level as u32;
+        let scale = water_level_scale(level);
+        for origin in build_block_origins(center, scale, WATER_CLIPMAP_BLOCK_SIZE, level > 0) {
+            out.push(PatchInstanceCpu {
+                lod_level: level,
+                origin_ws: origin,
+                level_scale_ws: scale,
+            });
+        }
+    }
+
+    out
+}
+
+fn build_trim_instances(clip_centers: &[IVec2]) -> Vec<TrimInstanceCpu> {
+    let m = WATER_CLIPMAP_BLOCK_SIZE as i32;
+    let mut instances = Vec::new();
+
+    for level in 1..clip_centers.len() {
+        let scale = water_level_scale(level as u32);
+        let center = clip_centers[level];
+
+        let min_x = (center.x - m) as f32 * scale;
+        let min_z = (center.y - m) as f32 * scale;
+        let max_x = (center.x + m) as f32 * scale;
+        let max_z = (center.y + m) as f32 * scale;
+
+        instances.push(TrimInstanceCpu {
+            lod_level: level as u32,
+            origin_ws: Vec2::new(min_x, min_z),
+            level_scale_ws: scale,
+            is_horizontal: false,
+        });
+        instances.push(TrimInstanceCpu {
+            lod_level: level as u32,
+            origin_ws: Vec2::new(max_x - scale, min_z),
+            level_scale_ws: scale,
+            is_horizontal: false,
+        });
+        instances.push(TrimInstanceCpu {
+            lod_level: level as u32,
+            origin_ws: Vec2::new(min_x, min_z),
+            level_scale_ws: scale,
+            is_horizontal: true,
+        });
+        instances.push(TrimInstanceCpu {
+            lod_level: level as u32,
+            origin_ws: Vec2::new(min_x, max_z - scale),
+            level_scale_ws: scale,
+            is_horizontal: true,
+        });
+    }
+
+    instances
+}
+
+fn build_rect_mesh(nx: u32, nz: u32) -> Mesh {
+    let verts_per_x = nx + 1;
+    let verts_per_z = nz + 1;
+    let total_verts = (verts_per_x * verts_per_z) as usize;
+    let inv_nx = 1.0 / nx as f32;
+    let inv_nz = 1.0 / nz as f32;
+
+    let mut positions = Vec::with_capacity(total_verts);
+    let mut normals = Vec::with_capacity(total_verts);
+    let mut uvs = Vec::with_capacity(total_verts);
+
+    for z in 0..verts_per_z {
+        for x in 0..verts_per_x {
+            positions.push([x as f32, 0.0, z as f32]);
+            normals.push([0.0, 1.0, 0.0]);
+            uvs.push([x as f32 * inv_nx, z as f32 * inv_nz]);
+        }
+    }
+
+    let mut indices = Vec::with_capacity((nx * nz * 6) as usize);
+    for z in 0..nz {
+        for x in 0..nx {
+            let i00 = z * verts_per_x + x;
+            let i10 = i00 + 1;
+            let i01 = i00 + verts_per_x;
+            let i11 = i01 + 1;
+
+            indices.extend_from_slice(&[i00, i01, i10, i10, i01, i11]);
+        }
+    }
+
+    let mut mesh = Mesh::new(
+        bevy::mesh::PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(bevy::mesh::Indices::U32(indices));
+    mesh
 }
 
 fn rebuild_water_tiles(
     commands: &mut Commands,
     settings: &WaterSettings,
     layout: WaterLayout,
+    camera_xz: Vec2,
+    patch_entities: &mut WaterPatchEntities,
     existing_roots: &[Entity],
     root_children: &Query<&Children, With<WaterTiles>>,
     meshes: &mut Assets<Mesh>,
@@ -172,20 +304,26 @@ fn rebuild_water_tiles(
         commands.entity(*root).despawn();
     }
 
-    let Some(grid) = layout.grid else {
+    patch_entities.entities.clear();
+    patch_entities.block_count = 0;
+    patch_entities.last_clip_centers.clear();
+
+    let Some(clipmap) = layout.clipmap else {
         return;
     };
 
-    let world_size = Vec2::new(
-        layout.tile_size * grid.x as f32,
-        layout.tile_size * grid.y as f32,
-    );
-    let chunk_layout = water_chunk_layout(world_size);
-    let chunk_size = water_chunk_size(world_size, chunk_layout);
-    let mesh =
-        Mesh3d(meshes.add(
-            PlaneMeshBuilder::from_size(chunk_size).subdivisions(ocean_subdivisions(chunk_size)),
-        ));
+    let clip_centers = build_water_clip_centers(camera_xz, clipmap.levels);
+    let root_center_ws = clip_centers[0].as_vec2() * water_level_scale(0);
+    let patches = build_patch_instances(&clip_centers);
+    let trims = build_trim_instances(&clip_centers);
+
+    let block_mesh = Mesh3d(meshes.add(build_rect_mesh(
+        WATER_CLIPMAP_BLOCK_SIZE,
+        WATER_CLIPMAP_BLOCK_SIZE,
+    )));
+    let trim_quads = 2 * WATER_CLIPMAP_BLOCK_SIZE;
+    let trim_v_mesh = Mesh3d(meshes.add(build_rect_mesh(1, trim_quads)));
+    let trim_h_mesh = Mesh3d(meshes.add(build_rect_mesh(trim_quads, 1)));
     let water_height = layout.height;
 
     let material = MeshMaterial3d(materials.add(StandardWaterMaterial {
@@ -210,37 +348,149 @@ fn rebuild_water_tiles(
         },
     }));
 
-    commands
+    let wave_direction = WaveDirection::with_duration(
+        settings.wave_direction,
+        settings.wave_direction_blend_duration,
+    );
+
+    let mut spawned_entities = Vec::with_capacity(patches.len() + trims.len());
+    let root = commands
         .spawn((
             WaterTiles,
             Name::new("Water"),
-            Transform::from_xyz(layout.center.x, 0.0, layout.center.y),
+            Transform::from_xyz(root_center_ws.x, 0.0, root_center_ws.y),
             Visibility::Inherited,
         ))
-        .with_children(|parent| {
-            for tile_y in 0..chunk_layout.grid.y {
-                for tile_x in 0..chunk_layout.grid.x {
-                    let offset = Vec2::new(
-                        (tile_x as f32 + 0.5) * chunk_size.x - world_size.x * 0.5,
-                        (tile_y as f32 + 0.5) * chunk_size.y - world_size.y * 0.5,
-                    );
+        .id();
 
-                    parent.spawn((
-                        WaterTile { offset },
-                        Name::new(format!("Water Tile {tile_x}x{tile_y}")),
-                        Transform::from_xyz(offset.x, water_height, offset.y),
-                        mesh.clone(),
-                        material.clone(),
-                        WaveDirection::with_duration(
-                            settings.wave_direction,
-                            settings.wave_direction_blend_duration,
-                        ),
-                        NotShadowCaster,
-                        NotShadowReceiver,
-                    ));
-                }
-            }
-        });
+    commands.entity(root).with_children(|parent| {
+        for patch in &patches {
+            let offset = patch.origin_ws - root_center_ws;
+            let entity = parent
+                .spawn((
+                    WaterTile { offset },
+                    Name::new(format!("Water Patch L{}", patch.lod_level)),
+                    Transform {
+                        translation: Vec3::new(offset.x, water_height, offset.y),
+                        scale: Vec3::new(patch.level_scale_ws, 1.0, patch.level_scale_ws),
+                        ..default()
+                    },
+                    block_mesh.clone(),
+                    material.clone(),
+                    wave_direction,
+                    NotShadowCaster,
+                    NotShadowReceiver,
+                ))
+                .id();
+            spawned_entities.push(entity);
+        }
+
+        for trim in &trims {
+            let offset = trim.origin_ws - root_center_ws;
+            let mesh = if trim.is_horizontal {
+                trim_h_mesh.clone()
+            } else {
+                trim_v_mesh.clone()
+            };
+            let entity = parent
+                .spawn((
+                    WaterTile { offset },
+                    Name::new(format!("Water Trim L{}", trim.lod_level)),
+                    Transform {
+                        translation: Vec3::new(offset.x, water_height, offset.y),
+                        scale: Vec3::new(trim.level_scale_ws, 1.0, trim.level_scale_ws),
+                        ..default()
+                    },
+                    mesh,
+                    material.clone(),
+                    wave_direction,
+                    NotShadowCaster,
+                    NotShadowReceiver,
+                ))
+                .id();
+            spawned_entities.push(entity);
+        }
+    });
+
+    patch_entities.entities = spawned_entities;
+    patch_entities.block_count = patches.len();
+    patch_entities.last_clip_centers = clip_centers;
+}
+
+fn current_water_camera_xz(
+    camera_q: &Query<&Transform, (With<TerrainCamera>, Without<WaterTiles>)>,
+    fallback: Vec2,
+) -> Vec2 {
+    if let Ok(camera) = camera_q.single() {
+        camera.translation.xz()
+    } else {
+        fallback
+    }
+}
+
+fn update_water_patch_transforms(
+    mut patch_entities: ResMut<WaterPatchEntities>,
+    camera_q: Query<&Transform, (With<TerrainCamera>, Without<WaterTiles>)>,
+    mut water_root_q: Query<
+        &mut Transform,
+        (With<WaterTiles>, Without<TerrainCamera>, Without<WaterTile>),
+    >,
+    mut water_tile_q: Query<
+        (&mut Transform, &mut WaterTile),
+        (Without<WaterTiles>, Without<TerrainCamera>),
+    >,
+) {
+    if patch_entities.entities.is_empty() {
+        return;
+    }
+
+    let Ok(mut root_transform) = water_root_q.single_mut() else {
+        return;
+    };
+
+    let clip_centers = build_water_clip_centers(
+        current_water_camera_xz(&camera_q, root_transform.translation.xz()),
+        patch_entities.last_clip_centers.len() as u32,
+    );
+    if clip_centers == patch_entities.last_clip_centers {
+        return;
+    }
+
+    let root_center_ws = clip_centers[0].as_vec2() * water_level_scale(0);
+    root_transform.translation.x = root_center_ws.x;
+    root_transform.translation.z = root_center_ws.y;
+
+    let patches = build_patch_instances(&clip_centers);
+    let trims = build_trim_instances(&clip_centers);
+    let block_count = patches.len();
+
+    for (entity, patch) in patch_entities.entities[..block_count]
+        .iter()
+        .zip(patches.iter())
+    {
+        if let Ok((mut transform, mut water_tile)) = water_tile_q.get_mut(*entity) {
+            let offset = patch.origin_ws - root_center_ws;
+            transform.translation.x = offset.x;
+            transform.translation.z = offset.y;
+            transform.scale = Vec3::new(patch.level_scale_ws, 1.0, patch.level_scale_ws);
+            water_tile.offset = offset;
+        }
+    }
+
+    for (entity, trim) in patch_entities.entities[block_count..]
+        .iter()
+        .zip(trims.iter())
+    {
+        if let Ok((mut transform, mut water_tile)) = water_tile_q.get_mut(*entity) {
+            let offset = trim.origin_ws - root_center_ws;
+            transform.translation.x = offset.x;
+            transform.translation.z = offset.y;
+            transform.scale = Vec3::new(trim.level_scale_ws, 1.0, trim.level_scale_ws);
+            water_tile.offset = offset;
+        }
+    }
+
+    patch_entities.last_clip_centers = clip_centers;
 }
 
 fn apply_water_layout(
@@ -248,20 +498,24 @@ fn apply_water_layout(
     settings: &mut WaterSettings,
     enabled: &mut WaterEnabled,
     layout: WaterLayout,
+    camera_xz: Vec2,
+    patch_entities: &mut WaterPatchEntities,
     water_roots: &Query<Entity, With<WaterTiles>>,
     root_children: &Query<&Children, With<WaterTiles>>,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardWaterMaterial>,
 ) {
     settings.height = layout.height;
-    settings.spawn_tiles = layout.grid;
-    enabled.0 = layout.grid.is_some();
+    settings.spawn_tiles = None;
+    enabled.0 = layout.clipmap.is_some();
 
     let roots: Vec<Entity> = water_roots.iter().collect();
     rebuild_water_tiles(
         commands,
         settings,
         layout,
+        camera_xz,
+        patch_entities,
         &roots,
         root_children,
         meshes,
@@ -273,6 +527,8 @@ fn spawn_initial_water_tiles(
     initial_layout: Res<InitialWaterLayout>,
     mut settings: ResMut<WaterSettings>,
     mut enabled: ResMut<WaterEnabled>,
+    mut patch_entities: ResMut<WaterPatchEntities>,
+    camera_q: Query<&Transform, (With<TerrainCamera>, Without<WaterTiles>)>,
     water_roots: Query<Entity, With<WaterTiles>>,
     root_children: Query<&Children, With<WaterTiles>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -284,6 +540,8 @@ fn spawn_initial_water_tiles(
         &mut settings,
         &mut enabled,
         initial_layout.0,
+        current_water_camera_xz(&camera_q, initial_layout.0.center),
+        &mut patch_entities,
         &water_roots,
         &root_children,
         &mut meshes,
@@ -293,12 +551,14 @@ fn spawn_initial_water_tiles(
 
 /// Runs every frame; when TerrainSourceDesc changes (terrain reload or initial load)
 /// re-reads metadata.toml to pick up the new water_level and rebuilds the water
-/// tile grid to match the terrain footprint.
+/// clipmap to match the terrain footprint.
 fn sync_water_to_terrain(
     source_desc: Res<TerrainSourceDesc>,
     config: Res<TerrainConfig>,
     mut settings: ResMut<WaterSettings>,
     mut enabled: ResMut<WaterEnabled>,
+    mut patch_entities: ResMut<WaterPatchEntities>,
+    camera_q: Query<&Transform, (With<TerrainCamera>, Without<WaterTiles>)>,
     water_roots: Query<Entity, With<WaterTiles>>,
     root_children: Query<&Children, With<WaterTiles>>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -323,6 +583,8 @@ fn sync_water_to_terrain(
         &mut settings,
         &mut enabled,
         layout,
+        current_water_camera_xz(&camera_q, layout.center),
+        &mut patch_entities,
         &water_roots,
         &root_children,
         &mut meshes,
@@ -370,8 +632,8 @@ fn apply_water_enabled(
 #[cfg(test)]
 mod tests {
     use super::{
-        effective_water_level, ocean_subdivisions, water_chunk_layout, water_chunk_size,
-        water_layout,
+        build_patch_instances, build_trim_instances, build_water_clip_centers,
+        effective_water_level, water_clipmap_layout, water_layout,
     };
     use bevy::prelude::*;
 
@@ -382,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn layout_scales_grid_with_terrain_extent() {
+    fn layout_scales_clipmap_with_terrain_extent() {
         let layout = water_layout(
             Vec2::new(-15_360.0, -7_680.0),
             Vec2::new(15_360.0, 7_680.0),
@@ -390,26 +652,33 @@ mod tests {
         );
 
         assert_eq!(layout.center, Vec2::ZERO);
-        assert_eq!(layout.grid, Some(UVec2::new(123, 63)));
+        assert_eq!(
+            layout.clipmap,
+            Some(super::WaterClipmapLayout { levels: 7 })
+        );
         assert_eq!(layout.height, 120.0);
     }
 
     #[test]
-    fn ocean_subdivision_budget_is_clamped() {
-        assert_eq!(ocean_subdivisions(Vec2::splat(512.0)), 96);
-        assert_eq!(ocean_subdivisions(Vec2::splat(1_024.0)), 126);
-        assert_eq!(ocean_subdivisions(Vec2::splat(4_096.0)), 384);
+    fn clipmap_layout_keeps_minimum_levels() {
+        assert_eq!(water_clipmap_layout(Vec2::splat(2_048.0)).levels, 6);
     }
 
     #[test]
-    fn chunk_layout_caps_tile_extent() {
-        let world_size = Vec2::new(15_360.0, 7_680.0);
-        let layout = water_chunk_layout(world_size);
+    fn clipmap_centers_are_nested_by_shift() {
+        let centers = build_water_clip_centers(Vec2::new(13.9, 29.9), 4);
 
-        assert_eq!(layout.grid, UVec2::new(8, 4));
-        assert_eq!(
-            water_chunk_size(world_size, layout),
-            Vec2::new(1_920.0, 1_920.0)
-        );
+        assert_eq!(centers[0], IVec2::new(3, 7));
+        assert_eq!(centers[1], IVec2::new(1, 3));
+        assert_eq!(centers[2], IVec2::new(0, 1));
+        assert_eq!(centers[3], IVec2::ZERO);
+    }
+
+    #[test]
+    fn clipmap_patch_and_trim_counts_match_gpu_gems_layout() {
+        let centers = build_water_clip_centers(Vec2::ZERO, 6);
+
+        assert_eq!(build_patch_instances(&centers).len(), 16 + 12 * 5);
+        assert_eq!(build_trim_instances(&centers).len(), 4 * 5);
     }
 }

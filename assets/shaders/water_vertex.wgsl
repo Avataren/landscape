@@ -1,5 +1,6 @@
 #import bevy_pbr::{
   mesh_functions,
+  mesh_view_bindings::view,
   skinning,
   view_transformations::position_world_to_clip,
 }
@@ -33,6 +34,9 @@ const PI: f32 = 3.14159265358979323846;
 const G: f32 = 9.81;
 const NUM_WAVES: f32 = 8.0;
 const AMP_RATIO: f32 = 0.006;
+const CLIPMAP_BASE_SCALE: f32 = 4.0;
+const CLIPMAP_BLOCK_SIZE: f32 = 64.0;
+const CLIPMAP_MORPH_START_RATIO: f32 = 0.6;
 
 const WAVE_0: vec4<f32> = vec4(1.000, 0.000, 83.7, 0.70);
 const WAVE_1: vec4<f32> = vec4(0.921, 0.391, 61.3, 0.65);
@@ -101,6 +105,10 @@ fn get_wave_result(p: vec2<f32>) -> WaveResult {
   );
 }
 
+fn clipmap_ring_center(level_scale_ws: f32) -> vec2<f32> {
+  return floor(view.world_position.xz / level_scale_ws) * level_scale_ws;
+}
+
 @vertex
 fn vertex(vertex: Vertex) -> VertexOutput {
   var out: VertexOutput;
@@ -115,9 +123,44 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     model,
     vec4<f32>(vertex.position, 1.0),
   );
-  let wave = get_wave_result(base_world_position.xz);
+  let level_scale_ws = length(model[0].xyz);
+  let lod_f = round(log2(level_scale_ws / CLIPMAP_BASE_SCALE));
+  let ring_center = clipmap_ring_center(level_scale_ws);
+  let half_ring_ws = 2.0 * CLIPMAP_BLOCK_SIZE * level_scale_ws;
 
-  out.world_position = base_world_position + vec4<f32>(wave.displacement, 0.0);
+  let world_xz_orig = base_world_position.xz;
+  let dist_from_center = max(
+    abs(world_xz_orig.x - ring_center.x),
+    abs(world_xz_orig.y - ring_center.y),
+  );
+  let morph_start_ws = half_ring_ws * CLIPMAP_MORPH_START_RATIO;
+  let boundary_t = clamp(
+    (dist_from_center - morph_start_ws) / max(half_ring_ws - morph_start_ws, 0.001),
+    0.0,
+    1.0,
+  );
+  let boundary_alpha = boundary_t * boundary_t * (3.0 - 2.0 * boundary_t);
+  let boundary_dist_ws = half_ring_ws - dist_from_center;
+  let boundary_lock = select(
+    0.0,
+    1.0,
+    boundary_dist_ws <= (0.5 * level_scale_ws + 1e-4),
+  );
+  let morph_alpha = select(0.0, max(boundary_alpha, boundary_lock), lod_f > 0.5);
+
+  let coarse_step_ws = level_scale_ws * 2.0;
+  let coarse_world_xz = floor(world_xz_orig / coarse_step_ws) * coarse_step_ws;
+  let world_xz = mix(world_xz_orig, coarse_world_xz, morph_alpha);
+
+  let wave = get_wave_result(world_xz);
+  let displaced_world_position = vec4<f32>(
+    world_xz.x + wave.displacement.x,
+    base_world_position.y + wave.displacement.y,
+    world_xz.y + wave.displacement.z,
+    1.0,
+  );
+
+  out.world_position = displaced_world_position;
   out.world_normal = wave.normal;
   out.position = position_world_to_clip(out.world_position.xyz);
 
