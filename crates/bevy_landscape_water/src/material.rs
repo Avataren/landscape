@@ -1,7 +1,10 @@
 use bevy::{
     asset::{load_internal_asset, uuid_handle},
     mesh::MeshVertexBufferLayoutRef,
-    pbr::{ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline, MeshPipelineKey},
+    pbr::{
+        ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline,
+        MeshPipelineKey,
+    },
     prelude::*,
     reflect::{std_traits::ReflectDefault, Reflect},
     render::{render_asset::*, render_resource::*, texture::GpuImage},
@@ -40,6 +43,8 @@ pub struct WaterMaterial {
     /// Maximum water depth (metres) at which shoreline foam appears.
     /// Foam is full at 0 m depth and fades to zero at this depth.
     pub shoreline_foam_depth: f32,
+    /// Dominant wave / wind direction in world XZ.
+    pub wave_direction: Vec2,
 }
 
 impl Default for WaterMaterial {
@@ -54,9 +59,10 @@ impl Default for WaterMaterial {
             wave_speed: 1.0,
             quality: 4,
             refraction_strength: 15.0,
-            foam_threshold: 0.8,
+            foam_threshold: 0.6,
             foam_color: Color::srgba(1.0, 1.0, 1.0, 0.9),
             shoreline_foam_depth: 2.0,
+            wave_direction: Vec2::X,
         }
     }
 }
@@ -74,36 +80,38 @@ impl From<&WaterMaterial> for WaterMaterialKey {
 
 // Field order MUST match the WGSL WaterMaterial struct in water_bindings.wgsl.
 // Layout (encase):
-//   vec4 × 4   offsets  0–63
-//   f32  × 7   offsets 64–91  (4-byte implicit end-padding → 96 bytes)
+//   vec4 × 5   offsets   0–79
+//   f32  × 7   offsets  80–107  (4-byte implicit end-padding → 112 bytes)
 #[derive(Clone, Default, ShaderType)]
 pub struct WaterMaterialUniform {
-    pub deep_color:           Vec4,
-    pub shallow_color:        Vec4,
-    pub edge_color:           Vec4,
-    pub foam_color:           Vec4,
-    pub amplitude:            f32,
-    pub clarity:              f32,
-    pub edge_scale:           f32,
-    pub wave_speed:           f32,
-    pub refraction_strength:  f32,
-    pub foam_threshold:       f32,
+    pub deep_color: Vec4,
+    pub shallow_color: Vec4,
+    pub edge_color: Vec4,
+    pub foam_color: Vec4,
+    pub wave_direction: Vec4,
+    pub amplitude: f32,
+    pub clarity: f32,
+    pub edge_scale: f32,
+    pub wave_speed: f32,
+    pub refraction_strength: f32,
+    pub foam_threshold: f32,
     pub shoreline_foam_depth: f32,
 }
 
 impl AsBindGroupShaderType<WaterMaterialUniform> for WaterMaterial {
     fn as_bind_group_shader_type(&self, _images: &RenderAssets<GpuImage>) -> WaterMaterialUniform {
         WaterMaterialUniform {
-            deep_color:           self.deep_color.to_linear().to_vec4(),
-            shallow_color:        self.shallow_color.to_linear().to_vec4(),
-            edge_color:           self.edge_color.to_linear().to_vec4(),
-            foam_color:           self.foam_color.to_linear().to_vec4(),
-            amplitude:            self.amplitude,
-            clarity:              self.clarity,
-            edge_scale:           self.edge_scale,
-            wave_speed:           self.wave_speed,
-            refraction_strength:  self.refraction_strength,
-            foam_threshold:       self.foam_threshold,
+            deep_color: self.deep_color.to_linear().to_vec4(),
+            shallow_color: self.shallow_color.to_linear().to_vec4(),
+            edge_color: self.edge_color.to_linear().to_vec4(),
+            foam_color: self.foam_color.to_linear().to_vec4(),
+            wave_direction: self.wave_direction.extend(0.0).extend(0.0),
+            amplitude: self.amplitude,
+            clarity: self.clarity,
+            edge_scale: self.edge_scale,
+            wave_speed: self.wave_speed,
+            refraction_strength: self.refraction_strength,
+            foam_threshold: self.foam_threshold,
             shoreline_foam_depth: self.shoreline_foam_depth,
         }
     }
@@ -168,25 +176,37 @@ impl Plugin for WaterMaterialPlugin {
         load_internal_asset!(
             app,
             WATER_BINDINGS_HANDLE,
-            concat!(env!("CARGO_MANIFEST_DIR"), "/assets/shaders/water_bindings.wgsl"),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/shaders/water_bindings.wgsl"
+            ),
             Shader::from_wgsl
         );
         load_internal_asset!(
             app,
             WATER_FUNCTIONS_HANDLE,
-            concat!(env!("CARGO_MANIFEST_DIR"), "/assets/shaders/water_functions.wgsl"),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/shaders/water_functions.wgsl"
+            ),
             Shader::from_wgsl
         );
         load_internal_asset!(
             app,
             WATER_VERTEX_SHADER_HANDLE,
-            concat!(env!("CARGO_MANIFEST_DIR"), "/assets/shaders/water_vertex.wgsl"),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/shaders/water_vertex.wgsl"
+            ),
             Shader::from_wgsl
         );
         load_internal_asset!(
             app,
             WATER_FRAGMENT_SHADER_HANDLE,
-            concat!(env!("CARGO_MANIFEST_DIR"), "/assets/shaders/water_fragment.wgsl"),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/shaders/water_fragment.wgsl"
+            ),
             Shader::from_wgsl
         );
 
