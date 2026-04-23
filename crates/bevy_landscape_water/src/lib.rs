@@ -4,7 +4,6 @@ pub use material::{StandardWaterMaterial, WaterMaterial, WaterMaterialPlugin};
 
 use bevy::{
     light::{NotShadowCaster, NotShadowReceiver},
-    pbr::OpaqueRendererMethod,
     prelude::*,
 };
 use bevy_landscape::{TerrainCamera, TerrainConfig, TerrainMetadata, TerrainSourceDesc};
@@ -470,15 +469,20 @@ fn rebuild_water_tiles(
         base: StandardMaterial {
             base_color: settings.base_color,
             alpha_mode: AlphaMode::Opaque,
-            // Zero base roughness so Bevy's SSR pass picks up reflections;
-            // the fragment shader overrides this per-pixel via wave normals.
-            perceptual_roughness: 0.0,
-            // F0 ≈ 0.02 for water (IOR 1.333): reflectance = sqrt(F0 / 0.16) ≈ 0.354
+            // Low base roughness so the atmosphere IBL specular reads clearly.
+            // Fragment shader overrides perceptual_roughness per-pixel.
+            perceptual_roughness: 0.05,
+            // F0 ≈ 0.02 for water (IOR 1.333): reflectance = sqrt(0.02/0.16) ≈ 0.354
             reflectance: 0.35,
-            // Force deferred GBuffer so Bevy's SSR ray-marching can see the
-            // water surface normals.  Transmissive materials would stay forward
-            // and never receive SSR.
-            opaque_render_method: OpaqueRendererMethod::Deferred,
+            // Specular transmission makes water transparent and lets PBR
+            // compute screen-space refraction via the depth buffer.  IOR 1.333
+            // bends the refracted ray correctly.  The fragment shader drives
+            // the actual per-pixel transmission value via Beer's law.
+            specular_transmission: 0.94,
+            thickness: 2.0,
+            ior: 1.333,
+            attenuation_distance: 48.0,
+            attenuation_color: settings.deep_color,
             ..default()
         },
         extension: WaterMaterial {
@@ -795,9 +799,13 @@ fn sync_water_materials(
         if let Some(mat) = mats.get_mut(&handle.0) {
             mat.base.base_color = settings.base_color;
             mat.base.alpha_mode = AlphaMode::Opaque;
-            mat.base.perceptual_roughness = 0.0;
+            mat.base.perceptual_roughness = 0.05;
             mat.base.reflectance = 0.35;
-            mat.base.opaque_render_method = OpaqueRendererMethod::Deferred;
+            mat.base.specular_transmission = 0.94;
+            mat.base.thickness = 2.0;
+            mat.base.ior = 1.333;
+            mat.base.attenuation_distance = 48.0;
+            mat.base.attenuation_color = settings.deep_color;
 
             mat.extension.amplitude = settings.amplitude;
             mat.extension.clarity = settings.clarity;

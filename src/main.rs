@@ -1,18 +1,15 @@
 mod player;
 
 use bevy::{
-    camera::Exposure,
-    core_pipeline::{
-        prepass::{DeferredPrepass, DepthPrepass},
-        tonemapping::Tonemapping,
-    },
+    camera::{Exposure, ScreenSpaceTransmissionQuality},
+    core_pipeline::{prepass::DepthPrepass, tonemapping::Tonemapping},
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     input::mouse::AccumulatedMouseMotion,
     light::{
         light_consts::lux, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, FogVolume,
         VolumetricLight,
     },
-    pbr::{Atmosphere, AtmosphereSettings, ScatteringMedium, ScreenSpaceReflections},
+    pbr::{Atmosphere, AtmosphereSettings, ScatteringMedium},
     post_process::bloom::Bloom,
     prelude::*,
     render::{
@@ -154,17 +151,12 @@ fn setup_scene(
     // immediately in freecam mode.  preload_terrain_startup uses the XZ position
     // to decide which tiles to load first.
     commands.spawn((
-        Camera3d::default(),
-        DepthPrepass,
-        DeferredPrepass,
-        ScreenSpaceReflections {
-            // Raise roughness threshold so water (roughness 0–0.35) always
-            // gets SSR.  Default is 0.1, which would miss mid-rough areas.
-            perceptual_roughness_threshold: 0.5,
+        Camera3d {
+            screen_space_specular_transmission_quality: ScreenSpaceTransmissionQuality::High,
             ..default()
         },
-        // SSR requires no MSAA; use Msaa::Off explicitly.
-        Msaa::Off,
+        DepthPrepass,
+        Msaa::Sample4,
         Projection::Perspective(PerspectiveProjection {
             near: 0.1,
             // Terrain world is ~4 096 m across; 100 km gives comfortable margin

@@ -188,21 +188,21 @@ fn fragment(
     let edge_scatter   = shoreline_edge * (0.2 + 0.8 * (1.0 - cos_view));
     let water_rgb      = mix(absorbed_rgb, edge_color.rgb, edge_scatter * 0.32);
 
-    // Fresnel attenuation on base colour: at grazing angles, absorbed colour
-    // gives way to SSR/specular reflections.  Keep reduction modest so deep
-    // water doesn't go fully black on monitors without strong SSR signal.
-    let water_rgb_fresnel = water_rgb * (1.0 - fresnel * 0.55);
+    // Fresnel: at grazing angles the absorbed depth colour yields to specular
+    // sky reflections (via PBR IBL).  Attenuate modestly so the water colour
+    // reads at all view angles, not just steep/overhead.
+    let water_rgb_fresnel = water_rgb * (1.0 - fresnel * 0.45);
     var water_color = vec4<f32>(mix(water_rgb_fresnel, foam_color.rgb, foam_weight), 1.0);
 
     pbr_input.material.base_color *= water_color;
     pbr_input.material.base_color  = alpha_discard(pbr_input.material, pbr_input.material.base_color);
     pbr_input.material.base_color.a = 1.0;
     pbr_input.material.metallic = 0.0;
-    // Correct F0 for water (IOR 1.333): reflectance = sqrt(F0/0.16) ≈ 0.354.
+    // Correct F0 for water (IOR 1.333): reflectance = sqrt(0.02/0.16) ≈ 0.354.
     pbr_input.material.reflectance = vec3<f32>(0.35);
-    // Roughness: low base so SSR gives sharp reflections; rises with wave
-    // slope energy and foam.  Fresnel drives it toward zero at grazing angles
-    // (more mirror-like at the horizon — the classic Fresnel water look).
+    pbr_input.material.ior = 1.333;
+    // Roughness: rises with wave slope; Fresnel drives it toward zero at
+    // grazing (mirror-flat horizon = classic Fresnel water look).
     pbr_input.material.perceptual_roughness = clamp(
         mix(
             0.025 +
@@ -210,11 +210,28 @@ fn fragment(
             detail_wave.slope_energy * 0.14 +
             smoothstep(2.0, 12.0, pixel_size) * 0.06 +
             foam_weight * 0.22,
-            0.01,       // mirror-flat at grazing
+            0.01,           // mirror-flat at grazing angles
             fresnel
         ),
         0.01,
         0.40
+    );
+    // Fresnel drives specular transmission: at grazing angles water is a
+    // mirror (fresnel→1 → transmission→0); looking straight down it's
+    // mostly transparent (fresnel≈0.02 → full Beer's-law transmission).
+    pbr_input.material.specular_transmission = clamp(
+        (1.0 - fresnel) * 0.96 * clarity_sq * (1.0 - foam_weight * 0.85),
+        0.0, 0.98
+    );
+    pbr_input.material.diffuse_transmission = 0.07 * clarity * (1.0 - foam_weight) * fresnel * 0.1;
+    pbr_input.material.thickness = clamp(
+        beer_depth * mix(0.22, 1.35, clamp(refraction_strength / 24.0, 0.0, 1.0)),
+        0.25, 48.0
+    );
+    pbr_input.material.attenuation_distance = mix(8.0, 120.0, clarity_sq);
+    pbr_input.material.attenuation_color    = vec4<f32>(
+        mix(deep_color.rgb, shallow_color.rgb, 0.55 + shoreline_edge * 0.2),
+        1.0
     );
 
 #ifdef PREPASS_PIPELINE
