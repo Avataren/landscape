@@ -1,5 +1,11 @@
 use avian3d::prelude::*;
-use bevy::prelude::*;
+use bevy::{
+    asset::RenderAssetUsages,
+    camera::visibility::NoFrustumCulling,
+    mesh::{Indices, PrimitiveTopology},
+    pbr::wireframe::{Wireframe, WireframeColor},
+    prelude::*,
+};
 use std::collections::HashMap;
 
 use crate::terrain::{
@@ -12,12 +18,18 @@ use crate::terrain::{
 
 type FallbackTileCache = HashMap<(i32, i32), Vec<f32>>;
 
-#[derive(Component)]
-pub struct GlobalTerrainHeightfield;
-
 /// Marker for the local sliding heightfield that tracks the camera.
 #[derive(Component)]
 pub struct LocalTerrainCollider;
+
+/// Marker for the debug wireframe mesh that mirrors the physics trimesh.
+#[derive(Component)]
+pub struct TerrainCollisionDebugMesh;
+
+/// When `true`, a green wireframe debug mesh is rendered on top of the
+/// physics trimesh so you can visually verify collision accuracy.
+#[derive(Resource, Default)]
+pub struct ShowTerrainCollision(pub bool);
 
 /// Tracks the center of the last local heightfield build so we can skip
 /// frames where the camera hasn't moved far enough to warrant a rebuild.
@@ -28,78 +40,99 @@ pub struct LocalColliderState {
 
 impl Default for LocalColliderState {
     fn default() -> Self {
-        // Initialise to an unreachable position so the first frame always builds.
         Self {
             last_center: Vec2::splat(f32::MAX / 2.0),
         }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Single static world heightfield
-// ---------------------------------------------------------------------------
-
-/// Spawns one heightfield collider that covers the entire terrain footprint.
-///
-/// Reads LOD tiles directly from disk at startup (no streaming dependency),
-/// so the result is seamless — there are no per-tile boundaries for physics
-/// objects to get stuck on. The collider is never rebuilt or despawned.
-///
-/// Resolution: `collision_mip_level` controls which pre-baked mip is used.
-/// Level 3 = 8 m/cell for world_scale = 1.0. For a 16 384 m world this
-/// produces a 2 049 × 2 049 heightfield from 64 tile reads (~8 MB), which
-/// is fast, seamless, and accurate enough for both characters and projectiles.
-/// Lower this value (e.g. 2 → 4 m/cell, 256 tile reads) for more precision.
-pub fn spawn_global_heightfield(
-    desc: Res<TerrainSourceDesc>,
-    config: Res<TerrainConfig>,
-    mut commands: Commands,
-) {
-    spawn_global_heightfield_for_desc(&desc, &config, &mut commands);
+impl LocalColliderState {
+    /// Force a rebuild on the next `update_local_terrain_collider` call.
+    pub fn force_rebuild(&mut self) {
+        self.last_center = Vec2::splat(f32::MAX / 2.0);
+    }
 }
 
-pub fn spawn_global_heightfield_for_desc(
-    desc: &TerrainSourceDesc,
-    config: &TerrainConfig,
-    commands: &mut Commands,
-) {
-    let world_size_x = desc.world_max.x - desc.world_min.x;
-    let world_size_z = desc.world_max.y - desc.world_min.y;
+// ---------------------------------------------------------------------------
+// Local sliding terrain trimesh — exact match to the rendered geometry
+// ---------------------------------------------------------------------------
 
-    if world_size_x <= 0.0 || world_size_z <= 0.0 {
-        warn!("[Terrain] Global heightfield skipped: world bounds not set.");
+/// Maintains a terrain trimesh collider centred on the camera.
+///
+/// Built at full LOD-0 resolution (`world_scale` metres per cell) covering a
+/// ~256 m square.  Uses `Collider::trimesh` with the **same quad winding as
+/// the render mesh** (triangle 1: i00→i01→i10; triangle 2: i10→i01→i11)
+/// so physics contact normals and heights are identical to what is rendered.
+///
+/// `Collider::heightfield` uses Parry's internal diagonal (NW→SE), which is
+/// opposite to the render mesh (SW→NE).  On saddle-shaped cells the two
+/// surfaces differ by up to half the cell height range — metres of error on
+/// steep terrain, causing objects to hover or sink.
+///
+/// Rebuilt whenever the camera moves more than 32 m from the last centre.
+/// Cache misses are filled synchronously from disk to avoid height=0 holes.
+pub fn update_local_terrain_collider(
+    mut state: ResMut<LocalColliderState>,
+    view: Res<TerrainViewState>,
+    cache: Res<TerrainCollisionCache>,
+    config: Res<TerrainConfig>,
+    desc: Res<TerrainSourceDesc>,
+    collider_q: Query<Entity, With<LocalTerrainCollider>>,
+    debug_q: Query<Entity, With<TerrainCollisionDebugMesh>>,
+    show_debug: Res<ShowTerrainCollision>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut commands: Commands,
+) {
+    if cache.tile_size == 0 {
         return;
     }
 
-    let source_level = desc.collision_mip_level;
-    let cell_size = config.world_scale * (1u32 << source_level as u32) as f32;
-    let level_tile_world = config.tile_size as f32 * cell_size;
+    let camera_xz = view.camera_pos_ws.xz();
+    let cell_size = config.world_scale;
 
-    let nx = (world_size_x / cell_size).round() as usize + 1;
-    let nz = (world_size_z / cell_size).round() as usize + 1;
+    const COVERAGE: f32 = 256.0;
+    const REBUILD_DIST: f32 = COVERAGE * 0.125; // 32 m
+    // Compute n as the smallest ODD vertex count that spans at least COVERAGE.
+    // Odd n guarantees half_n = (n-1)/2 is a whole integer, so every vertex
+    // lands at an exact integer multiple of cell_size — the same grid used by
+    // the render mesh.  Even n (e.g. n=10 for world_scale=30) puts all vertices
+    // at half-integer positions, making ridges appear shifted by 0.5 cells.
+    let n_half = (COVERAGE * 0.5 / cell_size).ceil() as usize;
+    let n = (2 * n_half + 1).min(257).max(9);
 
-    let mut tile_cache: HashMap<(i32, i32), Vec<f32>> = HashMap::default();
+    if (camera_xz - state.last_center).length() <= REBUILD_DIST {
+        // If debug visibility changed without a position change, still
+        // rebuild so the debug mesh appears/disappears immediately.
+        let needs_debug_spawn = show_debug.0 && debug_q.is_empty();
+        let needs_debug_despawn = !show_debug.0 && !debug_q.is_empty();
+        if !needs_debug_spawn && !needs_debug_despawn {
+            return;
+        }
+    }
 
-    // heights[xi][zi] — keep the existing project convention.
-    let heights: Vec<Vec<f32>> = (0..nx)
-        .map(|xi| {
-            (0..nz)
-                .map(|zi| {
-                    let wx = (desc.world_min.x + xi as f32 * cell_size)
-                        .min(desc.world_max.x - cell_size * 0.5);
-                    let wz = (desc.world_min.y + zi as f32 * cell_size)
-                        .min(desc.world_max.y - cell_size * 0.5);
+    let cx = (camera_xz.x / cell_size).round() * cell_size;
+    let cz = (camera_xz.y / cell_size).round() * cell_size;
+    let center = Vec2::new(cx, cz);
+    let half_n = (n as f32 - 1.0) * 0.5;
 
-                    let tx = (wx / level_tile_world).floor() as i32;
-                    let tz = (wz / level_tile_world).floor() as i32;
+    let tile_world_size = config.tile_size as f32 * cell_size;
+    let mut fallback: FallbackTileCache = HashMap::default();
 
-                    let data = tile_cache.entry((tx, tz)).or_insert_with(|| {
+    // Build a flat vertex list: vertices[zi * n + xi]  (row-major, Z outer).
+    let mut vertices: Vec<Vec3> = Vec::with_capacity(n * n);
+    for zi in 0..n {
+        for xi in 0..n {
+            let wx = center.x + (xi as f32 - half_n) * cell_size;
+            let wz = center.y + (zi as f32 - half_n) * cell_size;
+            let h = cache
+                .sample_height(Vec2::new(wx, wz))
+                .unwrap_or_else(|| {
+                    let tx = (wx / tile_world_size).floor() as i32;
+                    let tz = (wz / tile_world_size).floor() as i32;
+                    let data = fallback.entry((tx, tz)).or_insert_with(|| {
                         load_tile_data(
-                            TileKey {
-                                level: source_level,
-                                x: tx,
-                                y: tz,
-                            },
+                            TileKey { level: 0, x: tx, y: tz },
                             config.tile_size,
                             config.world_scale,
                             1.0,
@@ -111,167 +144,102 @@ pub fn spawn_global_heightfield_for_desc(
                         )
                         .data
                     });
-
-                    let local_x = ((wx - tx as f32 * level_tile_world) / cell_size)
+                    let lx = ((wx - tx as f32 * tile_world_size) / cell_size)
                         .round()
                         .clamp(0.0, (config.tile_size - 1) as f32)
                         as usize;
-                    let local_z = ((wz - tz as f32 * level_tile_world) / cell_size)
+                    let lz = ((wz - tz as f32 * tile_world_size) / cell_size)
                         .round()
                         .clamp(0.0, (config.tile_size - 1) as f32)
                         as usize;
-
-                    data[local_z * config.tile_size as usize + local_x] * config.height_scale
-                })
-                .collect()
-        })
-        .collect();
-
-    let scale_x = (nx - 1) as f32 * cell_size;
-    let scale_z = (nz - 1) as f32 * cell_size;
-    let center_x = desc.world_min.x + scale_x * 0.5;
-    let center_z = desc.world_min.y + scale_z * 0.5;
-
-    commands.spawn((
-        GlobalTerrainHeightfield,
-        RigidBody::Static,
-        Collider::heightfield(heights, Vec3::new(scale_x, 1.0, scale_z)),
-        Transform::from_xyz(center_x, 0.0, center_z),
-    ));
-
-    info!(
-        "[Terrain] Global heightfield: {}x{} samples at {:.0} m/cell, {:.0}x{:.0} m coverage ({} tiles read).",
-        nx,
-        nz,
-        cell_size,
-        scale_x,
-        scale_z,
-        tile_cache.len(),
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Local sliding heightfield — high resolution near the player
-// ---------------------------------------------------------------------------
-
-/// Maintains a high-resolution heightfield collider centred on the camera.
-///
-/// The global heightfield uses a coarse LOD and can deviate several metres
-/// from the rendered surface on steep or curved terrain — enough for a
-/// character capsule to visibly clip through.  This local collider is built
-/// at full LOD-0 resolution (`world_scale` metres per cell) and covers a
-/// ~256 m square, which is more than enough for any character movement.
-///
-/// It is rebuilt (old despawned, new spawned) whenever the camera moves
-/// more than 32 world units from the last build centre.
-///
-/// When the collision cache doesn't yet have a tile (new area being streamed
-/// in), the missing samples are filled by reading the tile from disk
-/// synchronously — the same approach used by `spawn_global_heightfield`.
-/// This prevents height=0 holes that would let the player fall through terrain.
-pub fn update_local_terrain_collider(
-    mut state: ResMut<LocalColliderState>,
-    view: Res<TerrainViewState>,
-    cache: Res<TerrainCollisionCache>,
-    config: Res<TerrainConfig>,
-    desc: Res<TerrainSourceDesc>,
-    collider_q: Query<Entity, With<LocalTerrainCollider>>,
-    mut commands: Commands,
-) {
-    // Wait until the collision cache has been initialised by at least one tile.
-    if cache.tile_size == 0 {
-        return;
+                    data[lz * config.tile_size as usize + lx] * config.height_scale
+                });
+            vertices.push(Vec3::new(wx, h, wz));
+        }
     }
 
-    let camera_xz = view.camera_pos_ws.xz();
-    let cell_size = config.world_scale; // finest available resolution
-
-    // Target ~256 world-unit coverage.  Cap at 257 samples per axis so
-    // rebuilds stay cheap even on very fine world_scales.
-    const COVERAGE: f32 = 256.0;
-    const REBUILD_DIST: f32 = COVERAGE * 0.125; // 32 m — keeps the high-res collider centred
-    let n = ((COVERAGE / cell_size).ceil() as usize + 1).min(257).max(9);
-
-    if (camera_xz - state.last_center).length() <= REBUILD_DIST {
-        return;
+    // Triangulate with the same winding as build_rect_mesh so physics surfaces
+    // match the rendered geometry exactly.
+    // Quad (xi, zi):  i00=(zi*n+xi)  i10=(zi*n+xi+1)
+    //                 i01=((zi+1)*n+xi)  i11=((zi+1)*n+xi+1)
+    // Tri 1: i00, i01, i10   Tri 2: i10, i01, i11
+    let quads = (n - 1) * (n - 1);
+    let mut indices: Vec<[u32; 3]> = Vec::with_capacity(quads * 2);
+    for zi in 0..(n - 1) {
+        for xi in 0..(n - 1) {
+            let i00 = (zi * n + xi) as u32;
+            let i10 = (zi * n + xi + 1) as u32;
+            let i01 = ((zi + 1) * n + xi) as u32;
+            let i11 = ((zi + 1) * n + xi + 1) as u32;
+            indices.push([i00, i01, i10]);
+            indices.push([i10, i01, i11]);
+        }
     }
 
-    // Snap centre to the cell grid so the heightfield doesn't jitter.
-    let cx = (camera_xz.x / cell_size).round() * cell_size;
-    let cz = (camera_xz.y / cell_size).round() * cell_size;
-    let center = Vec2::new(cx, cz);
-    let half_n = (n as f32 - 1.0) * 0.5;
-
-    // Tiles loaded synchronously as fallback when the streaming cache misses.
-    let tile_world_size = config.tile_size as f32 * cell_size;
-    let mut fallback: FallbackTileCache = HashMap::default();
-
-    // Build heights[column][row] (Avian heightfield convention).
-    let heights: Vec<Vec<f32>> = (0..n)
-        .map(|xi| {
-            (0..n)
-                .map(|zi| {
-                    let wx = center.x + (xi as f32 - half_n) * cell_size;
-                    let wz = center.y + (zi as f32 - half_n) * cell_size;
-                    cache
-                        .sample_height(Vec2::new(wx, wz))
-                        .unwrap_or_else(|| {
-                            // Cache miss — read the LOD-0 tile from disk so there are no
-                            // height=0 holes that let the player fall through terrain.
-                            let tx = (wx / tile_world_size).floor() as i32;
-                            let tz = (wz / tile_world_size).floor() as i32;
-                            let data = fallback.entry((tx, tz)).or_insert_with(|| {
-                                load_tile_data(
-                                    TileKey { level: 0, x: tx, y: tz },
-                                    config.tile_size,
-                                    config.world_scale,
-                                    1.0,
-                                    desc.max_mip_level,
-                                    desc.tile_root.as_deref(),
-                                    None,
-                                    Some((desc.world_min, desc.world_max)),
-                                    false,
-                                )
-                                .data
-                            });
-                            let lx = ((wx - tx as f32 * tile_world_size) / cell_size)
-                                .round()
-                                .clamp(0.0, (config.tile_size - 1) as f32)
-                                as usize;
-                            let lz = ((wz - tz as f32 * tile_world_size) / cell_size)
-                                .round()
-                                .clamp(0.0, (config.tile_size - 1) as f32)
-                                as usize;
-                            data[lz * config.tile_size as usize + lx] * config.height_scale
-                        })
-                })
-                .collect()
-        })
-        .collect();
-
-    let span = (n - 1) as f32 * cell_size;
-
-    // Despawn the previous local collider before spawning the new one.
     for entity in collider_q.iter() {
+        commands.entity(entity).despawn();
+    }
+    for entity in debug_q.iter() {
         commands.entity(entity).despawn();
     }
 
     commands.spawn((
         LocalTerrainCollider,
         RigidBody::Static,
-        Collider::heightfield(heights, Vec3::new(span, 1.0, span)),
-        Transform::from_xyz(center.x, 0.0, center.y),
+        Collider::trimesh(vertices.clone(), indices.clone()),
+        Transform::IDENTITY,
     ));
+
+    if show_debug.0 {
+        // Build a Bevy Mesh from the same vertices (+tiny Y offset to prevent z-fighting).
+        let debug_verts: Vec<[f32; 3]> = vertices
+            .iter()
+            .map(|v| [v.x, v.y + 0.05, v.z])
+            .collect();
+        let flat_indices: Vec<u32> = indices.iter().flat_map(|tri| tri.iter().copied()).collect();
+
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, debug_verts);
+        // Normals aren't needed for wireframe-only rendering, but Bevy requires them.
+        mesh.insert_attribute(
+            Mesh::ATTRIBUTE_NORMAL,
+            vec![[0.0_f32, 1.0, 0.0]; n * n],
+        );
+        mesh.insert_indices(Indices::U32(flat_indices));
+
+        let mat = materials.add(StandardMaterial {
+            base_color: Color::srgba(0.0, 1.0, 0.0, 0.0),
+            alpha_mode: AlphaMode::Blend,
+            unlit: true,
+            cull_mode: None,
+            ..default()
+        });
+
+        commands.spawn((
+            TerrainCollisionDebugMesh,
+            Mesh3d(meshes.add(mesh)),
+            MeshMaterial3d(mat),
+            Transform::IDENTITY,
+            Wireframe,
+            WireframeColor {
+                color: Color::srgb(0.0, 1.0, 0.2),
+            },
+            NoFrustumCulling,
+        ));
+    }
 
     let fallback_tiles = fallback.len();
     if fallback_tiles > 0 {
         info!(
-            "[Terrain] Local heightfield rebuilt: {}×{} @ {:.1} m/cell, centre ({:.0}, {:.0}) [{} tile(s) from disk]",
+            "[Terrain] Local trimesh rebuilt: {}×{} @ {:.1} m/cell, centre ({:.0},{:.0}) [{} tile(s) from disk]",
             n, n, cell_size, center.x, center.y, fallback_tiles
         );
     } else {
         info!(
-            "[Terrain] Local heightfield rebuilt: {}×{} @ {:.1} m/cell, centre ({:.0}, {:.0})",
+            "[Terrain] Local trimesh rebuilt: {}×{} @ {:.1} m/cell, centre ({:.0},{:.0})",
             n, n, cell_size, center.x, center.y
         );
     }

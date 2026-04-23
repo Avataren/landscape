@@ -46,8 +46,7 @@ use pbr_textures::{
     rebuild_pbr_textures_system, PbrRebuildProgress, PbrRebuildState, PbrTexturesDirty,
 };
 use physics_colliders::{
-    spawn_global_heightfield, spawn_global_heightfield_for_desc, update_local_terrain_collider,
-    GlobalTerrainHeightfield, LocalColliderState,
+    update_local_terrain_collider, LocalColliderState, ShowTerrainCollision,
 };
 use render::TerrainRenderPlugin;
 use residency::update_required_tiles;
@@ -132,6 +131,7 @@ impl Plugin for TerrainPlugin {
             .init_resource::<TerrainStreamQueue>()
             .init_resource::<TerrainCollisionCache>()
             .init_resource::<LocalColliderState>()
+            .init_resource::<ShowTerrainCollision>()
             .init_resource::<PatchEntities>()
             .init_resource::<TerrainClipmapUploads>()
             .init_resource::<MaterialLibrary>()
@@ -141,10 +141,6 @@ impl Plugin for TerrainPlugin {
             // Startup
             .add_systems(Startup, (setup_tile_channel, setup_terrain).chain())
             .add_systems(PostStartup, preload_terrain_startup)
-            .add_systems(
-                PostStartup,
-                spawn_global_heightfield.after(preload_terrain_startup),
-            )
             // Update: ordered as per handoff spec
             .add_systems(First, begin_terrain_upload_frame)
             .add_systems(Update, update_terrain_view_state)
@@ -832,8 +828,8 @@ fn reload_terrain_system(
     mut commands: Commands,
     mut patch_entities: ResMut<PatchEntities>,
     mut pbr_dirty: ResMut<PbrTexturesDirty>,
+    mut local_collider_state: ResMut<LocalColliderState>,
     camera_q: Query<(&Transform, &TerrainCamera)>,
-    global_heightfield_q: Query<Entity, With<GlobalTerrainHeightfield>>,
 ) {
     for req in reload_rx.read() {
         let new_config = req.config.clone();
@@ -856,15 +852,13 @@ fn reload_terrain_system(
         pbr_dirty.0 = true; // rebuild PBR texture arrays from the newly loaded library
 
         // --- 2. Despawn ALL old patch entities immediately --------------------
-        // This prevents stale geometry (wrong world_scale transforms) from
-        // appearing in the render — especially important for shadow cascades.
         for entity in patch_entities.entities.drain(..) {
             commands.entity(entity).despawn();
         }
         patch_entities.block_count = 0;
-        for entity in &global_heightfield_q {
-            commands.entity(entity).despawn();
-        }
+        // Reset local collider state so update_local_terrain_collider rebuilds
+        // with fresh tile data on the same frame (it runs after this system).
+        *local_collider_state = LocalColliderState::default();
         patch_entities.last_clip_centers.clear();
 
         // --- 3. Create brand-new GPU clipmap textures -------------------------
@@ -966,7 +960,6 @@ fn reload_terrain_system(
             &mut collision,
         );
 
-        spawn_global_heightfield_for_desc(&new_desc, &new_config, &mut commands);
     }
 }
 

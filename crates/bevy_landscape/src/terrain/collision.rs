@@ -90,10 +90,15 @@ impl TerrainCollisionCache {
 }
 
 fn bilinear_sample(data: &[f32], size: u32, uv: Vec2) -> f32 {
-    let u = uv.x.clamp(0.0, 1.0) * (size - 1) as f32;
-    let v = uv.y.clamp(0.0, 1.0) * (size - 1) as f32;
-    let x0 = u.floor() as usize;
-    let y0 = v.floor() as usize;
+    // Scale by `size` (not `size - 1`): world_to_tile normalises by
+    // tile_world_size = tile_size * world_scale, so uv=0 → index 0 and
+    // uv=(n/tile_size) → index n exactly for integer world positions n.
+    // Using (size-1) would shift every sample by up to half a cell,
+    // producing metre-scale height errors on steep terrain.
+    let u = uv.x.clamp(0.0, 1.0) * size as f32;
+    let v = uv.y.clamp(0.0, 1.0) * size as f32;
+    let x0 = (u.floor() as usize).min(size as usize - 1);
+    let y0 = (v.floor() as usize).min(size as usize - 1);
     let x1 = (x0 + 1).min(size as usize - 1);
     let y1 = (y0 + 1).min(size as usize - 1);
     let fx = u.fract();

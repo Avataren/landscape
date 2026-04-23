@@ -27,7 +27,9 @@ use bevy::{
     prelude::*,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
-use bevy_landscape::{TerrainCamera, TerrainCollisionCache, TerrainConfig};
+use bevy_landscape::{
+    LocalColliderState, ShowTerrainCollision, TerrainCamera, TerrainCollisionCache, TerrainConfig,
+};
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -36,6 +38,8 @@ use bevy_landscape::{TerrainCamera, TerrainCollisionCache, TerrainConfig};
 const CAPSULE_RADIUS: f32 = 0.3;
 /// Cylinder section length.  Total height = 2 × RADIUS + LENGTH = 1.8 m.
 const CAPSULE_LENGTH: f32 = 1.2;
+const CUBE_SHOOT_SPEED: f32 = 40.0;
+const CUBE_HALF_EXTENT: f32 = 0.4;
 /// Distance from body centre up to the camera (eye height from centre).
 /// Body centre sits 0.9 m above ground when settled → camera is 2 m above ground.
 const EYE_OFFSET: f32 = 1.1;
@@ -86,13 +90,19 @@ impl Plugin for PlayerPlugin {
                 (
                     spawn_player_once,
                     toggle_mode,
+                    toggle_collision_debug,
                     player_look,
                     player_move.after(player_look),
+                    shoot_cube,
                 ),
             )
-            // PostUpdate runs after FixedPostUpdate (where Avian writeback lives).
-            // clamp_player_to_terrain must run before sync_camera_to_body so the
-            // camera sees the corrected position on the same frame.
+            // Run the terrain clamp BEFORE every Avian physics step so the
+            // bilinear-sampled surface (which matches the rendered terrain exactly)
+            // is enforced even when multiple fixed steps fire in one render frame.
+            .add_systems(FixedPreUpdate, clamp_player_to_terrain)
+            // PostUpdate runs after all FixedPostUpdate (Avian writeback).
+            // The clamp here catches any residual below-terrain drift, then
+            // sync_camera_to_body reads the corrected position.
             .add_systems(
                 PostUpdate,
                 (clamp_player_to_terrain, sync_camera_to_body).chain(),
@@ -301,4 +311,51 @@ fn sync_camera_to_body(
 
     cam_t.translation = body_t.translation + Vec3::Y * EYE_OFFSET;
     cam_t.rotation = Quat::from_rotation_y(look.yaw) * Quat::from_rotation_x(look.pitch);
+}
+
+/// F3 toggles the green wireframe overlay that mirrors the physics trimesh.
+fn toggle_collision_debug(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut show: ResMut<ShowTerrainCollision>,
+    mut local_state: ResMut<LocalColliderState>,
+) {
+    if keys.just_pressed(KeyCode::F3) {
+        show.0 = !show.0;
+        local_state.force_rebuild();
+    }
+}
+
+/// Left-click fires a small physics cube from the camera eye in the look direction.
+/// Works in both Walking and Freecam mode.
+fn shoot_cube(
+    buttons: Res<ButtonInput<MouseButton>>,
+    cam_q: Query<&Transform, With<TerrainCamera>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut commands: Commands,
+) {
+    if !buttons.just_pressed(MouseButton::Left) {
+        return;
+    }
+    let Ok(cam_t) = cam_q.single() else { return };
+
+    let forward: Vec3 = cam_t.forward().into();
+    let spawn_pos = cam_t.translation + forward * 1.5;
+    let velocity = forward * CUBE_SHOOT_SPEED;
+
+    commands.spawn((
+        Mesh3d(meshes.add(Cuboid::new(
+            CUBE_HALF_EXTENT * 2.0,
+            CUBE_HALF_EXTENT * 2.0,
+            CUBE_HALF_EXTENT * 2.0,
+        ))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(1.0, 0.3, 0.1),
+            ..default()
+        })),
+        Transform::from_translation(spawn_pos),
+        RigidBody::Dynamic,
+        Collider::cuboid(CUBE_HALF_EXTENT * 2.0, CUBE_HALF_EXTENT * 2.0, CUBE_HALF_EXTENT * 2.0),
+        LinearVelocity(velocity),
+    ));
 }
