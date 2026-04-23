@@ -84,7 +84,12 @@ fn fragment(
 
     let wave         = water_fn::get_wave_result(w_pos, pixel_size);
     let detail_wave  = water_fn::get_detail_wave_result(w_pos, pixel_size);
-    let water_normal = water_fn::combine_surface_normal(wave.normal, detail_wave.slope);
+    // Swell normals: 3 cross-swell waves (47 m, 131 m, 173 m) computed only in
+    // the fragment shader.  These break the periodic repetition visible at
+    // distance when only the 3 longest geometry waves remain after LOD filter.
+    let swell_n      = water_fn::get_swell_normal(w_pos, pixel_size);
+    let swell_slope  = water_fn::normal_to_slope(swell_n);
+    let water_normal = water_fn::combine_surface_normal(wave.normal, detail_wave.slope + swell_slope);
     in.world_normal  = water_normal;
 
 #ifdef VISIBILITY_RANGE_DITHER

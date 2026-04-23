@@ -42,8 +42,24 @@ const DETAIL_WAVE_5: vec4<f32> = vec4( 0.940,  0.342,  2.4, 0.58);
 const DETAIL_WAVE_6: vec4<f32> = vec4( 0.899, -0.438,  1.7, 0.48);
 const DETAIL_WAVE_7: vec4<f32> = vec4( 0.707,  0.707,  1.2, 0.38);
 
+// Normal-only swell waves — evaluated in the fragment shader, never in the
+// vertex shader.  Their normal contributions break up the periodic repetition
+// that becomes visible at distance when only the 3–4 longest geometry waves
+// remain after LOD filtering.
+//
+// Direction xy: local frame (x=along wind, y=across) — rotated by wind.
+// z: wavelength (world units).  Ratios with 92 m dominant wave are irrational
+// (√2 ≈ 131/92, golden ≈ 173/92) so the patterns never spatially re-align.
+// w: unused (kept for struct alignment / future use).
+const SWELL_WAVE_0: vec4<f32> = vec4( 0.906,  0.423,  47.0, 0.0);  // 25° — gap filler 39-51m
+const SWELL_WAVE_1: vec4<f32> = vec4( 0.574,  0.819, 131.0, 0.0);  // 55° cross-swell  (131/92 ≈ √2)
+const SWELL_WAVE_2: vec4<f32> = vec4( 0.766, -0.643, 173.0, 0.0);  // -40° broad swell (173/92 ≈ φ×1.16)
+
 const NUM_GEOM_WAVES:      f32 = 6.0;
 const GEOM_AMP_RATIO:      f32 = 0.0048;
+// Swell waves use the same ratio but are scaled down so they add variation
+// without fighting the primary geometry normal.
+const SWELL_AMP_SCALE:     f32 = 0.40;
 const DETAIL_AMP_RATIO:    f32 = 0.0016;
 const DETAIL_SHARPNESS:    f32 = 3.5;
 const DETAIL_SPEED_BOOST:  f32 = 1.35;
@@ -179,4 +195,22 @@ fn get_detail_wave_result(p: vec2<f32>, footprint: f32) -> DetailWaveResult {
     let d7 = detail_wave(p, t, DETAIL_WAVE_7, amp, wave_lod_weight(DETAIL_WAVE_7.z, footprint * 0.85)); slope += d7.slope; crest = max(crest, d7.crest); slope_energy += d7.slope_energy;
 
     return DetailWaveResult(slope, crest, slope_energy);
+}
+
+// Returns a normalised surface normal contributed by the swell waves only.
+// Only called in the fragment shader — never in the vertex shader — so it
+// adds macro variation to the shading without altering the mesh geometry or
+// the foam height calculation.
+fn get_swell_normal(p: vec2<f32>, footprint: f32) -> vec3<f32> {
+    let t   = globals.time;
+    let amp = material.amplitude * SWELL_AMP_SCALE;
+
+    var sumn = vec3(0.0);
+    let s0 = gerstner_wave(p, t, SWELL_WAVE_0, amp, wave_lod_weight(SWELL_WAVE_0.z, footprint));
+    let s1 = gerstner_wave(p, t, SWELL_WAVE_1, amp, wave_lod_weight(SWELL_WAVE_1.z, footprint));
+    let s2 = gerstner_wave(p, t, SWELL_WAVE_2, amp, wave_lod_weight(SWELL_WAVE_2.z, footprint));
+    sumn += s0.normal;
+    sumn += s1.normal;
+    sumn += s2.normal;
+    return normalize(vec3(-sumn.x, 1.0 - sumn.y, -sumn.z));
 }
