@@ -1266,7 +1266,6 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "bevy_landscape",
- "bevy_water",
 ]
 
 [[package]]
@@ -1902,13 +1901,6 @@ dependencies = [
  "bevy_platform",
  "disqualified",
  "thread_local",
-]
-
-[[package]]
-name = "bevy_water"
-version = "0.18.1"
-dependencies = [
- "bevy",
 ]
 
 [[package]]

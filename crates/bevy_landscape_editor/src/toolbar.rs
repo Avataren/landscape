@@ -20,37 +20,37 @@ use crate::sky_panel::SkyPanelState;
 #[derive(SystemParam)]
 pub(crate) struct WaterParams<'w> {
     settings: Option<ResMut<'w, WaterSettings>>,
-    enabled:  Option<Res<'w, WaterEnabled>>,
+    enabled: Option<Res<'w, WaterEnabled>>,
 }
 
 /// Bundled preferences params — counts as a single system parameter.
 #[derive(SystemParam)]
 pub(crate) struct PrefsUi<'w> {
-    prefs:  Res<'w, AppPreferences>,
+    prefs: Res<'w, AppPreferences>,
     dialog: ResMut<'w, PreferencesDialog>,
 }
 
 #[derive(Resource)]
 pub(crate) struct ToolbarState {
-    view_distance_rings:       u32,
-    dragging_view_distance:    bool,
-    pending_view_distance:     Option<u32>,
+    view_distance_rings: u32,
+    dragging_view_distance: bool,
+    pending_view_distance: Option<u32>,
     /// Water height as set by the level / generator (world units).
-    water_base_height:         f32,
+    water_base_height: f32,
     /// User offset applied on top of the base height, range [-100, 100] m.
-    water_height_offset:       f32,
+    water_height_offset: f32,
     /// True once we've read the initial height from WaterSettings at least once.
-    water_height_initialized:  bool,
+    water_height_initialized: bool,
 }
 
 impl Default for ToolbarState {
     fn default() -> Self {
         Self {
-            view_distance_rings:      TerrainConfig::default().clipmap_levels,
-            dragging_view_distance:   false,
-            pending_view_distance:    None,
-            water_base_height:        0.0,
-            water_height_offset:      0.0,
+            view_distance_rings: TerrainConfig::default().clipmap_levels,
+            dragging_view_distance: false,
+            pending_view_distance: None,
+            water_base_height: 0.0,
+            water_height_offset: 0.0,
             water_height_initialized: false,
         }
     }

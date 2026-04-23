@@ -104,9 +104,29 @@ fn fragment(
     let shoreline_foam_depth  = water_bindings::material.shoreline_foam_depth;
 
     // -----------------------------------------------------------------------
-    // Water absorption through the actual view path, not just vertical depth.
+    // Fresnel — Schlick approximation for water (IOR = 1.333, F0 ≈ 0.02).
+    //
+    // At normal incidence water is ~2% reflective (mostly shows absorbed depth
+    // colour). At grazing angles it approaches 100% reflective (mirror).  This
+    // is the dominant visual cue that distinguishes water from flat paint.
+    //
+    //   fresnel = F0 + (1 - F0) × (1 - cosθ)^5,   F0 = 0.02
+    //
+    // Uses: (a) roughness — lower roughness at grazing → sharper SSR
+    //       (b) base_color — attenuate at grazing so SSR reflections read
+    //           clearly without fighting the absorption colour
     // -----------------------------------------------------------------------
     let view_to_camera = normalize(view.world_position.xyz - in.world_position.xyz);
+    let cos_view       = clamp(dot(view_to_camera, water_normal), 0.0, 1.0);
+    let fresnel        = 0.02 + 0.98 * pow(1.0 - cos_view, 5.0);
+
+    // -----------------------------------------------------------------------
+    // Water absorption through the actual view path, not just vertical depth.
+    //
+    // In the deferred GBuffer pass (PREPASS_PIPELINE is defined), terrain
+    // depth from the prepass is unreliable — water writes its own depth there.
+    // Fall back to view-angle-based depth approximation in that case.
+    // -----------------------------------------------------------------------
 #ifdef DEPTH_PREPASS
     let path_cos   = max(dot(view_to_camera, vec3(0.0, 1.0, 0.0)), 0.08);
     let beer_depth = terrain_depth_m / path_cos + 0.35;
@@ -165,37 +185,36 @@ fn fragment(
 #else
     let shoreline_edge = 0.0;
 #endif
-    let grazing        = pow(1.0 - clamp(dot(water_normal, view_to_camera), 0.0, 1.0), 5.0);
-    let edge_scatter   = shoreline_edge * (0.2 + 0.8 * grazing);
+    let edge_scatter   = shoreline_edge * (0.2 + 0.8 * (1.0 - cos_view));
     let water_rgb      = mix(absorbed_rgb, edge_color.rgb, edge_scatter * 0.32);
-    var water_color    = vec4<f32>(mix(water_rgb, foam_color.rgb, foam_weight), 1.0);
+
+    // Fresnel attenuation on base colour: at grazing angles, absorbed colour
+    // gives way to SSR/specular reflections.  Keep reduction modest so deep
+    // water doesn't go fully black on monitors without strong SSR signal.
+    let water_rgb_fresnel = water_rgb * (1.0 - fresnel * 0.55);
+    var water_color = vec4<f32>(mix(water_rgb_fresnel, foam_color.rgb, foam_weight), 1.0);
 
     pbr_input.material.base_color *= water_color;
     pbr_input.material.base_color  = alpha_discard(pbr_input.material, pbr_input.material.base_color);
     pbr_input.material.base_color.a = 1.0;
     pbr_input.material.metallic = 0.0;
-    pbr_input.material.reflectance = vec3<f32>(0.25);
-    pbr_input.material.ior = 1.333;
+    // Correct F0 for water (IOR 1.333): reflectance = sqrt(F0/0.16) ≈ 0.354.
+    pbr_input.material.reflectance = vec3<f32>(0.35);
+    // Roughness: low base so SSR gives sharp reflections; rises with wave
+    // slope energy and foam.  Fresnel drives it toward zero at grazing angles
+    // (more mirror-like at the horizon — the classic Fresnel water look).
     pbr_input.material.perceptual_roughness = clamp(
-        0.028 +
-        (1.0 - water_normal.y) * 0.24 +
-        detail_wave.slope_energy * 0.18 +
-        smoothstep(2.0, 12.0, pixel_size) * 0.06 +
-        foam_weight * 0.22,
-        0.025,
-        0.42
-    );
-    pbr_input.material.specular_transmission = clamp(0.96 * clarity_sq * (1.0 - foam_weight * 0.85), 0.0, 0.98);
-    pbr_input.material.diffuse_transmission = 0.07 * clarity * (1.0 - foam_weight) * (1.0 - grazing * 0.5);
-    pbr_input.material.thickness = clamp(
-        beer_depth * mix(0.22, 1.35, clamp(refraction_strength / 24.0, 0.0, 1.0)),
-        0.25,
-        48.0
-    );
-    pbr_input.material.attenuation_distance = mix(8.0, 120.0, clarity_sq);
-    pbr_input.material.attenuation_color = vec4<f32>(
-        mix(deep_color.rgb, shallow_color.rgb, 0.55 + shoreline_edge * 0.2),
-        1.0
+        mix(
+            0.025 +
+            (1.0 - water_normal.y) * 0.20 +
+            detail_wave.slope_energy * 0.14 +
+            smoothstep(2.0, 12.0, pixel_size) * 0.06 +
+            foam_weight * 0.22,
+            0.01,       // mirror-flat at grazing
+            fresnel
+        ),
+        0.01,
+        0.40
     );
 
 #ifdef PREPASS_PIPELINE

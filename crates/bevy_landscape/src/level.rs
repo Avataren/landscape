@@ -181,8 +181,7 @@ impl LevelDesc {
             } else {
                 0
             };
-            config.clipmap_levels =
-                (max_level + 1).clamp(1, MAX_SUPPORTED_CLIPMAP_LEVELS as u32);
+            config.clipmap_levels = (max_level + 1).clamp(1, MAX_SUPPORTED_CLIPMAP_LEVELS as u32);
         }
 
         // Merge metadata: sidecar file takes precedence over level.json field

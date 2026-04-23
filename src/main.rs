@@ -2,14 +2,17 @@ mod player;
 
 use bevy::{
     camera::Exposure,
-    core_pipeline::{prepass::DepthPrepass, tonemapping::Tonemapping},
+    core_pipeline::{
+        prepass::{DeferredPrepass, DepthPrepass},
+        tonemapping::Tonemapping,
+    },
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
     input::mouse::AccumulatedMouseMotion,
     light::{
         light_consts::lux, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, FogVolume,
         VolumetricLight,
     },
-    pbr::{Atmosphere, AtmosphereSettings, ScatteringMedium},
+    pbr::{Atmosphere, AtmosphereSettings, ScatteringMedium, ScreenSpaceReflections},
     post_process::bloom::Bloom,
     prelude::*,
     render::{
@@ -153,7 +156,15 @@ fn setup_scene(
     commands.spawn((
         Camera3d::default(),
         DepthPrepass,
-        Msaa::Sample4,
+        DeferredPrepass,
+        ScreenSpaceReflections {
+            // Raise roughness threshold so water (roughness 0–0.35) always
+            // gets SSR.  Default is 0.1, which would miss mid-rough areas.
+            perceptual_roughness_threshold: 0.5,
+            ..default()
+        },
+        // SSR requires no MSAA; use Msaa::Off explicitly.
+        Msaa::Off,
         Projection::Perspective(PerspectiveProjection {
             near: 0.1,
             // Terrain world is ~4 096 m across; 100 km gives comfortable margin

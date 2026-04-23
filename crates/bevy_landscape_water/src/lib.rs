@@ -4,6 +4,7 @@ pub use material::{StandardWaterMaterial, WaterMaterial, WaterMaterialPlugin};
 
 use bevy::{
     light::{NotShadowCaster, NotShadowReceiver},
+    pbr::OpaqueRendererMethod,
     prelude::*,
 };
 use bevy_landscape::{TerrainCamera, TerrainConfig, TerrainMetadata, TerrainSourceDesc};
@@ -32,13 +33,17 @@ pub struct WaveDirection {
 
 impl Default for WaveDirection {
     fn default() -> Self {
-        Self { direction: Vec2::new(1.0, 0.5).normalize() }
+        Self {
+            direction: Vec2::new(1.0, 0.5).normalize(),
+        }
     }
 }
 
 impl WaveDirection {
     pub fn new(direction: Vec2) -> Self {
-        Self { direction: direction.normalize_or_zero() }
+        Self {
+            direction: direction.normalize_or_zero(),
+        }
     }
     pub fn with_duration(direction: Vec2, _blend_duration: f32) -> Self {
         Self::new(direction)
@@ -52,50 +57,50 @@ impl WaveDirection {
 #[derive(Resource, Clone, Debug, Reflect)]
 #[reflect(Resource)]
 pub struct WaterSettings {
-    pub alpha_mode:                    AlphaMode,
-    pub height:                        f32,
-    pub amplitude:                     f32,
-    pub base_color:                    Color,
-    pub clarity:                       f32,
-    pub deep_color:                    Color,
-    pub shallow_color:                 Color,
-    pub edge_scale:                    f32,
-    pub edge_color:                    Color,
-    pub update_materials:              bool,
+    pub alpha_mode: AlphaMode,
+    pub height: f32,
+    pub amplitude: f32,
+    pub base_color: Color,
+    pub clarity: f32,
+    pub deep_color: Color,
+    pub shallow_color: Color,
+    pub edge_scale: f32,
+    pub edge_color: Color,
+    pub update_materials: bool,
     /// Reserved for API compat — not used by LandscapeWaterPlugin.
-    pub spawn_tiles:                   Option<UVec2>,
-    pub wave_direction:                Vec2,
+    pub spawn_tiles: Option<UVec2>,
+    pub wave_direction: Vec2,
     pub wave_direction_blend_duration: f32,
-    pub wave_speed:                    f32,
-    pub refraction_strength:           f32,
-    pub foam_threshold:                f32,
-    pub foam_color:                    Color,
+    pub wave_speed: f32,
+    pub refraction_strength: f32,
+    pub foam_threshold: f32,
+    pub foam_color: Color,
     /// Maximum water depth (metres) that receives shoreline foam.
-    pub shoreline_foam_depth:          f32,
+    pub shoreline_foam_depth: f32,
 }
 
 impl Default for WaterSettings {
     fn default() -> Self {
         Self {
-            alpha_mode:                    AlphaMode::Blend,
-            height:                        1.0,
-            amplitude:                     1.0,
-            clarity:                       0.25,
-            base_color:                    Color::srgba(1.0, 1.0, 1.0, 1.0),
-            deep_color:                    Color::srgba(0.2, 0.41, 0.54, 0.92),
-            shallow_color:                 Color::srgba(0.45, 0.78, 0.81, 1.0),
-            edge_scale:                    0.1,
-            edge_color:                    Color::srgba(1.0, 1.0, 1.0, 1.0),
-            update_materials:              true,
-            spawn_tiles:                   None,
-            wave_direction:                Vec2::new(1.0, 2.0),
+            alpha_mode: AlphaMode::Opaque,
+            height: 1.0,
+            amplitude: 1.0,
+            clarity: 0.25,
+            base_color: Color::srgba(1.0, 1.0, 1.0, 1.0),
+            deep_color: Color::srgba(0.2, 0.41, 0.54, 0.92),
+            shallow_color: Color::srgba(0.45, 0.78, 0.81, 1.0),
+            edge_scale: 0.1,
+            edge_color: Color::srgba(1.0, 1.0, 1.0, 1.0),
+            update_materials: true,
+            spawn_tiles: None,
+            wave_direction: Vec2::new(1.0, 2.0),
             wave_direction_blend_duration: 2.0,
-            wave_speed:                    1.0,
-            refraction_strength:           15.0,
+            wave_speed: 1.8,
+            refraction_strength: 15.0,
             // Normalised: fraction of max wave height above which foam appears.
-            foam_threshold:                0.7,
-            foam_color:                    Color::srgba(1.0, 1.0, 1.0, 0.9),
-            shoreline_foam_depth:          2.0,
+            foam_threshold: 0.7,
+            foam_color: Color::srgba(1.0, 1.0, 1.0, 0.9),
+            shoreline_foam_depth: 2.0,
         }
     }
 }
@@ -116,8 +121,8 @@ struct InitialWaterLayout(WaterLayout);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct WaterLayout {
-    height:  f32,
-    center:  Vec2,
+    height: f32,
+    center: Vec2,
     clipmap: Option<WaterClipmapLayout>,
 }
 
@@ -128,17 +133,17 @@ struct WaterClipmapLayout {
 
 #[derive(Clone, Debug)]
 struct PatchInstanceCpu {
-    lod_level:      u32,
-    origin_ws:      Vec2,
+    lod_level: u32,
+    origin_ws: Vec2,
     level_scale_ws: f32,
 }
 
 #[derive(Resource, Default)]
 struct WaterPatchEntities {
     /// Regular m×m block entities (fine and coarse rings).
-    block_entities:    Vec<Entity>,
+    block_entities: Vec<Entity>,
     /// Interior trim strip entities (4 per ring boundary).
-    trim_entities:     Vec<Entity>,
+    trim_entities: Vec<Entity>,
     last_clip_centers: Vec<IVec2>,
 }
 
@@ -148,16 +153,16 @@ struct WaterPatchEntities {
 
 pub struct LandscapeWaterPlugin {
     pub water_height: Option<f32>,
-    pub world_min:    Vec2,
-    pub world_max:    Vec2,
+    pub world_min: Vec2,
+    pub world_max: Vec2,
 }
 
 impl Default for LandscapeWaterPlugin {
     fn default() -> Self {
         Self {
             water_height: None,
-            world_min:    Vec2::splat(-4096.0),
-            world_max:    Vec2::splat(4096.0),
+            world_min: Vec2::splat(-4096.0),
+            world_max: Vec2::splat(4096.0),
         }
     }
 }
@@ -171,14 +176,14 @@ impl Plugin for LandscapeWaterPlugin {
         );
 
         app.insert_resource(WaterSettings {
-            height:               initial_layout.height,
-            amplitude:            8.0,
-            clarity:              0.9,
+            height: initial_layout.height,
+            amplitude: 8.0,
+            clarity: 0.9,
             // Normalised [0..1]: fraction of max wave height above which foam appears.
             // 0.7 = only the top 30% of wave heights get foam (genuine crests only).
-            foam_threshold:       0.7,
+            foam_threshold: 0.7,
             shoreline_foam_depth: 1.5,
-            spawn_tiles:          None,
+            spawn_tiles: None,
             ..WaterSettings::default()
         });
         app.insert_resource(WaterEnabled(initial_layout.clipmap.is_some()));
@@ -191,6 +196,7 @@ impl Plugin for LandscapeWaterPlugin {
             (
                 (sync_water_to_terrain, update_water_patch_transforms).chain(),
                 sync_water_height,
+                sync_water_materials,
                 toggle_water,
                 apply_water_enabled.after(toggle_water),
             ),
@@ -202,10 +208,10 @@ impl Plugin for LandscapeWaterPlugin {
 // Layout constants
 // ---------------------------------------------------------------------------
 
-const WATER_CLIPMAP_BLOCK_SIZE:            u32 = 64;
-const WATER_CLIPMAP_BASE_SCALE:            f32 = 4.0;
-const WATER_CLIPMAP_MIN_LEVELS:            u32 = 6;
-const WATER_CLIPMAP_MAX_LEVELS:            u32 = 8;
+const WATER_CLIPMAP_BLOCK_SIZE: u32 = 64;
+const WATER_CLIPMAP_BASE_SCALE: f32 = 4.0;
+const WATER_CLIPMAP_MIN_LEVELS: u32 = 6;
+const WATER_CLIPMAP_MAX_LEVELS: u32 = 8;
 const WATER_CLIPMAP_MIN_OUTER_HALF_EXTENT: f32 = 16_384.0;
 
 fn water_level_scale(level: u32) -> f32 {
@@ -213,21 +219,23 @@ fn water_level_scale(level: u32) -> f32 {
 }
 
 fn water_clipmap_layout(extent: Vec2) -> WaterClipmapLayout {
-    let target       = (extent.max_element() * 0.75).max(WATER_CLIPMAP_MIN_OUTER_HALF_EXTENT);
-    let mut levels   = 1u32;
-    let mut outer    = 2.0 * WATER_CLIPMAP_BLOCK_SIZE as f32 * water_level_scale(0);
+    let target = (extent.max_element() * 0.75).max(WATER_CLIPMAP_MIN_OUTER_HALF_EXTENT);
+    let mut levels = 1u32;
+    let mut outer = 2.0 * WATER_CLIPMAP_BLOCK_SIZE as f32 * water_level_scale(0);
     while outer < target && levels < WATER_CLIPMAP_MAX_LEVELS {
-        outer  *= 2.0;
+        outer *= 2.0;
         levels += 1;
     }
-    WaterClipmapLayout { levels: levels.max(WATER_CLIPMAP_MIN_LEVELS) }
+    WaterClipmapLayout {
+        levels: levels.max(WATER_CLIPMAP_MIN_LEVELS),
+    }
 }
 
 fn water_layout(world_min: Vec2, world_max: Vec2, water_height: Option<f32>) -> WaterLayout {
     let extent = world_max - world_min;
     let center = (world_min + world_max) * 0.5;
     WaterLayout {
-        height:  water_height.unwrap_or(0.0),
+        height: water_height.unwrap_or(0.0),
         center,
         clipmap: water_height.map(|_| water_clipmap_layout(extent)),
     }
@@ -257,18 +265,26 @@ fn snap_to_even_grid(camera_xz: Vec2, scale: f32) -> IVec2 {
 fn build_water_clip_centers(camera_xz: Vec2, levels: u32) -> Vec<IVec2> {
     let fine = snap_to_even_grid(camera_xz, water_level_scale(0));
     (0..levels)
-        .map(|l| { let s = l as i32; IVec2::new(fine.x >> s, fine.y >> s) })
+        .map(|l| {
+            let s = l as i32;
+            IVec2::new(fine.x >> s, fine.y >> s)
+        })
         .collect()
 }
 
 fn build_block_origins(center: IVec2, scale: f32, m: u32, has_hole: bool) -> Vec<Vec2> {
-    let m    = m as i32;
+    let m = m as i32;
     let cols = [-2 * m, -m, 0, m];
     let mut out = Vec::with_capacity(if has_hole { 12 } else { 16 });
     for &bz in &cols {
         for &bx in &cols {
-            if has_hole && bx >= -m && bx < m && bz >= -m && bz < m { continue; }
-            out.push(Vec2::new((center.x + bx) as f32 * scale, (center.y + bz) as f32 * scale));
+            if has_hole && bx >= -m && bx < m && bz >= -m && bz < m {
+                continue;
+            }
+            out.push(Vec2::new(
+                (center.x + bx) as f32 * scale,
+                (center.y + bz) as f32 * scale,
+            ));
         }
     }
     out
@@ -280,7 +296,11 @@ fn build_patch_instances(clip_centers: &[IVec2]) -> Vec<PatchInstanceCpu> {
         let level = level as u32;
         let scale = water_level_scale(level);
         for origin in build_block_origins(center, scale, WATER_CLIPMAP_BLOCK_SIZE, level > 0) {
-            out.push(PatchInstanceCpu { lod_level: level, origin_ws: origin, level_scale_ws: scale });
+            out.push(PatchInstanceCpu {
+                lod_level: level,
+                origin_ws: origin,
+                level_scale_ws: scale,
+            });
         }
     }
     out
@@ -303,13 +323,13 @@ fn build_patch_instances(clip_centers: &[IVec2]) -> Vec<PatchInstanceCpu> {
 
 #[derive(Clone, Debug)]
 struct WaterTrimCpu {
-    origin_ws:      Vec2,
+    origin_ws: Vec2,
     level_scale_ws: f32,
-    is_horizontal:  bool,
+    is_horizontal: bool,
 }
 
 fn build_trim_instances(clip_centers: &[IVec2]) -> Vec<WaterTrimCpu> {
-    let m   = WATER_CLIPMAP_BLOCK_SIZE as i32;
+    let m = WATER_CLIPMAP_BLOCK_SIZE as i32;
     let mut out = Vec::with_capacity(4 * clip_centers.len().saturating_sub(1));
 
     for level in 1..clip_centers.len() as u32 {
@@ -319,7 +339,7 @@ fn build_trim_instances(clip_centers: &[IVec2]) -> Vec<WaterTrimCpu> {
         // the trim has coarse vertex density but the fine ring has 2× more
         // vertices along the shared edge.
         let fine_scale = water_level_scale(level - 1);
-        let c          = clip_centers[level as usize];
+        let c = clip_centers[level as usize];
 
         let min_x = (c.x - m) as f32 * coarse_scale;
         let max_x = (c.x + m) as f32 * coarse_scale;
@@ -327,14 +347,30 @@ fn build_trim_instances(clip_centers: &[IVec2]) -> Vec<WaterTrimCpu> {
         let max_z = (c.y + m) as f32 * coarse_scale;
 
         // LEFT  (vertical):   x ∈ [min_x, min_x+coarse], z ∈ [min_z, max_z]
-        out.push(WaterTrimCpu { origin_ws: Vec2::new(min_x,                   min_z), level_scale_ws: fine_scale, is_horizontal: false });
+        out.push(WaterTrimCpu {
+            origin_ws: Vec2::new(min_x, min_z),
+            level_scale_ws: fine_scale,
+            is_horizontal: false,
+        });
         // RIGHT (vertical):   x ∈ [max_x-coarse, max_x], z ∈ [min_z, max_z]
         // max_x - coarse_scale = max_x - 2*fine_scale (same world position)
-        out.push(WaterTrimCpu { origin_ws: Vec2::new(max_x - coarse_scale,    min_z), level_scale_ws: fine_scale, is_horizontal: false });
+        out.push(WaterTrimCpu {
+            origin_ws: Vec2::new(max_x - coarse_scale, min_z),
+            level_scale_ws: fine_scale,
+            is_horizontal: false,
+        });
         // BOTTOM (horizontal): x ∈ [min_x, max_x], z ∈ [min_z, min_z+coarse]
-        out.push(WaterTrimCpu { origin_ws: Vec2::new(min_x, min_z),                   level_scale_ws: fine_scale, is_horizontal: true  });
+        out.push(WaterTrimCpu {
+            origin_ws: Vec2::new(min_x, min_z),
+            level_scale_ws: fine_scale,
+            is_horizontal: true,
+        });
         // TOP   (horizontal): x ∈ [min_x, max_x], z ∈ [max_z-coarse, max_z]
-        out.push(WaterTrimCpu { origin_ws: Vec2::new(min_x, max_z - coarse_scale),    level_scale_ws: fine_scale, is_horizontal: true  });
+        out.push(WaterTrimCpu {
+            origin_ws: Vec2::new(min_x, max_z - coarse_scale),
+            level_scale_ws: fine_scale,
+            is_horizontal: true,
+        });
     }
     out
 }
@@ -350,8 +386,8 @@ fn build_rect_mesh(nx: u32, nz: u32) -> Mesh {
     let inv_nz = 1.0 / nz as f32;
 
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity((vx * vz) as usize);
-    let mut normals:   Vec<[f32; 3]> = Vec::with_capacity((vx * vz) as usize);
-    let mut uvs:       Vec<[f32; 2]> = Vec::with_capacity((vx * vz) as usize);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity((vx * vz) as usize);
+    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity((vx * vz) as usize);
 
     for z in 0..vz {
         for x in 0..vx {
@@ -388,19 +424,21 @@ fn build_rect_mesh(nx: u32, nz: u32) -> Mesh {
 // ---------------------------------------------------------------------------
 
 fn rebuild_water_tiles(
-    commands:       &mut Commands,
-    settings:       &WaterSettings,
-    layout:         WaterLayout,
-    camera_xz:      Vec2,
-    patches:        &mut WaterPatchEntities,
+    commands: &mut Commands,
+    settings: &WaterSettings,
+    layout: WaterLayout,
+    camera_xz: Vec2,
+    patches: &mut WaterPatchEntities,
     existing_roots: &[Entity],
-    root_children:  &Query<&Children, With<WaterTiles>>,
-    meshes:         &mut Assets<Mesh>,
-    materials:      &mut Assets<StandardWaterMaterial>,
+    root_children: &Query<&Children, With<WaterTiles>>,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardWaterMaterial>,
 ) {
     for &root in existing_roots {
         if let Ok(children) = root_children.get(root) {
-            for child in children.iter() { commands.entity(child).despawn(); }
+            for child in children.iter() {
+                commands.entity(child).despawn();
+            }
         }
         commands.entity(root).despawn();
     }
@@ -408,16 +446,21 @@ fn rebuild_water_tiles(
     patches.trim_entities.clear();
     patches.last_clip_centers.clear();
 
-    let Some(clipmap) = layout.clipmap else { return };
+    let Some(clipmap) = layout.clipmap else {
+        return;
+    };
 
     let clip_centers = build_water_clip_centers(camera_xz, clipmap.levels);
-    let root_center  = clip_centers[0].as_vec2() * water_level_scale(0);
-    let patch_list   = build_patch_instances(&clip_centers);
-    let trim_list    = build_trim_instances(&clip_centers);
+    let root_center = clip_centers[0].as_vec2() * water_level_scale(0);
+    let patch_list = build_patch_instances(&clip_centers);
+    let trim_list = build_trim_instances(&clip_centers);
     let water_height = layout.height;
 
     let trim_quads = 4 * WATER_CLIPMAP_BLOCK_SIZE;
-    let block_mesh  = Mesh3d(meshes.add(build_rect_mesh(WATER_CLIPMAP_BLOCK_SIZE, WATER_CLIPMAP_BLOCK_SIZE)));
+    let block_mesh = Mesh3d(meshes.add(build_rect_mesh(
+        WATER_CLIPMAP_BLOCK_SIZE,
+        WATER_CLIPMAP_BLOCK_SIZE,
+    )));
     // 2 quads wide × 4m quads tall (fine-scale density) so each trim strip's
     // vertices align with the fine-ring vertex grid, eliminating T-junction cracks.
     let trim_v_mesh = Mesh3d(meshes.add(build_rect_mesh(2, trim_quads)));
@@ -425,24 +468,33 @@ fn rebuild_water_tiles(
 
     let mat = MeshMaterial3d(materials.add(StandardWaterMaterial {
         base: StandardMaterial {
-            base_color:           settings.base_color,
-            alpha_mode:           settings.alpha_mode,
-            perceptual_roughness: 0.22,
+            base_color: settings.base_color,
+            alpha_mode: AlphaMode::Opaque,
+            // Zero base roughness so Bevy's SSR pass picks up reflections;
+            // the fragment shader overrides this per-pixel via wave normals.
+            perceptual_roughness: 0.0,
+            // F0 ≈ 0.02 for water (IOR 1.333): reflectance = sqrt(F0 / 0.16) ≈ 0.354
+            reflectance: 0.35,
+            // Force deferred GBuffer so Bevy's SSR ray-marching can see the
+            // water surface normals.  Transmissive materials would stay forward
+            // and never receive SSR.
+            opaque_render_method: OpaqueRendererMethod::Deferred,
             ..default()
         },
         extension: WaterMaterial {
-            amplitude:            settings.amplitude,
-            clarity:              settings.clarity,
-            deep_color:           settings.deep_color,
-            shallow_color:        settings.shallow_color,
-            edge_color:           settings.edge_color,
-            edge_scale:           settings.edge_scale,
-            wave_speed:           settings.wave_speed,
-            quality:              4,
-            refraction_strength:  settings.refraction_strength,
-            foam_threshold:       settings.foam_threshold,
-            foam_color:           settings.foam_color,
+            amplitude: settings.amplitude,
+            clarity: settings.clarity,
+            deep_color: settings.deep_color,
+            shallow_color: settings.shallow_color,
+            edge_color: settings.edge_color,
+            edge_scale: settings.edge_scale,
+            wave_speed: settings.wave_speed,
+            quality: 4,
+            refraction_strength: settings.refraction_strength,
+            foam_threshold: settings.foam_threshold,
+            foam_color: settings.foam_color,
             shoreline_foam_depth: settings.shoreline_foam_depth,
+            wave_direction: settings.wave_direction.normalize_or_zero(),
         },
     }));
 
@@ -452,62 +504,72 @@ fn rebuild_water_tiles(
     );
 
     let mut block_spawned = Vec::with_capacity(patch_list.len());
-    let mut trim_spawned  = Vec::with_capacity(trim_list.len());
+    let mut trim_spawned = Vec::with_capacity(trim_list.len());
 
-    let root = commands.spawn((
-        WaterTiles,
-        Name::new("Water"),
-        // Water height lives on the root; children use y=0 so root.y can be
-        // updated live without rebuilding child transforms.
-        Transform::from_xyz(root_center.x, water_height, root_center.y),
-        Visibility::Inherited,
-    )).id();
+    let root = commands
+        .spawn((
+            WaterTiles,
+            Name::new("Water"),
+            // Water height lives on the root; children use y=0 so root.y can be
+            // updated live without rebuilding child transforms.
+            Transform::from_xyz(root_center.x, water_height, root_center.y),
+            Visibility::Inherited,
+        ))
+        .id();
 
     commands.entity(root).with_children(|parent| {
         // --- Block patches ---
         for p in &patch_list {
             let offset = p.origin_ws - root_center;
-            let entity = parent.spawn((
-                WaterTile { offset },
-                Name::new(format!("Water Patch L{}", p.lod_level)),
-                Transform {
-                    translation: Vec3::new(offset.x, 0.0, offset.y),
-                    scale:       Vec3::new(p.level_scale_ws, 1.0, p.level_scale_ws),
-                    ..default()
-                },
-                block_mesh.clone(),
-                mat.clone(),
-                wave_dir,
-                NotShadowCaster,
-                NotShadowReceiver,
-            )).id();
+            let entity = parent
+                .spawn((
+                    WaterTile { offset },
+                    Name::new(format!("Water Patch L{}", p.lod_level)),
+                    Transform {
+                        translation: Vec3::new(offset.x, 0.0, offset.y),
+                        scale: Vec3::new(p.level_scale_ws, 1.0, p.level_scale_ws),
+                        ..default()
+                    },
+                    block_mesh.clone(),
+                    mat.clone(),
+                    wave_dir,
+                    NotShadowCaster,
+                    NotShadowReceiver,
+                ))
+                .id();
             block_spawned.push(entity);
         }
 
         // --- Interior trim strips (fill T-junction cracks at ring boundaries) ---
         for trim in &trim_list {
             let offset = trim.origin_ws - root_center;
-            let mesh   = if trim.is_horizontal { trim_h_mesh.clone() } else { trim_v_mesh.clone() };
-            let entity = parent.spawn((
-                WaterTile { offset },
-                Name::new("Water Trim"),
-                Transform {
-                    translation: Vec3::new(offset.x, 0.0, offset.y),
-                    scale:       Vec3::new(trim.level_scale_ws, 1.0, trim.level_scale_ws),
-                    ..default()
-                },
-                mesh,
-                mat.clone(),
-                wave_dir,
-                NotShadowCaster,
-                NotShadowReceiver,
-            )).id();
+            let mesh = if trim.is_horizontal {
+                trim_h_mesh.clone()
+            } else {
+                trim_v_mesh.clone()
+            };
+            let entity = parent
+                .spawn((
+                    WaterTile { offset },
+                    Name::new("Water Trim"),
+                    Transform {
+                        translation: Vec3::new(offset.x, 0.0, offset.y),
+                        scale: Vec3::new(trim.level_scale_ws, 1.0, trim.level_scale_ws),
+                        ..default()
+                    },
+                    mesh,
+                    mat.clone(),
+                    wave_dir,
+                    NotShadowCaster,
+                    NotShadowReceiver,
+                ))
+                .id();
             trim_spawned.push(entity);
         }
     });
 
-    patches.block_entities    = block_spawned;
-    patches.trim_entities     = trim_spawned;
+    patches.block_entities = block_spawned;
+    patches.trim_entities = trim_spawned;
     patches.last_clip_centers = clip_centers;
 }
 
@@ -519,7 +581,11 @@ fn current_water_camera_xz(
     q: &Query<&Transform, (With<TerrainCamera>, Without<WaterTiles>)>,
     fallback: Vec2,
 ) -> Vec2 {
-    if let Ok(cam) = q.single() { cam.translation.xz() } else { fallback }
+    if let Ok(cam) = q.single() {
+        cam.translation.xz()
+    } else {
+        fallback
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -538,29 +604,35 @@ fn update_water_patch_transforms(
         (Without<WaterTiles>, Without<TerrainCamera>),
     >,
 ) {
-    if patch_entities.block_entities.is_empty() { return; }
-    let Ok(mut root_t) = root_q.single_mut() else { return };
+    if patch_entities.block_entities.is_empty() {
+        return;
+    }
+    let Ok(mut root_t) = root_q.single_mut() else {
+        return;
+    };
 
     let clip_centers = build_water_clip_centers(
         current_water_camera_xz(&camera_q, root_t.translation.xz()),
         patch_entities.last_clip_centers.len() as u32,
     );
-    if clip_centers == patch_entities.last_clip_centers { return; }
+    if clip_centers == patch_entities.last_clip_centers {
+        return;
+    }
 
     let root_center = clip_centers[0].as_vec2() * water_level_scale(0);
     root_t.translation.x = root_center.x;
     root_t.translation.z = root_center.y;
 
     let patch_list = build_patch_instances(&clip_centers);
-    let trim_list  = build_trim_instances(&clip_centers);
+    let trim_list = build_trim_instances(&clip_centers);
 
     for (entity, p) in patch_entities.block_entities.iter().zip(patch_list.iter()) {
         if let Ok((mut t, mut tile)) = tile_q.get_mut(*entity) {
             let offset = p.origin_ws - root_center;
             t.translation.x = offset.x;
             t.translation.z = offset.y;
-            t.scale          = Vec3::new(p.level_scale_ws, 1.0, p.level_scale_ws);
-            tile.offset      = offset;
+            t.scale = Vec3::new(p.level_scale_ws, 1.0, p.level_scale_ws);
+            tile.offset = offset;
         }
     }
 
@@ -569,8 +641,8 @@ fn update_water_patch_transforms(
             let offset = trim.origin_ws - root_center;
             t.translation.x = offset.x;
             t.translation.z = offset.y;
-            t.scale          = Vec3::new(trim.level_scale_ws, 1.0, trim.level_scale_ws);
-            tile.offset      = offset;
+            t.scale = Vec3::new(trim.level_scale_ws, 1.0, trim.level_scale_ws);
+            tile.offset = offset;
         }
     }
 
@@ -582,25 +654,32 @@ fn update_water_patch_transforms(
 // ---------------------------------------------------------------------------
 
 fn apply_water_layout(
-    commands:       &mut Commands,
-    settings:       &mut WaterSettings,
-    enabled:        &mut WaterEnabled,
-    layout:         WaterLayout,
-    camera_xz:      Vec2,
-    patches:        &mut WaterPatchEntities,
-    water_roots:    &Query<Entity, With<WaterTiles>>,
-    root_children:  &Query<&Children, With<WaterTiles>>,
-    meshes:         &mut Assets<Mesh>,
-    materials:      &mut Assets<StandardWaterMaterial>,
+    commands: &mut Commands,
+    settings: &mut WaterSettings,
+    enabled: &mut WaterEnabled,
+    layout: WaterLayout,
+    camera_xz: Vec2,
+    patches: &mut WaterPatchEntities,
+    water_roots: &Query<Entity, With<WaterTiles>>,
+    root_children: &Query<&Children, With<WaterTiles>>,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardWaterMaterial>,
 ) {
-    settings.height      = layout.height;
+    settings.height = layout.height;
     settings.spawn_tiles = None;
-    enabled.0            = layout.clipmap.is_some();
+    enabled.0 = layout.clipmap.is_some();
 
     let roots: Vec<Entity> = water_roots.iter().collect();
     rebuild_water_tiles(
-        commands, settings, layout, camera_xz,
-        patches, &roots, root_children, meshes, materials,
+        commands,
+        settings,
+        layout,
+        camera_xz,
+        patches,
+        &roots,
+        root_children,
+        meshes,
+        materials,
     );
 }
 
@@ -609,41 +688,51 @@ fn apply_water_layout(
 // ---------------------------------------------------------------------------
 
 fn spawn_initial_water_tiles(
-    initial:         Res<InitialWaterLayout>,
-    mut settings:    ResMut<WaterSettings>,
-    mut enabled:     ResMut<WaterEnabled>,
-    mut patches:     ResMut<WaterPatchEntities>,
-    camera_q:        Query<&Transform, (With<TerrainCamera>, Without<WaterTiles>)>,
-    water_roots:     Query<Entity, With<WaterTiles>>,
-    root_children:   Query<&Children, With<WaterTiles>>,
-    mut meshes:      ResMut<Assets<Mesh>>,
-    mut materials:   ResMut<Assets<StandardWaterMaterial>>,
-    mut commands:    Commands,
+    initial: Res<InitialWaterLayout>,
+    mut settings: ResMut<WaterSettings>,
+    mut enabled: ResMut<WaterEnabled>,
+    mut patches: ResMut<WaterPatchEntities>,
+    camera_q: Query<&Transform, (With<TerrainCamera>, Without<WaterTiles>)>,
+    water_roots: Query<Entity, With<WaterTiles>>,
+    root_children: Query<&Children, With<WaterTiles>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardWaterMaterial>>,
+    mut commands: Commands,
 ) {
     apply_water_layout(
-        &mut commands, &mut settings, &mut enabled, initial.0,
+        &mut commands,
+        &mut settings,
+        &mut enabled,
+        initial.0,
         current_water_camera_xz(&camera_q, initial.0.center),
-        &mut patches, &water_roots, &root_children, &mut meshes, &mut materials,
+        &mut patches,
+        &water_roots,
+        &root_children,
+        &mut meshes,
+        &mut materials,
     );
 }
 
 fn sync_water_to_terrain(
-    source_desc:   Res<TerrainSourceDesc>,
-    config:        Res<TerrainConfig>,
-    mut settings:  ResMut<WaterSettings>,
-    mut enabled:   ResMut<WaterEnabled>,
-    mut patches:   ResMut<WaterPatchEntities>,
-    camera_q:      Query<&Transform, (With<TerrainCamera>, Without<WaterTiles>)>,
-    water_roots:   Query<Entity, With<WaterTiles>>,
+    source_desc: Res<TerrainSourceDesc>,
+    config: Res<TerrainConfig>,
+    mut settings: ResMut<WaterSettings>,
+    mut enabled: ResMut<WaterEnabled>,
+    mut patches: ResMut<WaterPatchEntities>,
+    camera_q: Query<&Transform, (With<TerrainCamera>, Without<WaterTiles>)>,
+    water_roots: Query<Entity, With<WaterTiles>>,
     root_children: Query<&Children, With<WaterTiles>>,
-    mut meshes:    ResMut<Assets<Mesh>>,
+    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardWaterMaterial>>,
-    mut commands:  Commands,
+    mut commands: Commands,
 ) {
-    if !source_desc.is_changed() { return; }
+    if !source_desc.is_changed() {
+        return;
+    }
 
     let meta = source_desc
-        .tile_root.as_deref()
+        .tile_root
+        .as_deref()
         .map(|p| TerrainMetadata::load(p))
         .unwrap_or_default();
 
@@ -651,14 +740,25 @@ fn sync_water_to_terrain(
     let layout = water_layout(source_desc.world_min, source_desc.world_max, water_height);
 
     apply_water_layout(
-        &mut commands, &mut settings, &mut enabled, layout,
+        &mut commands,
+        &mut settings,
+        &mut enabled,
+        layout,
         current_water_camera_xz(&camera_q, layout.center),
-        &mut patches, &water_roots, &root_children, &mut meshes, &mut materials,
+        &mut patches,
+        &water_roots,
+        &root_children,
+        &mut meshes,
+        &mut materials,
     );
 
     info!(
         "Water level: {} (F2 to toggle)",
-        if let Some(h) = water_height { format!("{:.1}m", h) } else { "none".into() }
+        if let Some(h) = water_height {
+            format!("{:.1}m", h)
+        } else {
+            "none".into()
+        }
     );
 }
 
@@ -670,22 +770,66 @@ fn toggle_water(keys: Res<ButtonInput<KeyCode>>, mut enabled: ResMut<WaterEnable
 }
 
 fn sync_water_height(
-    settings:  Res<WaterSettings>,
+    settings: Res<WaterSettings>,
     mut roots: Query<&mut Transform, With<WaterTiles>>,
 ) {
-    if !settings.is_changed() { return; }
+    if !settings.is_changed() {
+        return;
+    }
     for mut t in &mut roots {
         t.translation.y = settings.height;
     }
 }
 
+fn sync_water_materials(
+    settings: Res<WaterSettings>,
+    tiles: Query<&MeshMaterial3d<StandardWaterMaterial>, With<WaterTile>>,
+    mut mats: ResMut<Assets<StandardWaterMaterial>>,
+) {
+    if !settings.is_changed() || !settings.update_materials {
+        return;
+    }
+
+    let wave_direction = settings.wave_direction.normalize_or_zero();
+    for handle in &tiles {
+        if let Some(mat) = mats.get_mut(&handle.0) {
+            mat.base.base_color = settings.base_color;
+            mat.base.alpha_mode = AlphaMode::Opaque;
+            mat.base.perceptual_roughness = 0.0;
+            mat.base.reflectance = 0.35;
+            mat.base.opaque_render_method = OpaqueRendererMethod::Deferred;
+
+            mat.extension.amplitude = settings.amplitude;
+            mat.extension.clarity = settings.clarity;
+            mat.extension.deep_color = settings.deep_color;
+            mat.extension.shallow_color = settings.shallow_color;
+            mat.extension.edge_color = settings.edge_color;
+            mat.extension.edge_scale = settings.edge_scale;
+            mat.extension.wave_speed = settings.wave_speed;
+            mat.extension.refraction_strength = settings.refraction_strength;
+            mat.extension.foam_threshold = settings.foam_threshold;
+            mat.extension.foam_color = settings.foam_color;
+            mat.extension.shoreline_foam_depth = settings.shoreline_foam_depth;
+            mat.extension.wave_direction = wave_direction;
+        }
+    }
+}
+
 fn apply_water_enabled(
-    enabled:         Res<WaterEnabled>,
+    enabled: Res<WaterEnabled>,
     mut water_tiles: Query<&mut Visibility, With<WaterTiles>>,
 ) {
-    if !enabled.is_changed() { return; }
-    let vis = if enabled.0 { Visibility::Inherited } else { Visibility::Hidden };
-    for mut v in &mut water_tiles { *v = vis; }
+    if !enabled.is_changed() {
+        return;
+    }
+    let vis = if enabled.0 {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut v in &mut water_tiles {
+        *v = vis;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -715,7 +859,10 @@ mod tests {
             Some(120.0),
         );
         assert_eq!(layout.center, Vec2::ZERO);
-        assert_eq!(layout.clipmap, Some(super::WaterClipmapLayout { levels: 7 }));
+        assert_eq!(
+            layout.clipmap,
+            Some(super::WaterClipmapLayout { levels: 7 })
+        );
         assert_eq!(layout.height, 120.0);
     }
 
@@ -738,20 +885,22 @@ mod tests {
     fn even_snap_eliminates_ring_boundary_gap() {
         let scale0 = water_level_scale(0);
         let scale1 = water_level_scale(1);
-        let m      = WATER_CLIPMAP_BLOCK_SIZE as i32;
+        let m = WATER_CLIPMAP_BLOCK_SIZE as i32;
 
         for cam in [0.0_f32, 3.7, 13.9, 100.3, -5.5, 333.1] {
             let centers = build_water_clip_centers(Vec2::splat(cam), 4);
             let c0 = centers[0];
             let c1 = centers[1];
 
-            let fine_outer   = (c0.x + 2 * m) as f32 * scale0;
-            let coarse_inner = (c1.x + m)     as f32 * scale1;
+            let fine_outer = (c0.x + 2 * m) as f32 * scale0;
+            let coarse_inner = (c1.x + m) as f32 * scale1;
 
             assert!(
                 (fine_outer - coarse_inner).abs() < 1e-3,
                 "gap at cam={}: fine_outer={} coarse_inner={}",
-                cam, fine_outer, coarse_inner
+                cam,
+                fine_outer,
+                coarse_inner
             );
         }
     }

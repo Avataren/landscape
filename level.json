@@ -6,123 +6,62 @@
   "collision_mip_level": 2,
   "world_scale": 30.0,
   "height_scale": 273.06668,
-  "clipmap_levels": 12,
   "material_library": {
     "slots": [
       {
-        "name": "Ground",
+        "name": "Rocky Terrain 02",
         "visible": true,
         "tint": [
-          0.42,
-          0.38,
-          0.32
+          0.5,
+          0.5,
+          0.5
         ],
         "albedo_path": "textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_diff_4k.jpg",
         "normal_path": "textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_nor_gl_4k.png",
         "orm_path": "textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_rough_4k.png",
         "height_path": "textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_disp_4k.png",
-        "fine_scale_m": 6.0,
-        "coarse_scale_mul": 6.0,
-        "triplanar_threshold_deg": 45.0,
-        "height_blend_sharpness": 0.1,
-        "procedural": {
-          "altitude_range_m": [
-            -10000.0,
-            10000.0
-          ],
-          "slope_range_deg": [
-            0.0,
-            25.0
-          ],
-          "curvature_bias": 0.0,
-          "noise_scale_m": 50.0,
-          "noise_strength": 0.25
-        }
-      },
-      {
-        "name": "Mid Rock",
-        "visible": true,
-        "tint": [
-          0.3993309,
-          0.39287442,
-          0.37350488
-        ],
-        "albedo_path": "textures/rock_face_03_4k.blend/textures/rock_face_03_diff_4k.jpg",
-        "normal_path": "textures/rock_face_03_4k.blend/textures/rock_face_03_nor_gl_4k.png",
-        "orm_path": "textures/rock_face_03_4k.blend/textures/rock_face_03_rough_4k.png",
-        "height_path": "textures/rock_face_03_4k.blend/textures/rock_face_03_disp_4k.png",
-        "fine_scale_m": 4.0,
-        "coarse_scale_mul": 6.0,
-        "triplanar_threshold_deg": 45.0,
-        "height_blend_sharpness": 0.1,
-        "procedural": {
-          "altitude_range_m": [
-            -10000.0,
-            10000.0
-          ],
-          "slope_range_deg": [
-            18.0,
-            45.0
-          ],
-          "curvature_bias": 0.0,
-          "noise_scale_m": 50.0,
-          "noise_strength": 0.25
-        }
-      },
-      {
-        "name": "Cliff",
-        "visible": true,
-        "tint": [
-          0.29798377,
-          0.28273287,
-          0.26748195
-        ],
-        "albedo_path": "textures/marble_cliff_01_4k.blend/textures/marble_cliff_01_diff_4k.jpg",
-        "normal_path": "textures/marble_cliff_01_4k.blend/textures/marble_cliff_01_nor_gl_4k.png",
-        "orm_path": "textures/marble_cliff_01_4k.blend/textures/marble_cliff_01_rough_4k.png",
-        "height_path": "textures/marble_cliff_01_4k.blend/textures/marble_cliff_01_disp_4k.png",
-        "fine_scale_m": 3.0,
-        "coarse_scale_mul": 6.0,
-        "triplanar_threshold_deg": 45.0,
-        "height_blend_sharpness": 0.1,
-        "procedural": {
-          "altitude_range_m": [
-            -10000.0,
-            10000.0
-          ],
-          "slope_range_deg": [
-            38.0,
-            90.0
-          ],
-          "curvature_bias": 0.0,
-          "noise_scale_m": 50.0,
-          "noise_strength": 0.25
-        }
-      },
-      {
-        "name": "Snow",
-        "visible": true,
-        "tint": [
-          0.33897105,
-          0.3717623,
-          0.42641437
-        ],
-        "albedo_path": "textures/rock_wall_02_4k.blend/textures/rock_wall_02_diff_4k.jpg",
-        "normal_path": "textures/rock_wall_02_4k.blend/textures/rock_wall_02_nor_gl_4k.png",
-        "orm_path": "textures/rock_wall_02_4k.blend/textures/rock_wall_02_rough_4k.jpg",
-        "height_path": "textures/rock_wall_02_4k.blend/textures/rock_wall_02_disp_4k.png",
-        "fine_scale_m": 8.0,
+        "fine_scale_m": 1.0,
         "coarse_scale_mul": 5.0,
         "triplanar_threshold_deg": 45.0,
         "height_blend_sharpness": 0.1,
         "procedural": {
           "altitude_range_m": [
-            600.0,
+            -10000.0,
             10000.0
           ],
           "slope_range_deg": [
             0.0,
-            50.0
+            11.0
+          ],
+          "curvature_bias": 0.2,
+          "noise_scale_m": 25.0,
+          "noise_strength": 0.15
+        }
+      },
+      {
+        "name": "Rock Face 03",
+        "visible": true,
+        "tint": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "albedo_path": "textures/rock_face_03_4k.blend/textures/rock_face_03_diff_4k.jpg",
+        "normal_path": "textures/rock_face_03_4k.blend/textures/rock_face_03_nor_gl_4k.png",
+        "orm_path": "textures/rock_face_03_4k.blend/textures/rock_face_03_rough_4k.png",
+        "height_path": "textures/rock_face_03_4k.blend/textures/rock_face_03_disp_4k.png",
+        "fine_scale_m": 1.0,
+        "coarse_scale_mul": 5.0,
+        "triplanar_threshold_deg": 45.0,
+        "height_blend_sharpness": 0.1,
+        "procedural": {
+          "altitude_range_m": [
+            -10000.0,
+            10000.0
+          ],
+          "slope_range_deg": [
+            32.0,
+            90.0
           ],
           "curvature_bias": 0.0,
           "noise_scale_m": 50.0,
@@ -147,22 +86,22 @@
       0.9200000166893005,
       0.0
     ],
-    "cloud_base_edge_softness": 0.3199999928474426,
-    "cloud_base_scale": 0.4000000059604645,
-    "cloud_bottom_height": 4000.0,
+    "cloud_base_edge_softness": 0.10000000149011612,
+    "cloud_base_scale": 1.5,
+    "cloud_bottom_height": 9300.0,
     "cloud_bottom_softness": 0.25,
     "cloud_coverage": 0.4099999964237213,
-    "cloud_density": 0.029999999329447746,
-    "cloud_detail_scale": 70.0,
-    "cloud_detail_strength": 0.3499999940395355,
-    "cloud_evolution_speed": 4.800000190734863,
+    "cloud_density": 0.0017000000225380063,
+    "cloud_detail_scale": 1.600000023841858,
+    "cloud_detail_strength": 0.27000001072883606,
+    "cloud_evolution_speed": 4.5,
     "cloud_history_blend": 0.8999999761581421,
     "cloud_min_transmittance": 0.07999999821186066,
     "cloud_shadow_step_multiply": 1.2999999523162842,
     "cloud_shadow_step_size": 10.0,
     "cloud_shadow_steps": 6,
-    "cloud_top_height": 4600.0,
-    "cloud_view_steps": 64,
+    "cloud_top_height": 9900.0,
+    "cloud_view_steps": 16,
     "forward_scattering_g": 0.7200000286102295,
     "planet_radius": 6371000.0,
     "render_resolution": [
@@ -177,9 +116,9 @@
       1.25
     ],
     "wind_velocity": [
-      90.0,
+      100.0,
       0.0,
-      125.0
+      1.2999999523162842
     ]
   },
   "metadata": {
