@@ -75,10 +75,17 @@ fn fragment(
     // per-wave attenuation in water_functions::wave_lod_weight().  This removes
     // high-frequency wave normals that would alias as noise at distance.
     // -----------------------------------------------------------------------
-    let w_pos = in.world_position.xz;
+    // Use original pre-displacement world XZ (stored in uv by vertex shader) so
+    // Gerstner normals are evaluated at the undisplaced surface position.  Using
+    // in.world_position.xz (post-displacement) would sample the wrong phase and
+    // produce visible normal discontinuities at large wave amplitudes.
+    let w_pos = in.uv;
     let dpx   = dpdx(in.world_position.xyz);
     let dpz   = dpdy(in.world_position.xyz);
-    let pixel_size = max(length(dpx.xz), length(dpz.xz));
+    // Clamp pixel footprint to 8m max so large-wavelength waves (L > ~32m)
+    // survive at extreme grazing angles where the unclamped value would
+    // otherwise suppress every wave and leave distant water featureless.
+    let pixel_size = min(max(length(dpx.xz), length(dpz.xz)), 8.0);
 
     let wave = water_fn::get_wave_result(w_pos, pixel_size);
     in.world_normal = wave.normal;

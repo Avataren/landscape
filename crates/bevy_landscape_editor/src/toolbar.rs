@@ -32,19 +32,26 @@ pub(crate) struct PrefsUi<'w> {
 
 #[derive(Resource)]
 pub(crate) struct ToolbarState {
-    view_distance_rings:    u32,
-    dragging_view_distance: bool,
-    pending_view_distance:  Option<u32>,
-    water_height:           f32,
+    view_distance_rings:       u32,
+    dragging_view_distance:    bool,
+    pending_view_distance:     Option<u32>,
+    /// Water height as set by the level / generator (world units).
+    water_base_height:         f32,
+    /// User offset applied on top of the base height, range [-100, 100] m.
+    water_height_offset:       f32,
+    /// True once we've read the initial height from WaterSettings at least once.
+    water_height_initialized:  bool,
 }
 
 impl Default for ToolbarState {
     fn default() -> Self {
         Self {
-            view_distance_rings:    TerrainConfig::default().clipmap_levels,
-            dragging_view_distance: false,
-            pending_view_distance:  None,
-            water_height:           0.0,
+            view_distance_rings:      TerrainConfig::default().clipmap_levels,
+            dragging_view_distance:   false,
+            pending_view_distance:    None,
+            water_base_height:        0.0,
+            water_height_offset:      0.0,
+            water_height_initialized: false,
         }
     }
 }
@@ -79,10 +86,21 @@ pub(crate) fn toolbar_system(
         toolbar.view_distance_rings = config.clipmap_levels;
     }
 
-    // Sync water height slider from resource (e.g. after a hot-reload sets a new level).
+    // Sync water height slider from resource.
+    // On first access (or after a hot-reload that changed the base height):
+    // capture the level's height as the base and reset the user offset to 0.
     if let Some(ref ws) = water.settings {
-        if !ws.is_changed() && (toolbar.water_height - ws.height).abs() > 0.01 {
-            toolbar.water_height = ws.height;
+        if !toolbar.water_height_initialized {
+            toolbar.water_base_height = ws.height;
+            toolbar.water_height_offset = 0.0;
+            toolbar.water_height_initialized = true;
+        } else if !ws.is_changed() {
+            let expected = toolbar.water_base_height + toolbar.water_height_offset;
+            if (ws.height - expected).abs() > 0.01 {
+                // External change (e.g. hot-reload) — re-anchor the base.
+                toolbar.water_base_height = ws.height;
+                toolbar.water_height_offset = 0.0;
+            }
         }
     }
 
@@ -177,18 +195,18 @@ pub(crate) fn toolbar_system(
             let water_active = water.enabled.as_deref().map_or(false, |e| e.0);
             if water_active {
                 ui.separator();
-                ui.label("Water Height");
+                ui.label("Water Offset");
                 let water_resp = ui
                     .add_sized(
                         [180.0, 0.0],
-                        egui::Slider::new(&mut toolbar.water_height, -100.0_f32..=100.0)
+                        egui::Slider::new(&mut toolbar.water_height_offset, -100.0_f32..=100.0)
                             .suffix(" m")
                             .show_value(true),
                     )
-                    .on_hover_text("Adjust the water plane height in world units (F2 to toggle water).");
+                    .on_hover_text("Offset the water plane relative to its level height (F2 to toggle water).");
                 if water_resp.changed() {
                     if let Some(ref mut ws) = water.settings {
-                        ws.height = toolbar.water_height;
+                        ws.height = toolbar.water_base_height + toolbar.water_height_offset;
                     }
                 }
             }

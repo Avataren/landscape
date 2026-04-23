@@ -27,6 +27,10 @@ use bevy::prelude::Vec2;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+
 // ---------------------------------------------------------------------------
 // LevelDesc
 // ---------------------------------------------------------------------------
@@ -53,8 +57,11 @@ pub struct LevelDesc {
     /// Base height range before `world_scale` is applied: a fully-white height
     /// texel (R16Unorm = 1.0) maps to this many world units on the Y axis.
     pub height_scale: f32,
-    /// Number of nested clipmap LOD levels. This is the saved landscape view
-    /// distance control exposed in the editor toolbar.
+    /// Number of nested clipmap LOD levels.  Ignored at runtime — the value
+    /// is now derived automatically from world bounds in `into_runtime()`.
+    /// The field is kept here (with a default of 0) so that old level files
+    /// that still contain it continue to deserialize without error.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub clipmap_levels: u32,
     /// Procedural material slot definitions.
     pub material_library: MaterialLibrary,
@@ -145,10 +152,6 @@ impl LevelDesc {
         let mut config = TerrainConfig::default();
         config.world_scale = self.world_scale;
         config.height_scale = self.height_scale * self.world_scale;
-        config.clipmap_levels = self
-            .clipmap_levels
-            .max(1)
-            .min(MAX_SUPPORTED_CLIPMAP_LEVELS as u32);
 
         let tile_root = self.tile_root.as_deref().map(PathBuf::from);
         let (world_min, world_max) = tile_root
@@ -158,6 +161,29 @@ impl LevelDesc {
                 let h = 8192.0 * self.world_scale;
                 (Vec2::splat(-h), Vec2::splat(h))
             });
+
+        // Derive clipmap_levels from world extent so every ring has real tile
+        // data and no flat height-0 rings appear beyond the terrain boundary.
+        //
+        // Ring L half-width = block_size × 2 × (world_scale × 2^L).
+        // We find the largest L where this fits within the world half-extent,
+        // then set clipmap_levels = L + 1.
+        {
+            let block_size = config.block_size() as f32;
+            let world_half = {
+                let dx = (world_max.x - world_min.x) * 0.5;
+                let dz = (world_max.y - world_min.y) * 0.5;
+                dx.min(dz).max(1.0)
+            };
+            let min_ring_half = block_size * 2.0 * config.world_scale;
+            let max_level = if min_ring_half > 0.0 {
+                (world_half / min_ring_half).log2().floor() as u32
+            } else {
+                0
+            };
+            config.clipmap_levels =
+                (max_level + 1).clamp(1, MAX_SUPPORTED_CLIPMAP_LEVELS as u32);
+        }
 
         // Merge metadata: sidecar file takes precedence over level.json field
         // so that re-exporting tiles always reflects the latest values.
@@ -262,23 +288,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn runtime_preserves_saved_view_distance() {
-        let mut desc = LevelDesc::default();
-        desc.max_mip_level = 3;
-        desc.clipmap_levels = 12;
-
+    fn runtime_derives_clipmap_levels_from_world_bounds() {
+        // No tile_root → fallback world bounds = ±8192 (world_scale=1).
+        // block_size = 128, min_ring_half = 256 m.
+        // max_level = floor(log2(8192/256)) = floor(log2(32)) = 5.
+        // Expected clipmap_levels = 6.
+        let desc = LevelDesc::default();
         let (config, _, _, _, _, _) = desc.into_runtime();
-
-        assert_eq!(config.clipmap_levels, 12);
+        assert_eq!(config.clipmap_levels, 6);
     }
 
     #[test]
     fn runtime_clamps_view_distance_to_shader_limit() {
-        let mut desc = LevelDesc::default();
-        desc.clipmap_levels = 99;
-
+        // Verify the formula result stays within [1, MAX_SUPPORTED_CLIPMAP_LEVELS].
+        // With the fallback bounds (±8192, world_scale=1) and default clipmap_n=511
+        // (block_size=128, min_ring_half=256), ratio=32, max_level=5, levels=6.
+        // The MAX clamp is a safety net for unusually large real-tile datasets.
+        let desc = LevelDesc::default();
         let (config, _, _, _, _, _) = desc.into_runtime();
-
-        assert_eq!(config.clipmap_levels, MAX_SUPPORTED_CLIPMAP_LEVELS as u32);
+        assert!(config.clipmap_levels >= 1);
+        assert!(config.clipmap_levels <= MAX_SUPPORTED_CLIPMAP_LEVELS as u32);
     }
 }

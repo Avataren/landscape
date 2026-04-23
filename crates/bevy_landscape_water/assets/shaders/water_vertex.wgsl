@@ -40,24 +40,24 @@ fn vertex(vertex: Vertex) -> VertexOutput {
         vec4<f32>(vertex.position, 1.0)
     );
 
-    // Vertex Y displacement from Gerstner waves.
-    // Only worthwhile on close geometry; beyond 500 m the wave-height
-    // variation is sub-pixel and skipping it saves vertex-shader work.
-    var height = 0.0;
-#if QUALITY > 2
-    let w_pos    = world_position.xz;
-    let cam_dist = distance(w_pos, vec2<f32>(view.world_position.x, view.world_position.z));
-    if cam_dist < 500.0 {
-        // Pass pixel_size=0 — no LOD filtering in the vertex shader.
-        height = water_fn::get_wave_height(w_pos);
-    }
-#endif
+    // Full Gerstner displacement (GPU Gems §1 eq. 4):
+    //   P' = (x + Σ Q_eff·A·D_x·cos, y + Σ A·sin, z + Σ Q_eff·A·D_z·cos)
+    //
+    // Approximate vertex spacing from camera distance so short-wavelength
+    // waves are LOD-filtered on coarse rings just as they are in the fragment
+    // shader.  vertex_size ≈ 4m (fine ring) growing to 64m at the horizon.
+    let orig_world_xz = world_position.xz;
+    let cam_dist      = distance(orig_world_xz, vec2<f32>(view.world_position.x, view.world_position.z));
+    let vertex_size   = clamp(cam_dist / 128.0, 4.0, 64.0);
+    let wave = water_fn::get_wave_result(orig_world_xz, vertex_size);
 
-    out.world_position = world_position + vec4<f32>(out.world_normal * height, 0.0);
+    out.world_position = world_position + vec4<f32>(wave.xz_disp.x, wave.height, wave.xz_disp.y, 0.0);
     out.position       = position_world_to_clip(out.world_position.xyz);
 
 #ifdef VERTEX_UVS
-    out.uv = vertex.uv;
+    // Store the pre-displacement world XZ so the fragment shader can evaluate
+    // Gerstner normals at the correct (undisplaced) position.
+    out.uv = orig_world_xz;
 #endif
 
 #ifdef VERTEX_TANGENTS

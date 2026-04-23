@@ -313,22 +313,28 @@ fn build_trim_instances(clip_centers: &[IVec2]) -> Vec<WaterTrimCpu> {
     let mut out = Vec::with_capacity(4 * clip_centers.len().saturating_sub(1));
 
     for level in 1..clip_centers.len() as u32 {
-        let scale = water_level_scale(level);
-        let c     = clip_centers[level as usize];
+        let coarse_scale = water_level_scale(level);
+        // Use fine (level-1) scale so trim strip vertices are at fine-ring
+        // spacing — this eliminates the T-junction cracks that appear when
+        // the trim has coarse vertex density but the fine ring has 2× more
+        // vertices along the shared edge.
+        let fine_scale = water_level_scale(level - 1);
+        let c          = clip_centers[level as usize];
 
-        let min_x = (c.x - m) as f32 * scale;
-        let max_x = (c.x + m) as f32 * scale;
-        let min_z = (c.y - m) as f32 * scale;
-        let max_z = (c.y + m) as f32 * scale;
+        let min_x = (c.x - m) as f32 * coarse_scale;
+        let max_x = (c.x + m) as f32 * coarse_scale;
+        let min_z = (c.y - m) as f32 * coarse_scale;
+        let max_z = (c.y + m) as f32 * coarse_scale;
 
-        // LEFT  (vertical):   x ∈ [min_x, min_x+scale], z ∈ [min_z, max_z]
-        out.push(WaterTrimCpu { origin_ws: Vec2::new(min_x,         min_z), level_scale_ws: scale, is_horizontal: false });
-        // RIGHT (vertical):   x ∈ [max_x-scale, max_x], z ∈ [min_z, max_z]
-        out.push(WaterTrimCpu { origin_ws: Vec2::new(max_x - scale, min_z), level_scale_ws: scale, is_horizontal: false });
-        // BOTTOM (horizontal): x ∈ [min_x, max_x], z ∈ [min_z, min_z+scale]
-        out.push(WaterTrimCpu { origin_ws: Vec2::new(min_x, min_z),         level_scale_ws: scale, is_horizontal: true  });
-        // TOP   (horizontal): x ∈ [min_x, max_x], z ∈ [max_z-scale, max_z]
-        out.push(WaterTrimCpu { origin_ws: Vec2::new(min_x, max_z - scale), level_scale_ws: scale, is_horizontal: true  });
+        // LEFT  (vertical):   x ∈ [min_x, min_x+coarse], z ∈ [min_z, max_z]
+        out.push(WaterTrimCpu { origin_ws: Vec2::new(min_x,                   min_z), level_scale_ws: fine_scale, is_horizontal: false });
+        // RIGHT (vertical):   x ∈ [max_x-coarse, max_x], z ∈ [min_z, max_z]
+        // max_x - coarse_scale = max_x - 2*fine_scale (same world position)
+        out.push(WaterTrimCpu { origin_ws: Vec2::new(max_x - coarse_scale,    min_z), level_scale_ws: fine_scale, is_horizontal: false });
+        // BOTTOM (horizontal): x ∈ [min_x, max_x], z ∈ [min_z, min_z+coarse]
+        out.push(WaterTrimCpu { origin_ws: Vec2::new(min_x, min_z),                   level_scale_ws: fine_scale, is_horizontal: true  });
+        // TOP   (horizontal): x ∈ [min_x, max_x], z ∈ [max_z-coarse, max_z]
+        out.push(WaterTrimCpu { origin_ws: Vec2::new(min_x, max_z - coarse_scale),    level_scale_ws: fine_scale, is_horizontal: true  });
     }
     out
 }
@@ -410,10 +416,12 @@ fn rebuild_water_tiles(
     let trim_list    = build_trim_instances(&clip_centers);
     let water_height = layout.height;
 
-    let trim_quads = 2 * WATER_CLIPMAP_BLOCK_SIZE;
-    let block_mesh = Mesh3d(meshes.add(build_rect_mesh(WATER_CLIPMAP_BLOCK_SIZE, WATER_CLIPMAP_BLOCK_SIZE)));
-    let trim_v_mesh = Mesh3d(meshes.add(build_rect_mesh(1, trim_quads)));
-    let trim_h_mesh = Mesh3d(meshes.add(build_rect_mesh(trim_quads, 1)));
+    let trim_quads = 4 * WATER_CLIPMAP_BLOCK_SIZE;
+    let block_mesh  = Mesh3d(meshes.add(build_rect_mesh(WATER_CLIPMAP_BLOCK_SIZE, WATER_CLIPMAP_BLOCK_SIZE)));
+    // 2 quads wide × 4m quads tall (fine-scale density) so each trim strip's
+    // vertices align with the fine-ring vertex grid, eliminating T-junction cracks.
+    let trim_v_mesh = Mesh3d(meshes.add(build_rect_mesh(2, trim_quads)));
+    let trim_h_mesh = Mesh3d(meshes.add(build_rect_mesh(trim_quads, 2)));
 
     let mat = MeshMaterial3d(materials.add(StandardWaterMaterial {
         base: StandardMaterial {
