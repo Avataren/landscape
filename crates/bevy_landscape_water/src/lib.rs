@@ -92,7 +92,8 @@ impl Default for WaterSettings {
             wave_direction_blend_duration: 2.0,
             wave_speed:                    1.0,
             refraction_strength:           15.0,
-            foam_threshold:                0.8,
+            // Normalised: fraction of max wave height above which foam appears.
+            foam_threshold:                0.7,
             foam_color:                    Color::srgba(1.0, 1.0, 1.0, 0.9),
             shoreline_foam_depth:          2.0,
         }
@@ -134,7 +135,10 @@ struct PatchInstanceCpu {
 
 #[derive(Resource, Default)]
 struct WaterPatchEntities {
-    entities:          Vec<Entity>,
+    /// Regular m×m block entities (fine and coarse rings).
+    block_entities:    Vec<Entity>,
+    /// Interior trim strip entities (4 per ring boundary).
+    trim_entities:     Vec<Entity>,
     last_clip_centers: Vec<IVec2>,
 }
 
@@ -170,8 +174,10 @@ impl Plugin for LandscapeWaterPlugin {
             height:               initial_layout.height,
             amplitude:            8.0,
             clarity:              0.9,
-            foam_threshold:       1.5,
-            shoreline_foam_depth: 2.0,
+            // Normalised [0..1]: fraction of max wave height above which foam appears.
+            // 0.7 = only the top 30% of wave heights get foam (genuine crests only).
+            foam_threshold:       0.7,
+            shoreline_foam_depth: 1.5,
             spawn_tiles:          None,
             ..WaterSettings::default()
         });
@@ -231,18 +237,15 @@ fn effective_water_level(level: Option<f32>) -> Option<f32> {
 }
 
 // ---------------------------------------------------------------------------
-// Even-snapping: guarantees ring boundary alignment, eliminates LOD gaps.
+// Even-snapping: guarantees ring boundary alignment.
 //
-// Standard floor-snap uses stride = base_scale.  When fine_center.x is odd,
-// the fine outer boundary is offset by one fine tile from the coarse inner
-// boundary, leaving a gap that shows through alpha-blended water.
+// Snap fine_center to stride = 2 × base_scale (always even result).
 //
-// Fix: snap fine_center to stride = 2 × base_scale (always even result).
-//
-// Proof of exact alignment for even fine_center = 2k:
+// Proof: even fine_center = 2k →
 //   Fine outer max X   = (2k + 2m) × s₀
 //   Coarse inner max X = (k + m)   × s₁ = (2k + 2m) × s₀  ✓
-// Holds for all four sides → no gap, no overlap, no trims needed.
+// All four ring edges align exactly.  Trim strips (below) then fill the
+// T-junction cracks along these shared edges.
 // ---------------------------------------------------------------------------
 fn snap_to_even_grid(camera_xz: Vec2, scale: f32) -> IVec2 {
     let double_scale = scale * 2.0;
@@ -278,6 +281,53 @@ fn build_patch_instances(clip_centers: &[IVec2]) -> Vec<PatchInstanceCpu> {
         for origin in build_block_origins(center, scale, WATER_CLIPMAP_BLOCK_SIZE, level > 0) {
             out.push(PatchInstanceCpu { lod_level: level, origin_ws: origin, level_scale_ws: scale });
         }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Coarse-scale interior trim strips  (GPU Gems 2 §2.3.3)
+//
+// Each ring LOD boundary has a T-junction: the fine ring has 2× more vertices
+// along the shared edge than the coarse ring.  Even-snap ensures the boundary
+// world positions coincide, but the coarse mesh has no vertices at the fine
+// half-stride positions, leaving visible cracks when Gerstner waves displace
+// vertices differently.
+//
+// Fix: add 4 trim strips (LEFT, RIGHT, BOTTOM, TOP) per ring level, placed
+// 1 coarse unit inside the hole from each boundary edge.  Strips overlap the
+// fine ring slightly (2 fine quads wide) which causes minimal double-blending
+// through alpha-blended water — far less visible than the underlying crack.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+struct WaterTrimCpu {
+    origin_ws:      Vec2,
+    level_scale_ws: f32,
+    is_horizontal:  bool,
+}
+
+fn build_trim_instances(clip_centers: &[IVec2]) -> Vec<WaterTrimCpu> {
+    let m   = WATER_CLIPMAP_BLOCK_SIZE as i32;
+    let mut out = Vec::with_capacity(4 * clip_centers.len().saturating_sub(1));
+
+    for level in 1..clip_centers.len() as u32 {
+        let scale = water_level_scale(level);
+        let c     = clip_centers[level as usize];
+
+        let min_x = (c.x - m) as f32 * scale;
+        let max_x = (c.x + m) as f32 * scale;
+        let min_z = (c.y - m) as f32 * scale;
+        let max_z = (c.y + m) as f32 * scale;
+
+        // LEFT  (vertical):   x ∈ [min_x, min_x+scale], z ∈ [min_z, max_z]
+        out.push(WaterTrimCpu { origin_ws: Vec2::new(min_x,         min_z), level_scale_ws: scale, is_horizontal: false });
+        // RIGHT (vertical):   x ∈ [max_x-scale, max_x], z ∈ [min_z, max_z]
+        out.push(WaterTrimCpu { origin_ws: Vec2::new(max_x - scale, min_z), level_scale_ws: scale, is_horizontal: false });
+        // BOTTOM (horizontal): x ∈ [min_x, max_x], z ∈ [min_z, min_z+scale]
+        out.push(WaterTrimCpu { origin_ws: Vec2::new(min_x, min_z),         level_scale_ws: scale, is_horizontal: true  });
+        // TOP   (horizontal): x ∈ [min_x, max_x], z ∈ [max_z-scale, max_z]
+        out.push(WaterTrimCpu { origin_ws: Vec2::new(min_x, max_z - scale), level_scale_ws: scale, is_horizontal: true  });
     }
     out
 }
@@ -347,7 +397,8 @@ fn rebuild_water_tiles(
         }
         commands.entity(root).despawn();
     }
-    patches.entities.clear();
+    patches.block_entities.clear();
+    patches.trim_entities.clear();
     patches.last_clip_centers.clear();
 
     let Some(clipmap) = layout.clipmap else { return };
@@ -355,11 +406,13 @@ fn rebuild_water_tiles(
     let clip_centers = build_water_clip_centers(camera_xz, clipmap.levels);
     let root_center  = clip_centers[0].as_vec2() * water_level_scale(0);
     let patch_list   = build_patch_instances(&clip_centers);
+    let trim_list    = build_trim_instances(&clip_centers);
     let water_height = layout.height;
 
-    let block_mesh = Mesh3d(meshes.add(build_rect_mesh(
-        WATER_CLIPMAP_BLOCK_SIZE, WATER_CLIPMAP_BLOCK_SIZE,
-    )));
+    let trim_quads = 2 * WATER_CLIPMAP_BLOCK_SIZE;
+    let block_mesh = Mesh3d(meshes.add(build_rect_mesh(WATER_CLIPMAP_BLOCK_SIZE, WATER_CLIPMAP_BLOCK_SIZE)));
+    let trim_v_mesh = Mesh3d(meshes.add(build_rect_mesh(1, trim_quads)));
+    let trim_h_mesh = Mesh3d(meshes.add(build_rect_mesh(trim_quads, 1)));
 
     let mat = MeshMaterial3d(materials.add(StandardWaterMaterial {
         base: StandardMaterial {
@@ -389,7 +442,8 @@ fn rebuild_water_tiles(
         settings.wave_direction_blend_duration,
     );
 
-    let mut spawned = Vec::with_capacity(patch_list.len());
+    let mut block_spawned = Vec::with_capacity(patch_list.len());
+    let mut trim_spawned  = Vec::with_capacity(trim_list.len());
 
     let root = commands.spawn((
         WaterTiles,
@@ -399,6 +453,7 @@ fn rebuild_water_tiles(
     )).id();
 
     commands.entity(root).with_children(|parent| {
+        // --- Block patches ---
         for p in &patch_list {
             let offset = p.origin_ws - root_center;
             let entity = parent.spawn((
@@ -415,11 +470,33 @@ fn rebuild_water_tiles(
                 NotShadowCaster,
                 NotShadowReceiver,
             )).id();
-            spawned.push(entity);
+            block_spawned.push(entity);
+        }
+
+        // --- Interior trim strips (fill T-junction cracks at ring boundaries) ---
+        for trim in &trim_list {
+            let offset = trim.origin_ws - root_center;
+            let mesh   = if trim.is_horizontal { trim_h_mesh.clone() } else { trim_v_mesh.clone() };
+            let entity = parent.spawn((
+                WaterTile { offset },
+                Name::new("Water Trim"),
+                Transform {
+                    translation: Vec3::new(offset.x, water_height, offset.y),
+                    scale:       Vec3::new(trim.level_scale_ws, 1.0, trim.level_scale_ws),
+                    ..default()
+                },
+                mesh,
+                mat.clone(),
+                wave_dir,
+                NotShadowCaster,
+                NotShadowReceiver,
+            )).id();
+            trim_spawned.push(entity);
         }
     });
 
-    patches.entities          = spawned;
+    patches.block_entities    = block_spawned;
+    patches.trim_entities     = trim_spawned;
     patches.last_clip_centers = clip_centers;
 }
 
@@ -450,7 +527,7 @@ fn update_water_patch_transforms(
         (Without<WaterTiles>, Without<TerrainCamera>),
     >,
 ) {
-    if patch_entities.entities.is_empty() { return; }
+    if patch_entities.block_entities.is_empty() { return; }
     let Ok(mut root_t) = root_q.single_mut() else { return };
 
     let clip_centers = build_water_clip_centers(
@@ -464,12 +541,24 @@ fn update_water_patch_transforms(
     root_t.translation.z = root_center.y;
 
     let patch_list = build_patch_instances(&clip_centers);
-    for (entity, p) in patch_entities.entities.iter().zip(patch_list.iter()) {
+    let trim_list  = build_trim_instances(&clip_centers);
+
+    for (entity, p) in patch_entities.block_entities.iter().zip(patch_list.iter()) {
         if let Ok((mut t, mut tile)) = tile_q.get_mut(*entity) {
             let offset = p.origin_ws - root_center;
             t.translation.x = offset.x;
             t.translation.z = offset.y;
             t.scale          = Vec3::new(p.level_scale_ws, 1.0, p.level_scale_ws);
+            tile.offset      = offset;
+        }
+    }
+
+    for (entity, trim) in patch_entities.trim_entities.iter().zip(trim_list.iter()) {
+        if let Ok((mut t, mut tile)) = tile_q.get_mut(*entity) {
+            let offset = trim.origin_ws - root_center;
+            t.translation.x = offset.x;
+            t.translation.z = offset.y;
+            t.scale          = Vec3::new(trim.level_scale_ws, 1.0, trim.level_scale_ws);
             tile.offset      = offset;
         }
     }
@@ -585,9 +674,9 @@ fn apply_water_enabled(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_patch_instances, build_water_clip_centers, effective_water_level,
-        snap_to_even_grid, water_clipmap_layout, water_layout, water_level_scale,
-        WATER_CLIPMAP_BLOCK_SIZE,
+        build_patch_instances, build_trim_instances, build_water_clip_centers,
+        effective_water_level, snap_to_even_grid, water_clipmap_layout, water_layout,
+        water_level_scale, WATER_CLIPMAP_BLOCK_SIZE,
     };
     use bevy::prelude::*;
 
@@ -658,6 +747,9 @@ mod tests {
     #[test]
     fn clipmap_patch_counts_match_gpu_gems_layout() {
         let centers = build_water_clip_centers(Vec2::ZERO, 6);
+        // Blocks: 16 fine + 12 per coarse ring × 5 rings
         assert_eq!(build_patch_instances(&centers).len(), 16 + 12 * 5);
+        // Trims: 4 strips per ring boundary × 5 boundaries
+        assert_eq!(build_trim_instances(&centers).len(), 4 * 5);
     }
 }

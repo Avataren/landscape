@@ -115,12 +115,19 @@ fn fragment(
     // -----------------------------------------------------------------------
     // Foam — wave crest + shoreline.
     //
-    // Crest foam: peaks that exceed foam_threshold rise out of the water.
+    // foam_threshold is normalised to [0..1] where 1.0 = top of the wave
+    // range and 0.0 = always foam.  The effective max wave height is
+    // approximated as amplitude × 2.0  (≈ AMP_RATIO × amplitude × Σλ).
+    //
     // Shoreline foam: shallow areas where waves break at the shore.
     //   Only available when the depth prepass provides terrain_depth_m.
     // -----------------------------------------------------------------------
-    let crest_foam = saturate((wave.height - foam_threshold) * 10.0);
-    let crest_w    = crest_foam * crest_foam;
+    let max_wave_h = material.amplitude * 2.0;
+    let norm_h     = saturate(wave.height / max(max_wave_h, 0.001));
+    // Transition width = (1 - foam_threshold) / 2 so it scales with the threshold.
+    let transition  = max((1.0 - foam_threshold) * 0.5, 0.02);
+    let crest_foam  = smoothstep(foam_threshold - transition, foam_threshold + transition, norm_h);
+    let crest_w     = crest_foam * crest_foam;
 
 #ifdef DEPTH_PREPASS
     // Fade from full foam at depth=0 to no foam at depth=shoreline_foam_depth.
