@@ -419,6 +419,75 @@ fn tiff_result_to_f32(result: tiff::decoder::DecodingResult) -> Vec<f32> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// TIFF layout helpers — unified strip/tile reading
+// ---------------------------------------------------------------------------
+
+/// Describes whether a TIFF uses strips or tiles.
+struct TiffLayout {
+    /// Width of one chunk in pixels: `src_w` for strips, `tile_w` for tiles.
+    tile_w: usize,
+    /// Height of one chunk in pixels: rows-per-strip or tile height.
+    tile_h: usize,
+    /// Number of horizontal chunks per image row (1 for stripped TIFFs).
+    tiles_per_row: usize,
+    /// Total number of virtual "strip rows" (each covers `tile_h` pixel rows).
+    virtual_strip_count: usize,
+}
+
+impl TiffLayout {
+    fn from_dims(chunk_w: u32, chunk_h: u32, src_w: usize, src_h: usize) -> Self {
+        let tw = chunk_w as usize;
+        let th = chunk_h as usize;
+        let tpr = (src_w + tw - 1) / tw;
+        let vsc = (src_h + th - 1) / th;
+        TiffLayout { tile_w: tw, tile_h: th, tiles_per_row: tpr, virtual_strip_count: vsc }
+    }
+
+    fn _is_tiled(&self, src_w: usize) -> bool {
+        self.tile_w < src_w
+    }
+}
+
+/// Read one "virtual strip" — a band of `tile_h` full-width pixel rows.
+///
+/// For stripped TIFFs (`tiles_per_row == 1`): just decodes the strip.
+/// For tiled TIFFs: reads all horizontal tiles in the tile row and assembles
+/// them into a contiguous `tile_h × src_w` buffer.
+fn read_virtual_strip<R: std::io::Read + std::io::Seek>(
+    dec: &mut tiff::decoder::Decoder<R>,
+    vstrip_idx: usize,
+    layout: &TiffLayout,
+    src_w: usize,
+) -> Result<Vec<f32>, String> {
+    if layout.tiles_per_row == 1 {
+        let result = dec
+            .read_chunk(vstrip_idx as u32)
+            .map_err(|e| e.to_string())?;
+        return Ok(tiff_result_to_f32(result));
+    }
+    // Tiled: assemble `tiles_per_row` horizontal tiles into one full-width band.
+    let rps = layout.tile_h;
+    let tile_w = layout.tile_w;
+    let mut assembled = vec![0.0f32; rps * src_w];
+    for tc in 0..layout.tiles_per_row {
+        let chunk_idx = (vstrip_idx * layout.tiles_per_row + tc) as u32;
+        let chunk = dec.read_chunk(chunk_idx).map_err(|e| e.to_string())?;
+        let vals = tiff_result_to_f32(chunk);
+        let x_start = tc * tile_w;
+        let x_end = (x_start + tile_w).min(src_w);
+        let len = x_end - x_start;
+        for r in 0..rps {
+            let dst = r * src_w + x_start;
+            let src = r * tile_w;
+            if src + len <= vals.len() && dst + len <= assembled.len() {
+                assembled[dst..dst + len].copy_from_slice(&vals[src..src + len]);
+            }
+        }
+    }
+    Ok(assembled)
+}
+
 /// Load a TIFF heightmap and return a downsampled grayscale thumbnail.
 ///
 /// Reads at most `max_side` sample rows and `max_side` columns using uniform
@@ -429,13 +498,9 @@ pub fn load_tiff_thumbnail(path: &Path, max_side: usize) -> Option<(Vec<u8>, usi
     let f = File::open(path).ok()?;
     let mut dec = tiff::decoder::Decoder::new(BufReader::new(f)).ok()?;
     let (w, h) = dec.dimensions().ok()?;
-    let (chunk_w, rps_raw) = dec.chunk_dimensions();
-    if chunk_w != w {
-        return None; // tiled TIFF — skip
-    }
-    let rps = rps_raw as usize;
-    let strip_count = dec.strip_count().ok()? as usize;
+    let (chunk_w, chunk_h) = dec.chunk_dimensions();
     let (src_w, src_h) = (w as usize, h as usize);
+    let layout = TiffLayout::from_dims(chunk_w, chunk_h, src_w, src_h);
 
     // Compute subsampling so the thumbnail fits within max_side × max_side.
     let step = (src_w.max(src_h) + max_side - 1) / max_side;
@@ -446,25 +511,31 @@ pub fn load_tiff_thumbnail(path: &Path, max_side: usize) -> Option<(Vec<u8>, usi
     let mut h_min = f32::INFINITY;
     let mut h_max = f32::NEG_INFINITY;
 
-    // Two-pass: first scan range, then fill pixels.
-    // We read each strip once per pass; total read = 2 × file size.
-    // For safety, collect all decoded rows into a subsampled buffer in one pass.
     let mut rows: Vec<Vec<f32>> = Vec::with_capacity(thumb_h);
-    for i in 0..strip_count {
-        let strip_row_start = i * rps;
-        if strip_row_start >= src_h { break; }
-        let result = dec.read_chunk(i as u32).ok()?;
-        let vals = tiff_result_to_f32(result);
-        for row in 0..rps {
+    for vs in 0..layout.virtual_strip_count {
+        let strip_row_start = vs * layout.tile_h;
+        if strip_row_start >= src_h {
+            break;
+        }
+        let vals = read_virtual_strip(&mut dec, vs, &layout, src_w).ok()?;
+        for row in 0..layout.tile_h {
             let abs_row = strip_row_start + row;
-            if abs_row >= src_h { break; }
-            if abs_row % step != 0 { continue; } // skip non-sampled rows
+            if abs_row >= src_h {
+                break;
+            }
+            if abs_row % step != 0 {
+                continue; // skip non-sampled rows
+            }
             let row_vals: Vec<f32> = (0..thumb_w)
                 .map(|tx| {
                     let sx = (tx * step).min(src_w - 1);
                     let v = vals.get(row * src_w + sx).copied().unwrap_or(0.0);
-                    if v < h_min { h_min = v; }
-                    if v > h_max { h_max = v; }
+                    if v < h_min {
+                        h_min = v;
+                    }
+                    if v > h_max {
+                        h_max = v;
+                    }
                     v
                 })
                 .collect();
@@ -475,7 +546,9 @@ pub fn load_tiff_thumbnail(path: &Path, max_side: usize) -> Option<(Vec<u8>, usi
     // Normalise and convert to u8.
     let range = (h_max - h_min).max(1e-6);
     for (ty, row_vals) in rows.iter().enumerate() {
-        if ty >= thumb_h { break; }
+        if ty >= thumb_h {
+            break;
+        }
         for (tx, &v) in row_vals.iter().enumerate() {
             pixels[ty * thumb_w + tx] = (((v - h_min) / range) * 255.0) as u8;
         }
@@ -484,11 +557,10 @@ pub fn load_tiff_thumbnail(path: &Path, max_side: usize) -> Option<(Vec<u8>, usi
     Some((pixels, thumb_w, thumb_h))
 }
 
-/// within the `bake_size`×`bake_size` domain (top-left crop).
+/// Scan a TIFF heightmap for its value range within the `bake_size`×`bake_size` domain.
 ///
-/// Returns `(src_w, src_h, h_min, h_max, rows_per_strip)`.
-/// Also validates that the TIFF uses full-width strips (not tiles), which is
-/// required for the strip-offset addressing used in the streaming bake.
+/// Returns `(src_w, src_h, h_min, h_max, rows_per_virtual_strip)`.
+/// Supports both stripped and tiled TIFFs.
 fn scan_tiff_range(
     path: &Path,
     bake_size: usize,
@@ -498,37 +570,25 @@ fn scan_tiff_range(
     let mut dec =
         tiff::decoder::Decoder::new(f).map_err(|e| format!("tiff open: {e}"))?;
     let (w, h) = dec.dimensions().map_err(|e| e.to_string())?;
-    let (chunk_w, rps_raw) = dec.chunk_dimensions();
-    let rps = rps_raw as usize;
-
-    if chunk_w as usize != w as usize {
-        return Err(format!(
-            "TIFF '{}' uses {} pixel-wide tiles (expected full-width strips of {}px). \
-             Only stripped TIFFs are supported for streaming bake.",
-            path.display(),
-            chunk_w,
-            w
-        ));
-    }
-
-    let sc = dec.strip_count().map_err(|e| e.to_string())?;
+    let (chunk_w, chunk_h) = dec.chunk_dimensions();
+    let (src_w, src_h) = (w as usize, h as usize);
+    let layout = TiffLayout::from_dims(chunk_w, chunk_h, src_w, src_h);
+    let rps = layout.tile_h;
 
     let mut h_min = f32::INFINITY;
     let mut h_max = f32::NEG_INFINITY;
-    for i in 0..sc {
-        let strip_row_start = i as usize * rps;
+    for vs in 0..layout.virtual_strip_count {
+        let strip_row_start = vs * rps;
         if strip_row_start >= bake_size {
             break; // beyond the baked domain
         }
-        let strip = dec.read_chunk(i).map_err(|e| e.to_string())?;
-        let values = tiff_result_to_f32(strip);
-        // Each strip row: rps rows × w pixels.
+        let values = read_virtual_strip(&mut dec, vs, &layout, src_w)?;
         for row in 0..rps {
             let abs_row = strip_row_start + row;
             if abs_row >= bake_size {
                 break;
             }
-            let row_start = row * w as usize;
+            let row_start = row * src_w;
             for col in 0..bake_size {
                 let v = values.get(row_start + col).copied().unwrap_or(0.0);
                 if v < h_min { h_min = v; }
@@ -536,7 +596,7 @@ fn scan_tiff_range(
             }
         }
     }
-    Ok((w as usize, h as usize, h_min, h_max, rps))
+    Ok((src_w, src_h, h_min, h_max, rps))
 }
 
 /// Read a u16-encoded height tile back as normalised f32 values.
@@ -682,7 +742,10 @@ fn bake_heightmap_streaming(config: BakeConfig, log: impl Fn(String)) -> Result<
     Ok(())
 }
 
-/// LOD 0: read the source TIFF in rolling strips, write one tile at a time.
+/// LOD 0: read the source TIFF in rolling virtual strips, write one tile at a time.
+///
+/// Supports both stripped TIFFs (one chunk = full-width row band) and tiled TIFFs
+/// (multiple horizontal chunks assembled per virtual strip).
 ///
 /// Memory cost: O((`tile_size` + 2·blur_radius) × `src_w`) — a few dozen MB
 /// even for 32 k-wide rasters.
@@ -690,8 +753,8 @@ fn stream_bake_lod0(
     config: &BakeConfig,
     bake_size: usize,
     src_w: usize,
-    _src_h: usize,
-    rps: usize,    // rows per strip in the source TIFF
+    src_h: usize,
+    rps: usize,    // tile_h from TiffLayout (rows per virtual strip)
     h_min: f32,
     h_range: f32,
     effective_height_scale: f32,
@@ -721,13 +784,15 @@ fn stream_bake_lod0(
     let level_tile_count = tiles_per_side * tiles_per_side;
     let win_size = tile_size + 2; // padded window for Sobel
 
-    // Open the TIFF and read strips in forward order into a rolling VecDeque.
+    // Open the TIFF; detect layout (stripped vs tiled).
     let f = BufReader::new(
         File::open(&config.height_path)
             .map_err(|e| format!("{}: {e}", config.height_path.display()))?,
     );
     let mut dec = Decoder::new(f).map_err(|e| e.to_string())?;
-    let strip_count = dec.strip_count().map_err(|e| e.to_string())? as usize;
+    let (chunk_w, chunk_h) = dec.chunk_dimensions();
+    let layout = TiffLayout::from_dims(chunk_w, chunk_h, src_w, src_h);
+    let virtual_strip_count = layout.virtual_strip_count;
 
     // strip_buf[i] holds the decoded f32 data for strip (buf_strip_start + i).
     let mut strip_buf: VecDeque<Vec<f32>> = VecDeque::new();
@@ -758,11 +823,9 @@ fn stream_bake_lod0(
         }
 
         // Load any strips not yet fetched.
-        while next_strip_to_read < need_end_strip && next_strip_to_read < strip_count {
-            let result = dec
-                .read_chunk(next_strip_to_read as u32)
-                .map_err(|e| e.to_string())?;
-            strip_buf.push_back(tiff_result_to_f32(result));
+        while next_strip_to_read < need_end_strip && next_strip_to_read < virtual_strip_count {
+            let vstrip = read_virtual_strip(&mut dec, next_strip_to_read, &layout, src_w)?;
+            strip_buf.push_back(vstrip);
             next_strip_to_read += 1;
         }
 
