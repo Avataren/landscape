@@ -122,7 +122,7 @@ fn fragment(
     // Shoreline foam: shallow areas where waves break at the shore.
     //   Only available when the depth prepass provides terrain_depth_m.
     // -----------------------------------------------------------------------
-    let max_wave_h = material.amplitude * 2.0;
+    let max_wave_h = water_bindings::material.amplitude * 2.0;
     let norm_h     = saturate(wave.height / max(max_wave_h, 0.001));
     // Transition width = (1 - foam_threshold) / 2 so it scales with the threshold.
     let transition  = max((1.0 - foam_threshold) * 0.5, 0.02);

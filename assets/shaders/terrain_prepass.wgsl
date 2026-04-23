@@ -117,6 +117,10 @@ fn vertex(v: Vertex) -> VertexOutput {
     return out;
 }
 
+// Only emit a fragment function when the renderer expects prepass fragment output
+// (normal/motion-vector/deferred prepass).  Shadow and plain depth passes have
+// PREPASS_FRAGMENT undefined and write depth automatically via rasterization.
+#ifdef PREPASS_FRAGMENT
 @fragment
 fn fragment(in: VertexOutput) -> FragmentOutput {
     if !in_world_bounds(in.world_position.xz) {
@@ -129,3 +133,4 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
 #endif
     return out;
 }
+#endif // PREPASS_FRAGMENT
