@@ -450,8 +450,9 @@ impl Plugin for DetailSynthesisPlugin {
             return;
         };
 
+        // Pipeline init deferred to `finish` — PipelineCache is not yet present
+        // during `build`. Only set up the systems and render graph here.
         render_app
-            .init_resource::<DetailSynthesisPipeline>()
             .init_resource::<DetailSynthesisBindGroups>()
             .add_systems(
                 Render,
@@ -459,5 +460,13 @@ impl Plugin for DetailSynthesisPlugin {
             )
             .add_render_graph_node::<DetailSynthesisNode>(Core3d, DetailSynthesisLabel)
             .add_render_graph_edge(Core3d, DetailSynthesisLabel, Node3d::StartMainPass);
+    }
+
+    fn finish(&self, app: &mut App) {
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+            return;
+        };
+        // PipelineCache (and RenderDevice / AssetServer) are now available.
+        render_app.init_resource::<DetailSynthesisPipeline>();
     }
 }
