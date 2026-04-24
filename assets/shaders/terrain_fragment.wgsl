@@ -563,16 +563,25 @@ fn pixel_normal(lod: u32, xz: vec2<f32>) -> vec3<f32> {
 }
 
 // ── Detail normal perturbation ────────────────────────────────────────────────
-// Reads the R32Float detail residual at ±1 texel offsets and returns the
-// XZ gradient (dDetail/dx, dDetail/dz) in world space.
-// Returns zero for out-of-bounds positions or LODs with no synthesis data.
+// Per-pixel normal perturbation derived from the R32Float synthesis residual.
+//
+// Uses the surface-gradient method so the result is always above the horizon:
+//   1. Extract the base surface gradient  g_base = -n_base.xz / n_base.y
+//   2. Compute detail gradient            g_detail = (dD/dx, dD/dz)
+//   3. Reconstruct                        normalize(-g_total.x, 1, -g_total.y)
+//
+// Coarse LOD layers contain no synthesis data (zeroed), so
+//   mix(grad_fine, grad_coarse=0, alpha) = grad_fine * (1 - alpha)
+// which naturally fades the perturbation to zero at LOD seam boundaries.
+// This halves the texture sample count vs sampling both LODs.
+
 fn sample_detail_f(lod: u32, xz: vec2<f32>) -> f32 {
     if !in_world_bounds(xz) { return 0.0; }
-    let lvl        = terrain.clip_levels[lod];
-    let world_min  = terrain.world_bounds.xy;
-    let world_max  = terrain.world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
-    let sample_xz  = clamp(xz, world_min, world_max);
-    let uv         = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
+    let lvl       = terrain.clip_levels[lod];
+    let world_min = terrain.world_bounds.xy;
+    let world_max = terrain.world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
+    let sample_xz = clamp(xz, world_min, world_max);
+    let uv        = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
     return textureSample(detail_tex, detail_samp, uv, i32(lod)).r;
 }
 
@@ -584,27 +593,25 @@ fn detail_gradient(lod: u32, xz: vec2<f32>, eps: f32) -> vec2<f32> {
     return vec2<f32>((d_xp - d_xm) / (2.0 * eps), (d_zp - d_zm) / (2.0 * eps));
 }
 
-// Apply the synthesised detail gradient to `base_n` using a whiteout-style blend:
-//   perturbed.xz += -gradient, perturbed.y preserved, then renormalise.
-// The gradient is blended by morph_alpha so it fades out at LOD boundaries
-// exactly as the height residual fades out, keeping normals consistent.
 fn perturb_normal_with_detail(
     base_n: vec3<f32>,
     lod: u32,
-    coarse_lod: u32,
     xz: vec2<f32>,
     alpha: f32,
 ) -> vec3<f32> {
-    let lvl_fine   = terrain.clip_levels[lod];
-    let eps_fine   = lvl_fine.w;
-    let eps_coarse = eps_fine * 2.0;
+    let eps = terrain.clip_levels[lod].w;
 
-    let grad_fine   = detail_gradient(lod,        xz, eps_fine);
-    let grad_coarse = detail_gradient(coarse_lod, xz, eps_coarse);
-    let grad        = mix(grad_fine, grad_coarse, alpha);
+    // Only sample the fine LOD; coarse layers are zero, so the morph fade is
+    // achieved by scaling by (1 - alpha) rather than a second texture lookup.
+    let grad = detail_gradient(lod, xz, eps) * (1.0 - alpha);
 
-    // Whiteout blend: shift XZ by the negated slope, keep Y, renormalise.
-    return normalize(vec3<f32>(base_n.x - grad.x, base_n.y, base_n.z - grad.y));
+    // Surface-gradient reconstruction: recover the base slope from the normal,
+    // add the detail slope, then rebuild a proper unit normal.
+    // Clamping base_n.y avoids blow-up on near-vertical faces.
+    let n_y      = max(base_n.y, 0.05);
+    let g_base   = -base_n.xz / n_y;          // (dH/dx, dH/dz) encoded in base normal
+    let g_total  = g_base + grad;
+    return normalize(vec3<f32>(-g_total.x, 1.0, -g_total.y));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -707,7 +714,7 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     // morph-blended so it fades to zero at LOD boundaries in sync with the
     // height residual, preventing normal discontinuities at seams.
     let n_detailed = perturb_normal_with_detail(
-        n_macro, in.lod_level, coarse_lod, frag_xz, in.morph_alpha,
+        n_macro, in.lod_level, frag_xz, in.morph_alpha,
     );
 
     // Apply per-slot PBR normal maps on top of the detail-perturbed macro normal.
