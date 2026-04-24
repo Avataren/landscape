@@ -64,6 +64,10 @@ struct TerrainParams {
 @group(#{MATERIAL_BIND_GROUP}) @binding(10) var pbr_normal_samp:  sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(11) var pbr_orm_arr:      texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(12) var pbr_orm_samp:     sampler;
+// Detail height residual (R32Float, world-space metres) — written by the
+// synthesis compute pass and also read here to derive per-pixel normal perturbation.
+@group(#{MATERIAL_BIND_GROUP}) @binding(15) var detail_tex:       texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(16) var detail_samp:      sampler;
 
 // Must match TerrainVOut in terrain_vertex.wgsl.
 struct TerrainVOut {
@@ -558,6 +562,53 @@ fn pixel_normal(lod: u32, xz: vec2<f32>) -> vec3<f32> {
     return normalize(vec3<f32>(h - h_r, eps, h - h_u));
 }
 
+// ── Detail normal perturbation ────────────────────────────────────────────────
+// Reads the R32Float detail residual at ±1 texel offsets and returns the
+// XZ gradient (dDetail/dx, dDetail/dz) in world space.
+// Returns zero for out-of-bounds positions or LODs with no synthesis data.
+fn sample_detail_f(lod: u32, xz: vec2<f32>) -> f32 {
+    if !in_world_bounds(xz) { return 0.0; }
+    let lvl        = terrain.clip_levels[lod];
+    let world_min  = terrain.world_bounds.xy;
+    let world_max  = terrain.world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
+    let sample_xz  = clamp(xz, world_min, world_max);
+    let uv         = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
+    return textureSample(detail_tex, detail_samp, uv, i32(lod)).r;
+}
+
+fn detail_gradient(lod: u32, xz: vec2<f32>, eps: f32) -> vec2<f32> {
+    let d_xp = sample_detail_f(lod, xz + vec2<f32>(eps, 0.0));
+    let d_xm = sample_detail_f(lod, xz - vec2<f32>(eps, 0.0));
+    let d_zp = sample_detail_f(lod, xz + vec2<f32>(0.0, eps));
+    let d_zm = sample_detail_f(lod, xz - vec2<f32>(0.0, eps));
+    return vec2<f32>((d_xp - d_xm) / (2.0 * eps), (d_zp - d_zm) / (2.0 * eps));
+}
+
+// Apply the synthesised detail gradient to `base_n` using a whiteout-style blend:
+//   perturbed.xz += -gradient, perturbed.y preserved, then renormalise.
+// The gradient is blended by morph_alpha so it fades out at LOD boundaries
+// exactly as the height residual fades out, keeping normals consistent.
+fn perturb_normal_with_detail(
+    base_n: vec3<f32>,
+    lod: u32,
+    coarse_lod: u32,
+    xz: vec2<f32>,
+    alpha: f32,
+) -> vec3<f32> {
+    let lvl_fine   = terrain.clip_levels[lod];
+    let eps_fine   = lvl_fine.w;
+    let eps_coarse = eps_fine * 2.0;
+
+    let grad_fine   = detail_gradient(lod,        xz, eps_fine);
+    let grad_coarse = detail_gradient(coarse_lod, xz, eps_coarse);
+    let grad        = mix(grad_fine, grad_coarse, alpha);
+
+    // Whiteout blend: shift XZ by the negated slope, keep Y, renormalise.
+    return normalize(vec3<f32>(base_n.x - grad.x, base_n.y, base_n.z - grad.y));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Sample the baked RGBA8Snorm normal array for this LOD.
 //
 // RG = fine XZ (computed at this LOD's texel eps), BA = coarse XZ (2× eps).
@@ -646,14 +697,21 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     let frag_xz    = in.world_pos.xz;
     let n_macro    = shading_normal_blended(in.lod_level, coarse_lod, frag_xz, in.morph_alpha);
 
-    // Slope from the macro normal drives zone selection (albedo/normal blending),
-    // so both functions see the same weights regardless of detail perturbation.
-    // acos(N·up) gives the true angle from horizontal (0° flat, 90° vertical).
+    // Slope from the unperturbed macro normal drives zone weights so material
+    // blending is stable (not jittered by sub-texel detail noise).
     let macro_ndotu = abs(dot(n_macro, vec3<f32>(0.0, 1.0, 0.0)));
     let slope_deg   = degrees(acos(clamp(macro_ndotu, 0.0, 1.0)));
 
-    // Apply per-slot normal map detail on top of the macro normal.
-    let n = apply_normal_detail(n_macro, in.world_pos.xz, in.world_pos.y, slope_deg);
+    // Perturb the macro normal with the detail height gradient (central
+    // differences on the R32Float synthesis residual).  The gradient is
+    // morph-blended so it fades to zero at LOD boundaries in sync with the
+    // height residual, preventing normal discontinuities at seams.
+    let n_detailed = perturb_normal_with_detail(
+        n_macro, in.lod_level, coarse_lod, frag_xz, in.morph_alpha,
+    );
+
+    // Apply per-slot PBR normal maps on top of the detail-perturbed macro normal.
+    let n = apply_normal_detail(n_detailed, in.world_pos.xz, in.world_pos.y, slope_deg);
 
     // --- PBR texture debug (debug_flags.z) ---
     // Samples slot 0 directly at world UV — bypasses zone blending so you
