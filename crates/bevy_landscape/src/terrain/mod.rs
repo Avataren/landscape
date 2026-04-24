@@ -14,6 +14,7 @@ pub mod physics_colliders;
 pub mod render;
 pub mod residency;
 pub mod resources;
+pub mod source_heightmap;
 pub mod streamer;
 pub mod world_desc;
 
@@ -39,6 +40,7 @@ use collision::{update_collision_tiles, TerrainCollisionCache};
 use components::TerrainCamera;
 use config::TerrainConfig;
 use macro_color::load_macro_color_texture;
+use source_heightmap::{load_source_heightmap, SourceHeightmapState};
 use material::{TerrainMaterial, TerrainMaterialUniforms};
 use material_slots::{sync_material_library_to_terrain_material, MaterialLibrary};
 use math::{compute_needed_tiles_for_level, level_scale, snap_camera_to_nested_clipmap_grid};
@@ -141,6 +143,8 @@ impl Plugin for TerrainPlugin {
             .init_resource::<PbrRebuildProgress>()
             .init_resource::<PbrRebuildState>()
             // Startup
+            // Note: SourceHeightmapState is inserted by setup_terrain, not init'd here,
+            // because it needs config/desc to load tile data.
             .add_systems(Startup, (setup_tile_channel, setup_terrain).chain())
             .add_systems(PostStartup, preload_terrain_startup)
             // Update: ordered as per handoff spec
@@ -523,9 +527,17 @@ fn setup_terrain(
     let normal_handle = images.add(normal_image);
     let macro_color = load_macro_color_texture(&config, &desc);
     let macro_color_handle = images.add(macro_color.image);
-    // Record whether the macro color texture was actually loaded so the
-    // Materials panel can gate its "macro color override" toggle on it.
     material_library.macro_color_loaded = macro_color.enabled;
+
+    // --- Source heightmap (single large GPU texture at max_mip_level) ---
+    let source_hmap = load_source_heightmap(&config, &desc);
+    let source_hmap_handle = images.add(source_hmap.image);
+    commands.insert_resource(SourceHeightmapState {
+        handle: source_hmap_handle.clone(),
+        world_origin: source_hmap.world_origin,
+        world_extent: source_hmap.world_extent,
+        texel_size: source_hmap.texel_size,
+    });
 
     // base_patch_size = world-space size of one grid unit at LOD 0 = world_scale.
     // The vertex shader derives LOD from: round(log2(level_scale_ws / base_patch_size)).
@@ -581,6 +593,7 @@ fn setup_terrain(
         pbr_albedo_array: pbr_albedo_handle,
         pbr_normal_array: pbr_normal_handle,
         pbr_orm_array: pbr_orm_handle,
+        source_heightmap: source_hmap_handle,
         params: TerrainMaterialUniforms {
             height_scale: config.height_scale,
             base_patch_size,
@@ -921,6 +934,23 @@ fn reload_terrain_system(
                 *img = new_macro.image;
             }
         }
+
+        // --- 4b. Rebuild source heightmap, update image in-place, overwrite resource ---
+        let new_source = load_source_heightmap(&new_config, &new_desc);
+        let source_handle = materials
+            .get(&clipmap_state.material_handle)
+            .map(|m| m.source_heightmap.clone())
+            .unwrap_or_default();
+        if let Some(img) = images.get_mut(&source_handle) {
+            *img = new_source.image;
+        }
+        // insert_resource is deferred — takes effect at end of this command batch.
+        commands.insert_resource(SourceHeightmapState {
+            handle: source_handle,
+            world_origin: new_source.world_origin,
+            world_extent: new_source.world_extent,
+            texel_size: new_source.texel_size,
+        });
 
         // --- 5. Point clipmap state at the new textures -----------------------
         // CPU mirrors will be populated by sync_preload_tiles below.

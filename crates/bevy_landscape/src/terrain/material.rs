@@ -139,6 +139,17 @@ pub struct TerrainMaterial {
     #[texture(11, visibility(fragment), dimension = "2d_array")]
     #[sampler(12, visibility(fragment))]
     pub pbr_orm_array: Handle<Image>,
+
+    /// R16Unorm — full-world source heightmap composited from baked tiles at
+    /// `max_mip_level`. Covers `[source_world_origin, source_world_origin +
+    /// source_world_extent]` in XZ. Used by the detail synthesis compute pass
+    /// and by the vertex shader for base height sampling.
+    ///
+    /// UV mapping: `uv = (world_xz - source_origin) / source_extent`
+    /// where origin/extent are stored in `SourceHeightmapState`.
+    #[texture(13, visibility(vertex, fragment), dimension = "2d")]
+    #[sampler(14, visibility(vertex, fragment))]
+    pub source_heightmap: Handle<Image>,
 }
 
 impl Material for TerrainMaterial {
