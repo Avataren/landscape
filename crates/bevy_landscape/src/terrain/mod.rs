@@ -4,6 +4,7 @@ pub mod collision;
 pub mod components;
 pub mod config;
 pub mod debug;
+pub mod detail_synthesis;
 pub mod macro_color;
 pub mod material;
 pub mod material_slots;
@@ -39,6 +40,9 @@ use clipmap_texture::{
 use collision::{update_collision_tiles, TerrainCollisionCache};
 use components::TerrainCamera;
 use config::TerrainConfig;
+use detail_synthesis::{
+    create_detail_texture, update_synthesis_state, DetailSynthesisPlugin,
+};
 use macro_color::load_macro_color_texture;
 use source_heightmap::{load_source_heightmap, SourceHeightmapState};
 use material::{TerrainMaterial, TerrainMaterialUniforms};
@@ -189,10 +193,15 @@ impl Plugin for TerrainPlugin {
             .add_systems(Update, rebuild_pbr_textures_system)
             .add_systems(
                 Update,
+                update_synthesis_state.after(update_terrain_view_state),
+            )
+            .add_systems(
+                Update,
                 reload_terrain_system.before(update_terrain_view_state),
             )
-            // Render sub-plugin
-            .add_plugins(TerrainRenderPlugin);
+            // Render sub-plugins
+            .add_plugins(TerrainRenderPlugin)
+            .add_plugins(DetailSynthesisPlugin);
     }
 }
 
@@ -539,6 +548,11 @@ fn setup_terrain(
         texel_size: source_hmap.texel_size,
     });
 
+    // --- Detail residual texture (R32Float array, written by compute each frame) ---
+    let detail = create_detail_texture(&config, &mut images);
+    let detail_handle = detail.handle.clone();
+    commands.insert_resource(detail);
+
     // base_patch_size = world-space size of one grid unit at LOD 0 = world_scale.
     // The vertex shader derives LOD from: round(log2(level_scale_ws / base_patch_size)).
     let base_patch_size = config.world_scale;
@@ -594,6 +608,7 @@ fn setup_terrain(
         pbr_normal_array: pbr_normal_handle,
         pbr_orm_array: pbr_orm_handle,
         source_heightmap: source_hmap_handle,
+        detail_texture: detail_handle,
         params: TerrainMaterialUniforms {
             height_scale: config.height_scale,
             base_patch_size,
@@ -951,6 +966,15 @@ fn reload_terrain_system(
             world_extent: new_source.world_extent,
             texel_size: new_source.texel_size,
         });
+
+        // --- 4c. Recreate detail texture for the new config -------------------
+        // The resolution or level count may differ; always create a fresh texture.
+        let new_detail = create_detail_texture(&new_config, &mut images);
+        let new_detail_handle = new_detail.handle.clone();
+        if let Some(mat) = materials.get_mut(&clipmap_state.material_handle) {
+            mat.detail_texture = new_detail_handle.clone();
+        }
+        commands.insert_resource(new_detail);
 
         // --- 5. Point clipmap state at the new textures -----------------------
         // CPU mirrors will be populated by sync_preload_tiles below.

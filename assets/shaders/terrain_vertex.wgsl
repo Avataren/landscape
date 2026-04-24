@@ -39,11 +39,14 @@ struct TerrainParams {
     slots:       array<MaterialSlotGpu, 8>,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var height_tex:  texture_2d_array<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var height_samp: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(2) var<uniform> terrain: TerrainParams;
-@group(#{MATERIAL_BIND_GROUP}) @binding(5) var normal_tex: texture_2d_array<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(6) var normal_samp: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(0)  var height_tex:   texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(1)  var height_samp:  sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(2)  var<uniform> terrain: TerrainParams;
+@group(#{MATERIAL_BIND_GROUP}) @binding(5)  var normal_tex:   texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(6)  var normal_samp:  sampler;
+// R32Float detail residual array (world-space metres), written by the synthesis compute pass.
+@group(#{MATERIAL_BIND_GROUP}) @binding(15) var detail_tex:   texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(16) var detail_samp:  sampler;
 
 // ---------------------------------------------------------------------------
 // Vertex → fragment interface
@@ -105,12 +108,27 @@ fn baked_normal_v(lod: u32, xz: vec2<f32>, alpha: f32) -> vec3<f32> {
     return normalize(vec3<f32>(xz_n.x, sqrt(y2), xz_n.y));
 }
 
+/// Sample the detail residual (world-space metres) from the R32Float array.
+/// Uses the same toroidal UV convention as height_at so the texel grid aligns.
+/// Returns 0.0 for out-of-bounds positions or LODs with no synthesised data.
+fn detail_height_at(lod: u32, xz: vec2<f32>) -> f32 {
+    if !in_world_bounds(xz) {
+        return 0.0;
+    }
+    let lvl = terrain.clip_levels[lod];
+    let world_min  = terrain.world_bounds.xy;
+    let world_max  = terrain.world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
+    let sample_xz  = clamp(xz, world_min, world_max);
+    let uv         = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
+    return textureSampleLevel(detail_tex, detail_samp, uv, i32(lod), 0.0).r;
+}
+
 /// Blend height between fine (lod) and coarse (lod+1) levels by morph_alpha.
-/// This ensures both sides of a LOD ring boundary read the same height value,
-/// eliminating the crack caused by different texture resolutions.
+/// Both levels include the detail residual so the blended value is continuous.
+/// LODs without synthesis write 0 into the detail array, so adding it is safe.
 fn blended_height(lod: u32, coarse_lod: u32, alpha: f32, xz: vec2<f32>) -> f32 {
-    let h_fine   = height_at(lod,        xz);
-    let h_coarse = height_at(coarse_lod, xz);
+    let h_fine   = height_at(lod,        xz) + detail_height_at(lod,        xz);
+    let h_coarse = height_at(coarse_lod, xz) + detail_height_at(coarse_lod, xz);
     return mix(h_fine, h_coarse, alpha);
 }
 

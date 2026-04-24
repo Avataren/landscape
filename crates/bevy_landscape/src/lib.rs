@@ -9,6 +9,7 @@ pub use terrain::clipmap_texture::{
     compute_clip_levels, compute_initial_clip_levels, TerrainClipmapState,
 };
 pub use terrain::collision::TerrainCollisionCache;
+pub use terrain::detail_synthesis::{DetailSynthesisConfig, DetailTexture};
 pub use terrain::source_heightmap::SourceHeightmapState;
 pub use terrain::components::{TerrainCamera, TerrainPatchInstance};
 pub use terrain::config::{TerrainConfig, MAX_SUPPORTED_CLIPMAP_LEVELS};

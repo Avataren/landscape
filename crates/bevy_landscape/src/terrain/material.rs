@@ -150,6 +150,14 @@ pub struct TerrainMaterial {
     #[texture(13, visibility(vertex, fragment), dimension = "2d")]
     #[sampler(14, visibility(vertex, fragment))]
     pub source_heightmap: Handle<Image>,
+
+    /// R32Float texture array — one layer per LOD level.
+    /// Stores world-space-metre height residuals synthesised by the detail
+    /// compute pass.  The vertex shader adds these on top of the coarse
+    /// source heightmap to produce sub-metre terrain detail.
+    #[texture(15, visibility(vertex), dimension = "2d_array")]
+    #[sampler(16, visibility(vertex))]
+    pub detail_texture: Handle<Image>,
 }
 
 impl Material for TerrainMaterial {
