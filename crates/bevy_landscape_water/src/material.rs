@@ -75,6 +75,23 @@ pub struct WaterMaterial {
     /// Per-level terrain clipmap data mirrored from the terrain material.
     #[reflect(ignore)]
     pub terrain_clip_levels: [Vec4; MAX_SUPPORTED_CLIPMAP_LEVELS],
+
+    /// Tessendorf FFT displacement texture: RGBA32Float (h, dx, dz, jacobian),
+    /// tiled with period `fft_world_size` in world XZ.
+    #[texture(103, visibility(vertex, fragment))]
+    #[sampler(104, visibility(vertex, fragment))]
+    #[reflect(ignore)]
+    pub fft_displacement_texture: Handle<Image>,
+    /// World-space tile size of the FFT texture (metres).
+    #[reflect(ignore)]
+    pub fft_world_size: f32,
+    /// Mix strength: 0 = ignore FFT (legacy Gerstner only), 1 = full FFT.
+    #[reflect(ignore)]
+    pub fft_strength: f32,
+    /// FFT texture grid resolution N (used to derive per-texel UV step
+    /// for finite-difference slope/Jacobian sampling).
+    #[reflect(ignore)]
+    pub fft_size: u32,
 }
 
 impl Default for WaterMaterial {
@@ -104,6 +121,10 @@ impl Default for WaterMaterial {
             terrain_height_scale: 0.0,
             terrain_num_levels: 0,
             terrain_clip_levels: [Vec4::ZERO; MAX_SUPPORTED_CLIPMAP_LEVELS],
+            fft_displacement_texture: Handle::default(),
+            fft_world_size: 128.0,
+            fft_strength: 0.0,
+            fft_size: 128,
         }
     }
 }
@@ -111,11 +132,15 @@ impl Default for WaterMaterial {
 #[derive(Copy, Clone, Hash, Eq, PartialEq)]
 pub struct WaterMaterialKey {
     quality: u32,
+    fft_enabled: bool,
 }
 
 impl From<&WaterMaterial> for WaterMaterialKey {
     fn from(m: &WaterMaterial) -> Self {
-        Self { quality: m.quality }
+        Self {
+            quality: m.quality,
+            fft_enabled: m.fft_strength > 0.0,
+        }
     }
 }
 
@@ -132,6 +157,8 @@ pub struct WaterMaterialUniform {
     pub optical_params: Vec4,
     pub extra_params: Vec4,
     pub terrain_params: Vec4,
+    /// x = fft_world_size_inv, y = fft_strength, z = reserved, w = reserved
+    pub fft_params: Vec4,
     pub terrain_clip_levels: [Vec4; MAX_SUPPORTED_CLIPMAP_LEVELS],
 }
 
@@ -166,6 +193,12 @@ impl AsBindGroupShaderType<WaterMaterialUniform> for WaterMaterial {
                 self.water_height,
                 self.terrain_height_scale,
                 self.terrain_num_levels as f32,
+                0.0,
+            ),
+            fft_params: Vec4::new(
+                1.0 / self.fft_world_size.max(1.0),
+                self.fft_strength,
+                1.0 / self.fft_size.max(1) as f32,
                 0.0,
             ),
             terrain_clip_levels: self.terrain_clip_levels,
@@ -213,13 +246,24 @@ impl MaterialExtension for WaterMaterial {
         key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
         let quality = ShaderDefVal::UInt("QUALITY".into(), key.bind_group_data.quality);
+        let fft_def: Option<ShaderDefVal> = if key.bind_group_data.fft_enabled {
+            Some("OCEAN_FFT_ENABLED".into())
+        } else {
+            None
+        };
         if let Some(fragment) = descriptor.fragment.as_mut() {
             fragment.shader_defs.push(quality.clone());
             if key.mesh_key.contains(MeshPipelineKey::DEPTH_PREPASS) {
                 fragment.shader_defs.push("DEPTH_PREPASS".into());
             }
+            if let Some(d) = fft_def.clone() {
+                fragment.shader_defs.push(d);
+            }
         }
         descriptor.vertex.shader_defs.push(quality);
+        if let Some(d) = fft_def {
+            descriptor.vertex.shader_defs.push(d);
+        }
         Ok(())
     }
 }

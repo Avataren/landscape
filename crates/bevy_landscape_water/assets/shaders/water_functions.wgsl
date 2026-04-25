@@ -8,6 +8,9 @@
 #endif
 
 #import bevy_landscape_water::water_bindings::{material, terrain_height_samp, terrain_height_tex}
+#ifdef OCEAN_FFT_ENABLED
+#import bevy_landscape_water::water_bindings::{fft_displacement_tex, fft_displacement_samp}
+#endif
 
 const PI: f32  = 3.14159265358979323846;
 const G:  f32  = 9.81;
@@ -168,6 +171,66 @@ fn water_macro_noise_amplitude() -> f32 {
 
 fn water_macro_noise_scale() -> f32 {
     return max(material.extra_params.w, 1.0);
+}
+
+fn fft_world_size_inv() -> f32 {
+    return material.fft_params.x;
+}
+
+fn fft_strength() -> f32 {
+    return material.fft_params.y;
+}
+
+// Returns (height, dx, dz, jacobian) sampled from the Tessendorf FFT
+// displacement texture.  World XZ is converted to UV by multiplying with
+// (1 / fft_world_size); the texture is bound with Repeat addressing so it
+// tiles seamlessly across the entire ocean.
+//
+// When OCEAN_FFT_ENABLED is not defined the FFT bindings are not present
+// in the bind group, so we MUST NOT reference fft_displacement_tex /
+// fft_displacement_samp.  In that case the function is a constant 0.
+fn sample_fft_displacement(world_xz: vec2<f32>) -> vec4<f32> {
+#ifdef OCEAN_FFT_ENABLED
+    let strength = fft_strength();
+    if strength <= 0.0 {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    let uv = world_xz * fft_world_size_inv();
+    return textureSampleLevel(
+        fft_displacement_tex,
+        fft_displacement_samp,
+        uv,
+        0.0,
+    );
+#else
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+#endif
+}
+
+// Surface slope (∂h/∂x, ∂h/∂z) of the FFT height field, sampled via central
+// differences over one texel.  Returned slope is in world units.
+fn fft_height_slope(world_xz: vec2<f32>) -> vec2<f32> {
+#ifdef OCEAN_FFT_ENABLED
+    let strength = fft_strength();
+    if strength <= 0.0 {
+        return vec2<f32>(0.0, 0.0);
+    }
+    let uv_per_world = fft_world_size_inv();
+    let uv_per_texel = material.fft_params.z;
+    let uv = world_xz * uv_per_world;
+    let world_per_texel = uv_per_texel / max(uv_per_world, 1.0e-6);
+    let inv_2dx = 1.0 / max(2.0 * world_per_texel, 1.0e-6);
+
+    let off_u = vec2<f32>(uv_per_texel, 0.0);
+    let off_v = vec2<f32>(0.0, uv_per_texel);
+    let h_e = textureSampleLevel(fft_displacement_tex, fft_displacement_samp, uv + off_u, 0.0).x;
+    let h_w = textureSampleLevel(fft_displacement_tex, fft_displacement_samp, uv - off_u, 0.0).x;
+    let h_n = textureSampleLevel(fft_displacement_tex, fft_displacement_samp, uv + off_v, 0.0).x;
+    let h_s = textureSampleLevel(fft_displacement_tex, fft_displacement_samp, uv - off_v, 0.0).x;
+    return vec2<f32>(h_e - h_w, h_n - h_s) * inv_2dx;
+#else
+    return vec2<f32>(0.0, 0.0);
+#endif
 }
 
 fn terrain_height_scale() -> f32 {

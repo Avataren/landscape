@@ -1,5 +1,7 @@
+mod fft_ocean;
 mod material;
 
+pub use fft_ocean::{OceanFftPlugin, OceanFftSettings, OceanFftState};
 pub use material::{StandardWaterMaterial, WaterMaterial, WaterMaterialPlugin};
 
 use bevy::{
@@ -219,6 +221,7 @@ impl Plugin for LandscapeWaterPlugin {
         app.insert_resource(InitialWaterLayout(initial_layout));
         app.init_resource::<WaterPatchEntities>();
         app.add_plugins(WaterMaterialPlugin);
+        app.add_plugins(OceanFftPlugin);
         app.add_systems(
             Startup,
             (setup_water_terrain_fallback, spawn_initial_water_tiles).chain(),
@@ -508,6 +511,8 @@ fn rebuild_water_tiles(
     settings: &WaterSettings,
     layout: WaterLayout,
     terrain_fallback: &WaterTerrainFallback,
+    fft_state: Option<&OceanFftState>,
+    fft_settings: Option<&OceanFftSettings>,
     camera_xz: Vec2,
     patches: &mut WaterPatchEntities,
     existing_roots: &[Entity],
@@ -592,6 +597,15 @@ fn rebuild_water_tiles(
             terrain_height_scale: 0.0,
             terrain_num_levels: 0,
             terrain_clip_levels: [Vec4::ZERO; MAX_SUPPORTED_CLIPMAP_LEVELS],
+            fft_displacement_texture: fft_state
+                .map(|s| s.image_handle.clone())
+                .unwrap_or_default(),
+            fft_world_size: fft_state.map(|s| s.world_size()).unwrap_or(128.0),
+            fft_size: fft_settings.map(|s| s.size).unwrap_or(128),
+            fft_strength: match (fft_settings, fft_state) {
+                (Some(s), Some(_)) if s.enabled => s.strength,
+                _ => 0.0,
+            },
         },
     }));
 
@@ -756,6 +770,8 @@ fn apply_water_layout(
     enabled: &mut WaterEnabled,
     layout: WaterLayout,
     terrain_fallback: &WaterTerrainFallback,
+    fft_state: Option<&OceanFftState>,
+    fft_settings: Option<&OceanFftSettings>,
     camera_xz: Vec2,
     patches: &mut WaterPatchEntities,
     water_roots: &Query<Entity, With<WaterTiles>>,
@@ -773,6 +789,8 @@ fn apply_water_layout(
         settings,
         layout,
         terrain_fallback,
+        fft_state,
+        fft_settings,
         camera_xz,
         patches,
         &roots,
@@ -795,6 +813,8 @@ fn setup_water_terrain_fallback(mut commands: Commands, mut images: ResMut<Asset
 fn spawn_initial_water_tiles(
     initial: Res<InitialWaterLayout>,
     terrain_fallback: Res<WaterTerrainFallback>,
+    fft_state: Option<Res<OceanFftState>>,
+    fft_settings: Option<Res<OceanFftSettings>>,
     mut settings: ResMut<WaterSettings>,
     mut enabled: ResMut<WaterEnabled>,
     mut patches: ResMut<WaterPatchEntities>,
@@ -811,6 +831,8 @@ fn spawn_initial_water_tiles(
         &mut enabled,
         initial.0,
         &terrain_fallback,
+        fft_state.as_deref(),
+        fft_settings.as_deref(),
         current_water_camera_xz(&camera_q, initial.0.center),
         &mut patches,
         &water_roots,
@@ -824,6 +846,8 @@ fn sync_water_to_terrain(
     source_desc: Res<TerrainSourceDesc>,
     config: Res<TerrainConfig>,
     terrain_fallback: Res<WaterTerrainFallback>,
+    fft_state: Option<Res<OceanFftState>>,
+    fft_settings: Option<Res<OceanFftSettings>>,
     mut settings: ResMut<WaterSettings>,
     mut enabled: ResMut<WaterEnabled>,
     mut patches: ResMut<WaterPatchEntities>,
@@ -853,6 +877,8 @@ fn sync_water_to_terrain(
         &mut enabled,
         layout,
         &terrain_fallback,
+        fft_state.as_deref(),
+        fft_settings.as_deref(),
         current_water_camera_xz(&camera_q, layout.center),
         &mut patches,
         &water_roots,
@@ -897,6 +923,8 @@ fn sync_water_materials(
     config: Res<TerrainConfig>,
     terrain_view: Option<Res<TerrainViewState>>,
     terrain_clipmap: Option<Res<TerrainClipmapState>>,
+    fft_settings: Option<Res<OceanFftSettings>>,
+    fft_state: Option<Res<OceanFftState>>,
     tiles: Query<&MeshMaterial3d<StandardWaterMaterial>, With<WaterTile>>,
     mut mats: ResMut<Assets<StandardWaterMaterial>>,
 ) {
@@ -907,8 +935,10 @@ fn sync_water_materials(
             .as_ref()
             .is_some_and(|clipmap| clipmap.is_changed());
     let settings_changed = settings.is_changed();
+    let fft_changed = fft_settings.as_ref().is_some_and(|s| s.is_changed())
+        || fft_state.as_ref().is_some_and(|s| s.is_changed());
 
-    if !settings_changed && !terrain_changed {
+    if !settings_changed && !terrain_changed && !fft_changed {
         return;
     }
 
@@ -965,6 +995,17 @@ fn sync_water_materials(
             mat.extension.capillary_strength = settings.capillary_strength;
             mat.extension.macro_noise_amplitude = settings.macro_noise_amplitude;
             mat.extension.macro_noise_scale = settings.macro_noise_scale;
+        }
+
+        if fft_changed {
+            if let (Some(state), Some(settings)) = (fft_state.as_ref(), fft_settings.as_ref()) {
+                mat.extension.fft_displacement_texture = state.image_handle.clone();
+                mat.extension.fft_world_size = state.world_size();
+                mat.extension.fft_size = settings.size;
+                mat.extension.fft_strength = if settings.enabled { settings.strength } else { 0.0 };
+            } else {
+                mat.extension.fft_strength = 0.0;
+            }
         }
 
         if terrain_changed {

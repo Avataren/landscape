@@ -58,14 +58,27 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     // can't hand the slope across).
     let macro_v = water_fn::macro_noise_height_grad(orig_world_xz, vertex_size);
     let shore_wave_attn = water_fn::shoreline_wave_attenuation(orig_world_xz);
+
+    // Tessendorf FFT displacement (h, dx, dz, jacobian).  When fft_strength
+    // is zero the lookup returns zero and we fall back to pure Gerstner.
+    let fft = water_fn::sample_fft_displacement(orig_world_xz);
+    let fft_s = water_fn::fft_strength();
+    let gerstner_w = 1.0 - fft_s;
+
     // Horizontal Gerstner displacement is fully damped near shore — without
     // this, vertices slide laterally onto the beach and cause z-fighting /
     // intersect terrain.  Vertical height is only partially damped (≥ 50 %
     // retained) so waves continue to swell up to the contact line instead
     // of flattening into a clipped polygon edge.
-    let damped_xz_disp = wave.xz_disp * shore_wave_attn;
-    let height_attn   = mix(0.5, 1.0, shore_wave_attn);
-    let damped_height = wave.height * height_attn + macro_v.x;
+    let height_attn = mix(0.5, 1.0, shore_wave_attn);
+    let gerst_xz    = wave.xz_disp * shore_wave_attn * gerstner_w;
+    let gerst_h     = wave.height * height_attn * gerstner_w;
+
+    let fft_xz      = vec2<f32>(fft.y, fft.z) * shore_wave_attn * fft_s;
+    let fft_h       = fft.x * height_attn * fft_s;
+
+    let damped_xz_disp = gerst_xz + fft_xz;
+    let damped_height  = gerst_h + fft_h + macro_v.x;
 
     out.world_position = world_position + vec4<f32>(damped_xz_disp.x, damped_height, damped_xz_disp.y, 0.0);
     out.position       = position_world_to_clip(out.world_position.xyz);

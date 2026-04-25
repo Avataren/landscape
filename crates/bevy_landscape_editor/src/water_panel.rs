@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
-use bevy_landscape_water::WaterSettings;
+use bevy_landscape_water::{OceanFftSettings, WaterSettings};
 
 #[derive(Resource, Default)]
 pub struct WaterPanelState {
@@ -29,6 +29,7 @@ pub(crate) fn water_panel_system(
     mut contexts: EguiContexts,
     mut state: ResMut<WaterPanelState>,
     settings: Option<ResMut<WaterSettings>>,
+    fft_settings: Option<ResMut<OceanFftSettings>>,
 ) -> Result {
     if !state.open {
         return Ok(());
@@ -39,6 +40,7 @@ pub(crate) fn water_panel_system(
         state.open = open;
         return Ok(());
     };
+    let mut fft_settings = fft_settings;
 
     egui::Window::new("Water Settings")
         .open(&mut open)
@@ -49,6 +51,89 @@ pub(crate) fn water_panel_system(
             // marks the resource changed for the frame, which is fine since
             // the uniform upload is cheap and the panel is editor-only.
             let s = settings.as_mut();
+
+            // ----------------------------------------------------------------
+            // Tessendorf FFT ocean (CPU prototype)
+            // ----------------------------------------------------------------
+            if let Some(fft) = fft_settings.as_mut() {
+                let fft = fft.as_mut();
+                ui.heading("FFT Ocean (Tessendorf)");
+                egui::Grid::new("water_fft")
+                    .num_columns(2)
+                    .spacing([8.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Enabled").on_hover_text(
+                            "Master toggle.  When off the legacy Gerstner sum drives the surface.",
+                        );
+                        ui.checkbox(&mut fft.enabled, "");
+                        ui.end_row();
+
+                        ui.label("Strength").on_hover_text(
+                            "Cross-fade with the Gerstner pipeline. 1.0 = pure FFT, 0 = pure Gerstner.",
+                        );
+                        ui.add(egui::Slider::new(&mut fft.strength, 0.0..=1.0).fixed_decimals(2));
+                        ui.end_row();
+
+                        ui.label("Wind speed (m/s)").on_hover_text(
+                            "Drives Phillips L = V²/g — controls the dominant wavelength.",
+                        );
+                        ui.add(egui::Slider::new(&mut fft.wind_speed, 1.0..=30.0).fixed_decimals(1));
+                        ui.end_row();
+
+                        ui.label("Spectrum amplitude").on_hover_text(
+                            "Phillips A.  Logarithmic — small numbers, big visual range.",
+                        );
+                        ui.add(
+                            egui::Slider::new(&mut fft.amplitude, 1.0e-5..=1.0e-1)
+                                .logarithmic(true)
+                                .fixed_decimals(6),
+                        );
+                        ui.end_row();
+
+                        ui.label("Choppy").on_hover_text(
+                            "Horizontal displacement scale.  ≥ 1 produces foldovers (foam).",
+                        );
+                        ui.add(egui::Slider::new(&mut fft.choppy, 0.0..=1.5).fixed_decimals(2));
+                        ui.end_row();
+
+                        ui.label("Tile size (m)").on_hover_text(
+                            "World-space period of the FFT texture.  Larger = longer-period waves visible.",
+                        );
+                        ui.add(egui::Slider::new(&mut fft.world_size, 32.0..=512.0).fixed_decimals(0));
+                        ui.end_row();
+
+                        ui.label("Grid resolution").on_hover_text(
+                            "FFT grid N (CPU cost ∝ N² log N).  64 cheap, 128 default, 256 sharp+slow.",
+                        );
+                        let mut idx = match fft.size {
+                            64 => 0,
+                            128 => 1,
+                            256 => 2,
+                            _ => 1,
+                        };
+                        egui::ComboBox::from_id_salt("fft_grid_size")
+                            .selected_text(["64", "128", "256"][idx])
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut idx, 0, "64");
+                                ui.selectable_value(&mut idx, 1, "128");
+                                ui.selectable_value(&mut idx, 2, "256");
+                            });
+                        let new_size = [64u32, 128, 256][idx];
+                        if new_size != fft.size {
+                            fft.size = new_size;
+                        }
+                        ui.end_row();
+
+                        ui.label("Wind dir X");
+                        ui.add(egui::Slider::new(&mut fft.wind_direction.x, -1.0..=1.0).fixed_decimals(2));
+                        ui.end_row();
+
+                        ui.label("Wind dir Z");
+                        ui.add(egui::Slider::new(&mut fft.wind_direction.y, -1.0..=1.0).fixed_decimals(2));
+                        ui.end_row();
+                    });
+                ui.separator();
+            }
 
             ui.heading("Waves");
             egui::Grid::new("water_waves")

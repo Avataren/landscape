@@ -121,9 +121,23 @@ fn fragment(
     // the fragment shader.  These break the periodic repetition visible at
     // distance when only the 3 longest geometry waves remain after LOD filter.
     let swell_n      = water_fn::get_swell_normal(w_pos, normal_footprint);
+
+    // Tessendorf FFT contributions — sampled at the same world XZ used by
+    // the vertex shader for displacement, so geometry and shading agree.
+    let fft         = water_fn::sample_fft_displacement(w_pos);
+    let fft_slope   = water_fn::fft_height_slope(w_pos);
+    let fft_s       = water_fn::fft_strength();
+    let gerstner_w  = 1.0 - fft_s;
+    // Blend the Gerstner surface normal with the FFT one (the FFT slope is
+    // converted to a normal via slope_to_normal).  When fft_strength = 0
+    // this collapses back to pure Gerstner; when 1 the FFT carries the
+    // surface shape entirely.
+    let gerst_normal = wave.normal;
+    let fft_normal   = water_fn::slope_to_normal(fft_slope);
+    let blended_norm = normalize(gerst_normal * gerstner_w + fft_normal * fft_s);
     let macro_normal = normalize(mix(
         vec3<f32>(0.0, 1.0, 0.0),
-        wave.normal,
+        blended_norm,
         shore_wave_attn * mix(1.0, 0.72, far_field_filter),
     ));
     let detail_slope = detail_wave.slope * shore_wave_attn * micro_detail_fade;
@@ -222,7 +236,8 @@ fn fragment(
     //   Only available when the depth prepass provides terrain_depth_m.
     // -----------------------------------------------------------------------
     let max_wave_h    = water_fn::water_amplitude() * 1.5;
-    let norm_h        = clamp((wave.height * shore_wave_attn) / max(max_wave_h, 0.001), 0.0, 1.0);
+    let blended_h     = wave.height * gerstner_w + fft.x * fft_s;
+    let norm_h        = clamp((blended_h * shore_wave_attn) / max(max_wave_h, 0.001), 0.0, 1.0);
     let transition    = max((1.0 - foam_threshold) * 0.5, 0.02);
     let crest_foam    = smoothstep(foam_threshold - transition, foam_threshold + transition, norm_h);
     let crest_raw     = crest_foam * crest_foam;
@@ -254,7 +269,13 @@ fn fragment(
     // — what real ocean foam actually does — rather than smooth disc-on-crest.
     // -----------------------------------------------------------------------
     let disp_grad = water_fn::get_wave_disp_grad(w_pos, normal_footprint) * shore_wave_attn;
-    let jacobian  = (1.0 + disp_grad.x) * (1.0 + disp_grad.z) - disp_grad.y * disp_grad.y;
+    let gerst_jac = (1.0 + disp_grad.x) * (1.0 + disp_grad.z) - disp_grad.y * disp_grad.y;
+    // The FFT pipeline writes the Jacobian determinant of its choppy
+    // displacement field directly into the alpha channel — much more accurate
+    // than the per-wave analytic version since it includes phase-coherent
+    // foldovers from the entire spectrum.
+    let fft_jac     = mix(1.0, fft.w, fft_s) * shore_wave_attn + (1.0 - shore_wave_attn);
+    let jacobian    = gerst_jac * gerstner_w + fft_jac * fft_s;
     // Foam appears as J drops below 1; classic ocean shaders trigger near 0.
     // We band-pass between 0.55 (faint streaks) and -0.05 (full foldover).
     let fold_foam = smoothstep(0.55, -0.05, jacobian);

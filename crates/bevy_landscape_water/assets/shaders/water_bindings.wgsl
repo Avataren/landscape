@@ -20,6 +20,11 @@ struct WaterMaterial {
     // x = water_height, y = terrain_height_scale,
     // z = terrain_num_levels, w = reserved
     terrain_params:       vec4<f32>,
+    // x = 1/fft_world_size (inverse tile period in world m),
+    // y = fft_strength (0 = ignore FFT, 1 = full FFT),
+    // z = 1/fft_grid_size (UV per texel),
+    // w = reserved
+    fft_params:           vec4<f32>,
     terrain_clip_levels:  array<vec4<f32>, 16>,
 };
 
@@ -31,3 +36,11 @@ var terrain_height_tex: texture_2d_array<f32>;
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(102)
 var terrain_height_samp: sampler;
+
+#ifdef OCEAN_FFT_ENABLED
+@group(#{MATERIAL_BIND_GROUP}) @binding(103)
+var fft_displacement_tex: texture_2d<f32>;
+
+@group(#{MATERIAL_BIND_GROUP}) @binding(104)
+var fft_displacement_samp: sampler;
+#endif
