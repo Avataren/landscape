@@ -1,67 +1,62 @@
-//! Tessendorf FFT ocean — CPU prototype using rustfft.
+//! Tessendorf FFT ocean — main-world settings + spectrum init.
 //!
-//! Builds a Phillips spectrum H₀(k) once on init / on parameter change, then
-//! every frame:
-//!   1. Animates H(k, t) = H₀(k)·e^{i ω t} + conj(H₀(-k))·e^{-i ω t}.
-//!   2. Derives horizontal displacement frequency components
-//!      D_x(k) = -i·(k_x/|k|)·H(k),   D_z(k) = -i·(k_z/|k|)·H(k).
-//!   3. Runs three 2-D IFFTs (height, dx, dz) via separable 1-D rustfft.
-//!   4. Computes the Jacobian determinant of the displacement field via
-//!      central differences (for foldover foam in the fragment shader).
-//!   5. Packs (h, dx, dz, jacobian) into an Rgba32Float image whose handle
-//!      is fed to the water material every frame.
-//!
-//! GPU sampling tiles the texture in world space with period `world_size`
-//! (e.g. 128 m).  Linear filtering smooths between samples; no mip chain is
-//! generated yet — distance attenuation is handled in the shader.
+//! Phillips spectrum H₀(k) and dispersion ω(k) are computed on CPU once per
+//! parameter change and uploaded into two storage textures.  The per-frame
+//! work (animation + IFFT + compose) lives entirely on the GPU; see
+//! `fft_ocean_compute.rs`.
 
 use bevy::{
     asset::RenderAssetUsages,
     image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     prelude::*,
-    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
+    render::{
+        extract_resource::{ExtractResource, ExtractResourcePlugin},
+        render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
+    },
 };
-use half::f16;
-use rustfft::{num_complex::Complex32, Fft, FftPlanner};
-use std::sync::Arc;
+
+use crate::fft_ocean_compute::OceanFftComputePlugin;
 
 const G: f32 = 9.81;
 
+const STORAGE_USAGE: TextureUsages = TextureUsages::from_bits_retain(
+    TextureUsages::COPY_SRC.bits()
+        | TextureUsages::COPY_DST.bits()
+        | TextureUsages::STORAGE_BINDING.bits()
+        | TextureUsages::TEXTURE_BINDING.bits(),
+);
+
 // ---------------------------------------------------------------------------
-// Public settings — exposed in the editor panel.
+// Public settings — exposed to the editor panel.
 // ---------------------------------------------------------------------------
 
 #[derive(Resource, Clone, Debug, Reflect)]
 #[reflect(Resource)]
 pub struct OceanFftSettings {
-    /// Master toggle.  When false the GPU samples a flat (zero) texture and
-    /// the Gerstner pipeline drives the surface as before.
+    /// Master toggle.  When false the GPU pipelines run no-ops and the
+    /// legacy Gerstner pipeline drives the surface.
     pub enabled: bool,
-    /// Grid resolution N (must be a power of two).  128 is a good balance.
+    /// Grid resolution N (must be a power of two; we clamp to {64, 128, 256}).
     pub size: u32,
     /// World-space tile size in metres (texture period when sampled).
     pub world_size: f32,
-    /// Wind speed in m/s — drives the Phillips L = V²/g (largest wave).
+    /// Wind speed in m/s — drives Phillips L = V²/g.
     pub wind_speed: f32,
-    /// Wind direction in world XZ.  Re-normalised every rebuild.
+    /// Wind direction in world XZ.
     pub wind_direction: Vec2,
     /// Phillips spectrum scalar amplitude.
     pub amplitude: f32,
-    /// Horizontal-displacement (choppy) factor.  0 = pure heightfield, ~0.8
-    /// gives realistic sharpened crests; ≥ 1 produces foldover (foam).
+    /// Horizontal-displacement (choppy) factor.  ≥ 1 produces foldover (foam).
     pub choppy: f32,
     /// Hash seed for the Gaussian noise that randomises H₀ phases.
     pub seed: u32,
-    /// Output strength applied in the shader (lets you cross-fade against
-    /// the legacy Gerstner sum).  1.0 = full FFT, 0.0 = pure Gerstner.
+    /// Output strength in the shader: 1 = full FFT, 0 = pure Gerstner.
     pub strength: f32,
 }
 
 impl Default for OceanFftSettings {
     fn default() -> Self {
         Self {
-            // Default OFF so the FFT bindings/shader path don't break the
-            // material on first run.  Toggle via the editor panel.
             enabled: false,
             size: 128,
             world_size: 128.0,
@@ -76,166 +71,46 @@ impl Default for OceanFftSettings {
 }
 
 // ---------------------------------------------------------------------------
-// Internal state — stays alive across frames; rebuilt when settings change.
+// Resource holding all texture handles.  Extracted to the render world so the
+// compute pipeline can build bind groups against them.
 // ---------------------------------------------------------------------------
 
-#[derive(Resource)]
-pub struct OceanFftState {
-    n: usize,
-    world_size: f32,
-    /// Settings hash used to detect rebuild triggers cheaply.
-    rebuild_key: u64,
-    /// Initial Phillips amplitudes H₀(k), packed row-major in the rustfft
-    /// natural layout (k=0 at index 0, negative-k mirrored at index ≥ N/2).
-    h0: Vec<Complex32>,
-    /// conj(H₀(-k)) precomputed so the per-frame animation is cheap.
-    h0_conj_neg: Vec<Complex32>,
-    /// Dispersion ω(k) = √(g·|k|) per cell.
-    omega: Vec<f32>,
-    /// (k_x, k_z) per cell.
-    kvec: Vec<(f32, f32)>,
-    fft: Arc<dyn Fft<f32>>,
-    /// Reusable scratch buffers.
-    h_freq: Vec<Complex32>,
-    dx_freq: Vec<Complex32>,
-    dz_freq: Vec<Complex32>,
-    /// Reusable byte buffer for the texture upload.
-    image_bytes: Vec<u8>,
-    /// Public displacement texture handle (Rgba32Float).
-    pub image_handle: Handle<Image>,
+#[derive(Resource, Clone, ExtractResource)]
+pub struct OceanFftBuffers {
+    pub n: u32,
+    pub log_n: u32,
+    pub world_size: f32,
+    /// (H₀.re, H₀.im, conj(H₀(-k)).re, conj(H₀(-k)).im) — written once on CPU.
+    pub init_h0: Handle<Image>,
+    /// (ω, kx, kz, _) — written once on CPU.
+    pub init_omega_kvec: Handle<Image>,
+    /// (h.re, h.im, dx.re, dx.im) packed.  Storage RW.
+    pub freq_a: Handle<Image>,
+    pub freq_b: Handle<Image>,
+    /// (dz.re, dz.im, _, _).  Storage RW.
+    pub freq_dz_a: Handle<Image>,
+    pub freq_dz_b: Handle<Image>,
+    /// Final (h, dx, dz, jacobian) sampled by the water material.
+    pub displacement: Handle<Image>,
+    /// Sequence of (pingpong_after_animate, pingpong_after_horizontal,
+    /// pingpong_after_vertical).  pingpong=0 means current data is in *_a,
+    /// 1 means *_b.  After log_n butterfly passes the slot flips iff
+    /// log_n is odd.
+    pub final_pingpong: u32,
 }
 
-impl OceanFftState {
-    fn rebuild_key(s: &OceanFftSettings) -> u64 {
-        // Cheap hash of the parameters that affect H₀.  Animation parameters
-        // (time) intentionally omitted.
-        let mut x = 0u64;
-        x = x.wrapping_mul(31).wrapping_add(s.size as u64);
-        x = x.wrapping_mul(31).wrapping_add(s.world_size.to_bits() as u64);
-        x = x.wrapping_mul(31).wrapping_add(s.wind_speed.to_bits() as u64);
-        x = x.wrapping_mul(31).wrapping_add(s.wind_direction.x.to_bits() as u64);
-        x = x.wrapping_mul(31).wrapping_add(s.wind_direction.y.to_bits() as u64);
-        x = x.wrapping_mul(31).wrapping_add(s.amplitude.to_bits() as u64);
-        x = x.wrapping_mul(31).wrapping_add(s.seed as u64);
-        x
-    }
-
-    fn build(settings: &OceanFftSettings, images: &mut Assets<Image>) -> Self {
-        let n = (settings.size.max(8)).next_power_of_two() as usize;
-        let total = n * n;
-        let l_world = settings.world_size.max(1.0);
-        let wind_speed = settings.wind_speed.max(0.001);
-        let wind_dir = settings.wind_direction.normalize_or_zero();
-        let big_l = wind_speed * wind_speed / G;
-        // Capillary suppression length: half a sample spacing.  Without this
-        // the Phillips spectrum's k⁻⁴ tail produces unbounded high-frequency
-        // noise that aliases at the texture's Nyquist limit.
-        let small_l = (l_world / n as f32) * 0.5;
-
-        let mut planner = FftPlanner::<f32>::new();
-        let fft = planner.plan_fft_inverse(n);
-
-        let mut rng = SimpleLcg::new(settings.seed);
-        let mut h0 = vec![Complex32::new(0.0, 0.0); total];
-        let mut h0_conj_neg = vec![Complex32::new(0.0, 0.0); total];
-        let mut omega = vec![0.0_f32; total];
-        let mut kvec = vec![(0.0_f32, 0.0_f32); total];
-
-        let dk = std::f32::consts::TAU / l_world;
-
-        for j in 0..n {
-            for i in 0..n {
-                // Frequency index in [-N/2, N/2-1] using rustfft's natural
-                // layout (i.e. np.fft.fftfreq * N).  k = freq_idx * dk.
-                let fx = if i < n / 2 { i as f32 } else { i as f32 - n as f32 };
-                let fz = if j < n / 2 { j as f32 } else { j as f32 - n as f32 };
-                let kx = fx * dk;
-                let kz = fz * dk;
-                let k_mag = (kx * kx + kz * kz).sqrt();
-                let idx = j * n + i;
-                kvec[idx] = (kx, kz);
-
-                if k_mag < 1.0e-6 {
-                    h0[idx] = Complex32::new(0.0, 0.0);
-                    omega[idx] = 0.0;
-                    continue;
-                }
-
-                let k_hat_dot_w = (kx * wind_dir.x + kz * wind_dir.y) / k_mag;
-                // Squared cosine — the classic Tessendorf directional term.
-                let directional = k_hat_dot_w * k_hat_dot_w;
-
-                let k_l = k_mag * big_l;
-                let phillips = settings.amplitude * (-1.0 / (k_l * k_l)).exp()
-                    / k_mag.powi(4)
-                    * directional
-                    * (-(k_mag * small_l).powi(2)).exp();
-
-                // H₀ = (1/√2) · (ξ_r + i·ξ_i) · √(P(k)).
-                let scale = (phillips.max(0.0) * 0.5).sqrt();
-                let (xi_r, xi_i) = box_muller(&mut rng);
-                h0[idx] = Complex32::new(xi_r * scale, xi_i * scale);
-                omega[idx] = (G * k_mag).sqrt();
-            }
-        }
-
-        // Precompute conj(H₀(-k)).  In rustfft's layout, -k corresponds to
-        // wrap-around index ((N-i) mod N, (N-j) mod N).
-        for j in 0..n {
-            for i in 0..n {
-                let ni = (n - i) % n;
-                let nj = (n - j) % n;
-                let idx = j * n + i;
-                let nidx = nj * n + ni;
-                h0_conj_neg[idx] = h0[nidx].conj();
-            }
-        }
-
-        // Rgba16Float is linear-filterable on all wgpu adapters; Rgba32Float
-        // is gated behind the FLOAT32_FILTERABLE feature and silently fails
-        // pipeline validation when sampled with a Linear sampler on most
-        // hardware.  f16 has more than enough precision for ±10 m heights
-        // and choppy displacements.
-        let mut img = Image::new(
-            Extent3d {
-                width: n as u32,
-                height: n as u32,
-                depth_or_array_layers: 1,
-            },
-            TextureDimension::D2,
-            vec![0u8; total * 8],
-            TextureFormat::Rgba16Float,
-            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
-        );
-        img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-            address_mode_u: ImageAddressMode::Repeat,
-            address_mode_v: ImageAddressMode::Repeat,
-            address_mode_w: ImageAddressMode::Repeat,
-            mag_filter: ImageFilterMode::Linear,
-            min_filter: ImageFilterMode::Linear,
-            ..default()
-        });
-        let image_handle = images.add(img);
-
-        Self {
-            n,
-            world_size: l_world,
-            rebuild_key: Self::rebuild_key(settings),
-            h0,
-            h0_conj_neg,
-            omega,
-            kvec,
-            fft,
-            h_freq: vec![Complex32::new(0.0, 0.0); total],
-            dx_freq: vec![Complex32::new(0.0, 0.0); total],
-            dz_freq: vec![Complex32::new(0.0, 0.0); total],
-            image_bytes: vec![0u8; total * 8],
-            image_handle,
-        }
-    }
-
-    pub fn world_size(&self) -> f32 {
-        self.world_size
+impl OceanFftBuffers {
+    pub fn settings_changed_significantly(
+        prev: &OceanFftSettings,
+        next: &OceanFftSettings,
+    ) -> bool {
+        prev.size != next.size
+            || prev.world_size.to_bits() != next.world_size.to_bits()
+            || prev.wind_speed.to_bits() != next.wind_speed.to_bits()
+            || prev.wind_direction.x.to_bits() != next.wind_direction.x.to_bits()
+            || prev.wind_direction.y.to_bits() != next.wind_direction.y.to_bits()
+            || prev.amplitude.to_bits() != next.amplitude.to_bits()
+            || prev.seed != next.seed
     }
 }
 
@@ -249,195 +124,259 @@ impl Plugin for OceanFftPlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<OceanFftSettings>()
             .init_resource::<OceanFftSettings>()
+            .add_plugins(ExtractResourcePlugin::<OceanFftBuffers>::default())
+            .add_plugins(ExtractResourcePlugin::<OceanFftSettings>::default())
+            .add_plugins(OceanFftComputePlugin)
             .add_systems(PreStartup, setup_ocean_fft)
-            .add_systems(Update, (rebuild_on_settings_change, tick_ocean_fft).chain());
+            .add_systems(
+                Update,
+                (rebuild_on_settings_change, update_displacement_handle).chain(),
+            );
     }
 }
+
+impl ExtractResource for OceanFftSettings {
+    type Source = OceanFftSettings;
+    fn extract_resource(s: &Self::Source) -> Self {
+        s.clone()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Init: build textures + fill H₀, ω.
+// ---------------------------------------------------------------------------
 
 fn setup_ocean_fft(
     settings: Res<OceanFftSettings>,
     mut images: ResMut<Assets<Image>>,
     mut commands: Commands,
 ) {
-    let state = OceanFftState::build(&settings, &mut images);
-    commands.insert_resource(state);
+    let buffers = build_buffers(&settings, &mut images);
+    commands.insert_resource(buffers);
 }
 
 fn rebuild_on_settings_change(
     settings: Res<OceanFftSettings>,
-    mut state: ResMut<OceanFftState>,
+    mut buffers: ResMut<OceanFftBuffers>,
     mut images: ResMut<Assets<Image>>,
+    mut last: Local<Option<OceanFftSettings>>,
 ) {
     if !settings.is_changed() {
         return;
     }
-    let key = OceanFftState::rebuild_key(&settings);
-    if key == state.rebuild_key {
+    let needs_rebuild = match last.as_ref() {
+        None => true,
+        Some(prev) => OceanFftBuffers::settings_changed_significantly(prev, &settings),
+    };
+    *last = Some(settings.clone());
+    if !needs_rebuild {
         return;
     }
-    let new_state = OceanFftState::build(&settings, &mut images);
-    *state = new_state;
+    *buffers = build_buffers(&settings, &mut images);
+}
+
+/// Notify the water material whenever the displacement handle (potentially)
+/// changes after a rebuild — handled in `lib.rs` via change detection on
+/// `OceanFftBuffers`.
+fn update_displacement_handle(_buffers: Res<OceanFftBuffers>) {}
+
+fn build_buffers(settings: &OceanFftSettings, images: &mut Assets<Image>) -> OceanFftBuffers {
+    let n_raw = settings.size.max(8).next_power_of_two();
+    let n = n_raw.clamp(64, 1024);
+    let log_n = n.trailing_zeros();
+    let total = (n * n) as usize;
+    let world_size = settings.world_size.max(1.0);
+
+    let (h0_bytes, omega_bytes) = build_spectrum_data(settings, n, world_size);
+
+    let init_h0 = images.add(make_storage_image(
+        n,
+        TextureFormat::Rgba32Float,
+        h0_bytes,
+        false,
+    ));
+    let init_omega_kvec = images.add(make_storage_image(
+        n,
+        TextureFormat::Rgba32Float,
+        omega_bytes,
+        false,
+    ));
+    let freq_a = images.add(make_storage_image(
+        n,
+        TextureFormat::Rgba32Float,
+        zero_bytes(total * 16),
+        false,
+    ));
+    let freq_b = images.add(make_storage_image(
+        n,
+        TextureFormat::Rgba32Float,
+        zero_bytes(total * 16),
+        false,
+    ));
+    let freq_dz_a = images.add(make_storage_image(
+        n,
+        TextureFormat::Rgba32Float,
+        zero_bytes(total * 16),
+        false,
+    ));
+    let freq_dz_b = images.add(make_storage_image(
+        n,
+        TextureFormat::Rgba32Float,
+        zero_bytes(total * 16),
+        false,
+    ));
+    let displacement = images.add(make_storage_image(
+        n,
+        TextureFormat::Rgba16Float,
+        zero_bytes(total * 8),
+        true,
+    ));
+
+    // After 2·log_n butterfly passes starting from freq_a, the final data is
+    // in freq_a iff (2·log_n) is even — which is always true.  So compose
+    // reads from *_a.
+    let final_pingpong = 0u32;
+
+    OceanFftBuffers {
+        n,
+        log_n,
+        world_size,
+        init_h0,
+        init_omega_kvec,
+        freq_a,
+        freq_b,
+        freq_dz_a,
+        freq_dz_b,
+        displacement,
+        final_pingpong,
+    }
+}
+
+fn zero_bytes(len: usize) -> Vec<u8> {
+    vec![0u8; len]
+}
+
+fn make_storage_image(
+    n: u32,
+    format: TextureFormat,
+    data: Vec<u8>,
+    sampled_by_water: bool,
+) -> Image {
+    let mut img = Image::new(
+        Extent3d {
+            width: n,
+            height: n,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        format,
+        // Storage textures live in the render world only; the data we ship
+        // through Image::new is the initial GPU upload.
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    img.texture_descriptor.usage = STORAGE_USAGE;
+    if sampled_by_water {
+        img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+            address_mode_u: ImageAddressMode::Repeat,
+            address_mode_v: ImageAddressMode::Repeat,
+            address_mode_w: ImageAddressMode::Repeat,
+            mag_filter: ImageFilterMode::Linear,
+            min_filter: ImageFilterMode::Linear,
+            ..default()
+        });
+    }
+    img
 }
 
 // ---------------------------------------------------------------------------
-// Per-frame animation + IFFT.
+// Phillips spectrum + Box–Muller noise generation.
 // ---------------------------------------------------------------------------
 
-fn tick_ocean_fft(
-    time: Res<Time>,
-    settings: Res<OceanFftSettings>,
-    mut state: ResMut<OceanFftState>,
-    mut images: ResMut<Assets<Image>>,
-) {
-    if !settings.enabled {
-        return;
-    }
-    let n = state.n;
-    let total = n * n;
-    let t = time.elapsed_secs();
-    let choppy = settings.choppy;
+fn build_spectrum_data(
+    settings: &OceanFftSettings,
+    n: u32,
+    world_size: f32,
+) -> (Vec<u8>, Vec<u8>) {
+    let total = (n * n) as usize;
+    let wind_speed = settings.wind_speed.max(0.001);
+    let wind_dir = settings.wind_direction.normalize_or_zero();
+    let big_l = wind_speed * wind_speed / G;
+    let small_l = (world_size / n as f32) * 0.5;
+    let dk = std::f32::consts::TAU / world_size;
 
-    // 1. Animate H(k, t).
-    {
-        let OceanFftState {
-            ref h0,
-            ref h0_conj_neg,
-            ref omega,
-            ref kvec,
-            ref mut h_freq,
-            ref mut dx_freq,
-            ref mut dz_freq,
-            ..
-        } = *state;
-        for idx in 0..total {
-            let phase = Complex32::from_polar(1.0, omega[idx] * t);
-            let h = h0[idx] * phase + h0_conj_neg[idx] * phase.conj();
-            h_freq[idx] = h;
+    let mut rng = SimpleLcg::new(settings.seed);
 
-            let (kx, kz) = kvec[idx];
-            let k_mag = (kx * kx + kz * kz).sqrt();
-            if k_mag < 1.0e-6 {
-                dx_freq[idx] = Complex32::new(0.0, 0.0);
-                dz_freq[idx] = Complex32::new(0.0, 0.0);
+    // First pass: generate H₀ at every k.
+    let mut h0_re = vec![0.0_f32; total];
+    let mut h0_im = vec![0.0_f32; total];
+    let mut omega = vec![0.0_f32; total];
+    let mut kx_arr = vec![0.0_f32; total];
+    let mut kz_arr = vec![0.0_f32; total];
+
+    for j in 0..n {
+        for i in 0..n {
+            let fx = if i < n / 2 {
+                i as f32
             } else {
-                // -i · (k / |k|) · H(k).
-                let i_unit = Complex32::new(0.0, 1.0);
-                dx_freq[idx] = -i_unit * (kx / k_mag) * h;
-                dz_freq[idx] = -i_unit * (kz / k_mag) * h;
+                i as f32 - n as f32
+            };
+            let fz = if j < n / 2 {
+                j as f32
+            } else {
+                j as f32 - n as f32
+            };
+            let kx = fx * dk;
+            let kz = fz * dk;
+            let k_mag = (kx * kx + kz * kz).sqrt();
+            let idx = (j * n + i) as usize;
+            kx_arr[idx] = kx;
+            kz_arr[idx] = kz;
+
+            if k_mag < 1.0e-6 {
+                h0_re[idx] = 0.0;
+                h0_im[idx] = 0.0;
+                omega[idx] = 0.0;
+                continue;
+            }
+            let k_hat_dot_w = (kx * wind_dir.x + kz * wind_dir.y) / k_mag;
+            let directional = k_hat_dot_w * k_hat_dot_w;
+            let k_l = k_mag * big_l;
+            let phillips = settings.amplitude * (-1.0 / (k_l * k_l)).exp()
+                / k_mag.powi(4)
+                * directional
+                * (-(k_mag * small_l).powi(2)).exp();
+            let scale = (phillips.max(0.0) * 0.5).sqrt();
+            let (xi_r, xi_i) = box_muller(&mut rng);
+            h0_re[idx] = xi_r * scale;
+            h0_im[idx] = xi_i * scale;
+            omega[idx] = (G * k_mag).sqrt();
+        }
+    }
+
+    // Second pass: pack (H₀.re, H₀.im, conj(H₀(-k)).re, conj(H₀(-k)).im).
+    let mut h0_packed = Vec::with_capacity(total * 16);
+    let mut omega_packed = Vec::with_capacity(total * 16);
+    for j in 0..n {
+        for i in 0..n {
+            let idx = (j * n + i) as usize;
+            // -k → ((N - i) mod N, (N - j) mod N).
+            let ni = (n - i) % n;
+            let nj = (n - j) % n;
+            let nidx = (nj * n + ni) as usize;
+            let conj_re = h0_re[nidx];
+            let conj_im = -h0_im[nidx];
+            for v in [h0_re[idx], h0_im[idx], conj_re, conj_im] {
+                h0_packed.extend_from_slice(&v.to_le_bytes());
+            }
+            for v in [omega[idx], kx_arr[idx], kz_arr[idx], 0.0_f32] {
+                omega_packed.extend_from_slice(&v.to_le_bytes());
             }
         }
     }
 
-    // 2. Three 2-D IFFTs.
-    {
-        let OceanFftState {
-            ref fft,
-            ref mut h_freq,
-            ref mut dx_freq,
-            ref mut dz_freq,
-            ..
-        } = *state;
-        fft_2d_inplace(h_freq, n, fft);
-        fft_2d_inplace(dx_freq, n, fft);
-        fft_2d_inplace(dz_freq, n, fft);
-    }
-
-    // rustfft's IFFT is unnormalised; divide by N² to recover unit scaling.
-    let inv_total = 1.0 / total as f32;
-
-    // 3. Pack (h, dx·choppy, dz·choppy, jacobian) into the image buffer.
-    //    Jacobian is computed via central differences over the (now spatial)
-    //    displacement fields.
-    let dx_world = state.world_size / n as f32;
-    let inv_2dx = 1.0 / (2.0 * dx_world);
-
-    // Disjoint borrow split: take a mut ref to image_bytes and immut refs to
-    // the freq buffers via the struct fields one-by-one.
-    let OceanFftState {
-        ref h_freq,
-        ref dx_freq,
-        ref dz_freq,
-        ref mut image_bytes,
-        ref image_handle,
-        ..
-    } = *state;
-
-    for j in 0..n {
-        for i in 0..n {
-            let idx = j * n + i;
-            let h_re = h_freq[idx].re * inv_total;
-            let dx_re = dx_freq[idx].re * inv_total * choppy;
-            let dz_re = dz_freq[idx].re * inv_total * choppy;
-
-            // Periodic neighbours for finite differences.
-            let il = (i + n - 1) % n;
-            let ir = (i + 1) % n;
-            let jl = (j + n - 1) % n;
-            let jr = (j + 1) % n;
-
-            let dx_e = dx_freq[j * n + ir].re * inv_total * choppy;
-            let dx_w = dx_freq[j * n + il].re * inv_total * choppy;
-            let dx_n = dx_freq[jr * n + i].re * inv_total * choppy;
-            let dx_s = dx_freq[jl * n + i].re * inv_total * choppy;
-
-            let dz_e = dz_freq[j * n + ir].re * inv_total * choppy;
-            let dz_w = dz_freq[j * n + il].re * inv_total * choppy;
-            let dz_n = dz_freq[jr * n + i].re * inv_total * choppy;
-            let dz_s = dz_freq[jl * n + i].re * inv_total * choppy;
-
-            let dxx = (dx_e - dx_w) * inv_2dx;
-            let dxz = (dx_n - dx_s) * inv_2dx;
-            let dzx = (dz_e - dz_w) * inv_2dx;
-            let dzz = (dz_n - dz_s) * inv_2dx;
-
-            let jacobian = (1.0 + dxx) * (1.0 + dzz) - dxz * dzx;
-
-            // Rgba16Float: 4 × f16 = 8 bytes per texel.
-            let off = idx * 8;
-            image_bytes[off..off + 2]
-                .copy_from_slice(&f16::from_f32(h_re).to_le_bytes());
-            image_bytes[off + 2..off + 4]
-                .copy_from_slice(&f16::from_f32(dx_re).to_le_bytes());
-            image_bytes[off + 4..off + 6]
-                .copy_from_slice(&f16::from_f32(dz_re).to_le_bytes());
-            image_bytes[off + 6..off + 8]
-                .copy_from_slice(&f16::from_f32(jacobian).to_le_bytes());
-        }
-    }
-
-    // 4. Push to GPU.
-    if let Some(img) = images.get_mut(image_handle) {
-        img.data = Some(image_bytes.clone());
-    }
+    (h0_packed, omega_packed)
 }
-
-// ---------------------------------------------------------------------------
-// Helpers: separable 2-D IFFT using rustfft's 1-D plan.
-// ---------------------------------------------------------------------------
-
-fn fft_2d_inplace(buf: &mut [Complex32], n: usize, fft: &Arc<dyn Fft<f32>>) {
-    // Rows.
-    for row in 0..n {
-        let start = row * n;
-        fft.process(&mut buf[start..start + n]);
-    }
-    // Columns — rustfft is contiguous-only, so transpose into a scratch
-    // column, transform, write back.
-    let mut col = vec![Complex32::new(0.0, 0.0); n];
-    for c in 0..n {
-        for r in 0..n {
-            col[r] = buf[r * n + c];
-        }
-        fft.process(&mut col);
-        for r in 0..n {
-            buf[r * n + c] = col[r];
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Tiny LCG + Box–Muller for deterministic Gaussian noise.
-// ---------------------------------------------------------------------------
 
 struct SimpleLcg(u32);
 
@@ -446,9 +385,7 @@ impl SimpleLcg {
         Self(seed.max(1))
     }
     fn next_unit(&mut self) -> f32 {
-        // Numerical Recipes LCG.
         self.0 = self.0.wrapping_mul(1664525).wrapping_add(1013904223);
-        // Map to (0, 1] avoiding exact zero (Box–Muller hates ln(0)).
         let f = (self.0 >> 8) as f32 / (1u32 << 24) as f32;
         f.max(1.0e-7)
     }

@@ -1,7 +1,8 @@
 mod fft_ocean;
+mod fft_ocean_compute;
 mod material;
 
-pub use fft_ocean::{OceanFftPlugin, OceanFftSettings, OceanFftState};
+pub use fft_ocean::{OceanFftBuffers, OceanFftPlugin, OceanFftSettings};
 pub use material::{StandardWaterMaterial, WaterMaterial, WaterMaterialPlugin};
 
 use bevy::{
@@ -511,7 +512,7 @@ fn rebuild_water_tiles(
     settings: &WaterSettings,
     layout: WaterLayout,
     terrain_fallback: &WaterTerrainFallback,
-    fft_state: Option<&OceanFftState>,
+    fft_state: Option<&OceanFftBuffers>,
     fft_settings: Option<&OceanFftSettings>,
     camera_xz: Vec2,
     patches: &mut WaterPatchEntities,
@@ -598,9 +599,9 @@ fn rebuild_water_tiles(
             terrain_num_levels: 0,
             terrain_clip_levels: [Vec4::ZERO; MAX_SUPPORTED_CLIPMAP_LEVELS],
             fft_displacement_texture: fft_state
-                .map(|s| s.image_handle.clone())
+                .map(|s| s.displacement.clone())
                 .unwrap_or_default(),
-            fft_world_size: fft_state.map(|s| s.world_size()).unwrap_or(128.0),
+            fft_world_size: fft_state.map(|s| s.world_size).unwrap_or(128.0),
             fft_size: fft_settings.map(|s| s.size).unwrap_or(128),
             fft_strength: match (fft_settings, fft_state) {
                 (Some(s), Some(_)) if s.enabled => s.strength,
@@ -770,7 +771,7 @@ fn apply_water_layout(
     enabled: &mut WaterEnabled,
     layout: WaterLayout,
     terrain_fallback: &WaterTerrainFallback,
-    fft_state: Option<&OceanFftState>,
+    fft_state: Option<&OceanFftBuffers>,
     fft_settings: Option<&OceanFftSettings>,
     camera_xz: Vec2,
     patches: &mut WaterPatchEntities,
@@ -813,7 +814,7 @@ fn setup_water_terrain_fallback(mut commands: Commands, mut images: ResMut<Asset
 fn spawn_initial_water_tiles(
     initial: Res<InitialWaterLayout>,
     terrain_fallback: Res<WaterTerrainFallback>,
-    fft_state: Option<Res<OceanFftState>>,
+    fft_state: Option<Res<OceanFftBuffers>>,
     fft_settings: Option<Res<OceanFftSettings>>,
     mut settings: ResMut<WaterSettings>,
     mut enabled: ResMut<WaterEnabled>,
@@ -846,7 +847,7 @@ fn sync_water_to_terrain(
     source_desc: Res<TerrainSourceDesc>,
     config: Res<TerrainConfig>,
     terrain_fallback: Res<WaterTerrainFallback>,
-    fft_state: Option<Res<OceanFftState>>,
+    fft_state: Option<Res<OceanFftBuffers>>,
     fft_settings: Option<Res<OceanFftSettings>>,
     mut settings: ResMut<WaterSettings>,
     mut enabled: ResMut<WaterEnabled>,
@@ -924,7 +925,7 @@ fn sync_water_materials(
     terrain_view: Option<Res<TerrainViewState>>,
     terrain_clipmap: Option<Res<TerrainClipmapState>>,
     fft_settings: Option<Res<OceanFftSettings>>,
-    fft_state: Option<Res<OceanFftState>>,
+    fft_state: Option<Res<OceanFftBuffers>>,
     tiles: Query<&MeshMaterial3d<StandardWaterMaterial>, With<WaterTile>>,
     mut mats: ResMut<Assets<StandardWaterMaterial>>,
 ) {
@@ -999,8 +1000,8 @@ fn sync_water_materials(
 
         if fft_changed {
             if let (Some(state), Some(settings)) = (fft_state.as_ref(), fft_settings.as_ref()) {
-                mat.extension.fft_displacement_texture = state.image_handle.clone();
-                mat.extension.fft_world_size = state.world_size();
+                mat.extension.fft_displacement_texture = state.displacement.clone();
+                mat.extension.fft_world_size = state.world_size;
                 mat.extension.fft_size = settings.size;
                 mat.extension.fft_strength = if settings.enabled { settings.strength } else { 0.0 };
             } else {
