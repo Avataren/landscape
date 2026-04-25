@@ -20,16 +20,29 @@ use crate::fft_ocean_compute::OceanFftComputePlugin;
 
 const G: f32 = 9.81;
 
-/// Number of FFT cascades.  Two is enough to mask the visible single-tile
-/// pattern: cascade 0 carries large-period swell, cascade 1 fine chop.
-pub const NUM_CASCADES: usize = 2;
+/// Number of FFT cascades.  Three cascades with non-harmonic period ratios
+/// hide the per-tile periodicity at any view distance: cascade 0 carries the
+/// long swell, cascade 1 the mid chop, cascade 2 the sharp wind chop.
+pub const NUM_CASCADES: usize = 3;
 
-/// World-size multipliers per cascade.  Cascade 0 = master tile size,
-/// cascade 1 = master / 4.  Indexed by cascade.
-pub const CASCADE_WORLD_FACTORS: [f32; NUM_CASCADES] = [1.0, 0.25];
+/// World-size multipliers per cascade.  Cascade 0 = master tile size; the
+/// other factors are deliberately non-power-of-two so the three cascades'
+/// periods never re-align in world space — without this, a viewer looking
+/// across the ocean still sees a regular grid even with N cascades.
+pub const CASCADE_WORLD_FACTORS: [f32; NUM_CASCADES] = [1.0, 0.31, 0.085];
 
-/// Phillips amplitude weight per cascade.  Larger cascades dominate.
-pub const CASCADE_AMP_WEIGHTS: [f32; NUM_CASCADES] = [1.0, 0.55];
+/// Phillips amplitude weight per cascade — Phillips-like rolloff so the
+/// long-period swell dominates the silhouette and the fine cascades only
+/// add detail.
+pub const CASCADE_AMP_WEIGHTS: [f32; NUM_CASCADES] = [1.0, 0.55, 0.32];
+
+/// Per-cascade rotation in radians.  Must match `fft_cascade_rotation()`
+/// in `water_functions.wgsl`.  Currently identity; non-harmonic
+/// `CASCADE_WORLD_FACTORS` already prevent the cascades' tile periods
+/// from re-aligning, and any non-zero rotation here must be matched in
+/// the shader plus a corresponding wind pre-rotation in the CPU bake to
+/// avoid a diamond cross-hatch.
+pub const CASCADE_ROTATIONS_RAD: [f32; NUM_CASCADES] = [0.0, 0.0, 0.0];
 
 const STORAGE_USAGE: TextureUsages = TextureUsages::from_bits_retain(
     TextureUsages::COPY_SRC.bits()
@@ -72,15 +85,18 @@ pub struct OceanFftSettings {
 impl Default for OceanFftSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             size: 128,
-            world_size: 256.0,
+            // Master tile size in metres.  At 1024 m the longest cascade
+            // period is well past the natural distance the eye can resolve a
+            // repeating tile, so the ocean reads as non-periodic from afar.
+            world_size: 1024.0,
             wind_speed: 12.0,
             wind_direction: Vec2::new(1.0, 0.4),
-            // The 1/N² IFFT normalisation crushes spectral magnitudes hard
-            // at small tile sizes, so this defaults much larger than the
-            // reference papers' values.  Tune via the panel slider.
-            amplitude: 200.0,
+            // Phillips total variance grows ~L² with tile size, so the
+            // 1024 m default needs roughly 1/16 the amplitude that worked
+            // for the original 256 m tile.  Tune via the panel slider.
+            amplitude: 12.0,
             choppy: 0.85,
             seed: 0xC0FFEE,
             strength: 1.0,
@@ -210,12 +226,26 @@ fn build_buffers(settings: &OceanFftSettings, images: &mut Assets<Image>) -> Oce
         let seed = settings
             .seed
             .wrapping_add((k as u32).wrapping_mul(0x9E37_79B9));
+        // Rotate the Phillips wind direction by -θ_k so that when the
+        // shader samples this cascade through the matching +θ_k
+        // rotation, the visible wave crests end up along the world
+        // wind direction.  Without this, each cascade's wave train
+        // points in a different world direction and the superposition
+        // forms a visible cross-hatch / diamond weave.
+        let theta = -CASCADE_ROTATIONS_RAD[k];
+        let (cs, sn) = (theta.cos(), theta.sin());
+        let world_wind = settings.wind_direction.normalize_or_zero();
+        let cascade_wind = Vec2::new(
+            cs * world_wind.x - sn * world_wind.y,
+            sn * world_wind.x + cs * world_wind.y,
+        );
         let (h0, omega) = build_spectrum_data(
             settings,
             n,
             cascade_size,
             amp,
             seed,
+            cascade_wind,
         );
         h0_bytes.extend(h0);
         omega_bytes.extend(omega);
@@ -325,10 +355,11 @@ fn build_spectrum_data(
     world_size: f32,
     amplitude: f32,
     seed: u32,
+    wind_dir: Vec2,
 ) -> (Vec<u8>, Vec<u8>) {
     let total = (n * n) as usize;
     let wind_speed = settings.wind_speed.max(0.001);
-    let wind_dir = settings.wind_direction.normalize_or_zero();
+    let wind_dir = wind_dir.normalize_or_zero();
     let big_l = wind_speed * wind_speed / G;
     let small_l = (world_size / n as f32) * 0.5;
     let dk = std::f32::consts::TAU / world_size;

@@ -140,9 +140,13 @@ fn fragment(
         blended_norm,
         shore_wave_attn * mix(1.0, 0.72, far_field_filter),
     ));
-    let detail_slope = detail_wave.slope * shore_wave_attn * micro_detail_fade;
-    let detail_slope_energy = detail_wave.slope_energy * shore_wave_attn * micro_detail_fade;
-    let swell_slope  = water_fn::normal_to_slope(swell_n) * shore_wave_attn * mix(1.0, 0.78, far_field_filter);
+    // Detail and swell slopes are analytic Gerstner sums (8 + 3 directional
+    // cosines).  When FFT carries the surface, summing them on top prints a
+    // visible diamond cross-hatch interference pattern, so gate them by the
+    // Gerstner weight — at fft_strength = 1.0 they vanish entirely.
+    let detail_slope = detail_wave.slope * shore_wave_attn * micro_detail_fade * gerstner_w;
+    let detail_slope_energy = detail_wave.slope_energy * shore_wave_attn * micro_detail_fade * gerstner_w;
+    let swell_slope  = water_fn::normal_to_slope(swell_n) * shore_wave_attn * mix(1.0, 0.78, far_field_filter) * gerstner_w;
     // Capillary noise: stochastic high-frequency normal perturbation that
     // breaks the periodic look of pure analytic waves.  Faded by the same
     // micro_detail_fade so it disappears on coarse rings.

@@ -184,7 +184,22 @@ fn fft_cascade_inv_world_size(cascade: i32) -> f32 {
     return material.fft_cascade_inv_world_sizes.w;
 }
 
-const FFT_NUM_CASCADES: i32 = 2;
+const FFT_NUM_CASCADES: i32 = 3;
+
+// Per-cascade rotation (cos, sin) applied to the sampling coordinate.  Each
+// FFT cascade is a tileable square texture, so without rotation its tile
+// edges are axis-aligned with world XZ and form a visible square pattern.
+// Rotating each cascade by a different irrational angle ensures (a) no
+// cascade's tile axes are parallel to world XZ and (b) no two cascades'
+// tile axes are parallel to each other — the eye can't lock onto any
+// single repeating period.  The choppy-displacement (dx, dz) returned by
+// the texture must be inverse-rotated to stay in world space.
+// Identity (no per-cascade rotation).  Kept as a hook for future
+// experimentation; the non-harmonic CASCADE_WORLD_FACTORS already prevent
+// the cascades' tile periods from re-aligning.
+fn fft_cascade_rotation(cascade: i32) -> vec2<f32> {
+    return vec2<f32>(1.0, 0.0);
+}
 
 // Returns (height, dx, dz, jacobian) sampled from the Tessendorf FFT
 // displacement texture.  World XZ is converted to UV by multiplying with
@@ -209,14 +224,27 @@ fn sample_fft_displacement(world_xz: vec2<f32>) -> vec4<f32> {
         if inv_l <= 0.0 {
             continue;
         }
+        let r = fft_cascade_rotation(k);
+        // Rotate sampling coord so the cascade's tile axes don't align
+        // with world XZ.
+        let p_rot = vec2<f32>(
+             r.x * world_xz.x + r.y * world_xz.y,
+            -r.y * world_xz.x + r.x * world_xz.y,
+        );
         let s = textureSampleLevel(
             fft_displacement_tex,
             fft_displacement_samp,
-            world_xz * inv_l,
+            p_rot * inv_l,
             k,
             0.0,
         );
-        sum_h_dx_dz += s.xyz;
+        // Inverse-rotate (dx, dz) back into world XZ.  Height (s.x) and
+        // Jacobian (s.w) are scalars — invariant under rotation.
+        let dxz_world = vec2<f32>(
+            r.x * s.y - r.y * s.z,
+            r.y * s.y + r.x * s.z,
+        );
+        sum_h_dx_dz += vec3<f32>(s.x, dxz_world.x, dxz_world.y);
         jac = jac * s.w;
     }
     return vec4<f32>(sum_h_dx_dz, jac);
@@ -269,14 +297,26 @@ fn fft_height_slope(world_xz: vec2<f32>) -> vec2<f32> {
         if inv_l <= 0.0 {
             continue;
         }
+        let r = fft_cascade_rotation(k);
         let world_per_texel = uv_per_texel / inv_l;
         let inv_2dx = 1.0 / max(2.0 * world_per_texel, 1.0e-6);
-        let uv = world_xz * inv_l;
+        // Match the rotation used by sample_fft_displacement so finite
+        // differences see the same field the shaded surface samples.
+        let p_rot = vec2<f32>(
+             r.x * world_xz.x + r.y * world_xz.y,
+            -r.y * world_xz.x + r.x * world_xz.y,
+        );
+        let uv = p_rot * inv_l;
         let h_e = textureSampleLevel(fft_displacement_tex, fft_displacement_samp, uv + off_u, k, 0.0).x;
         let h_w = textureSampleLevel(fft_displacement_tex, fft_displacement_samp, uv - off_u, k, 0.0).x;
         let h_n = textureSampleLevel(fft_displacement_tex, fft_displacement_samp, uv + off_v, k, 0.0).x;
         let h_s = textureSampleLevel(fft_displacement_tex, fft_displacement_samp, uv - off_v, k, 0.0).x;
-        slope += vec2<f32>(h_e - h_w, h_n - h_s) * inv_2dx;
+        // Slope in cascade-local frame; rotate back to world XZ.
+        let slope_local = vec2<f32>(h_e - h_w, h_n - h_s) * inv_2dx;
+        slope += vec2<f32>(
+            r.x * slope_local.x - r.y * slope_local.y,
+            r.y * slope_local.x + r.x * slope_local.y,
+        );
     }
     return slope;
 #else
@@ -614,6 +654,8 @@ fn macro_noise_octave(
     drift_b:  f32,
     height:   f32,
     seed:     vec2<f32>,
+    rot_cos:  f32,
+    rot_sin:  f32,
     footprint: f32,
 ) -> vec3<f32> {
     // Fade if the octave is finer than the pixel footprint (cheap aliasing
@@ -625,12 +667,22 @@ fn macro_noise_octave(
     }
     let freq  = 1.0 / wavelen;
     let drift = wind * drift_a + cross * drift_b;
-    let pp    = (p - drift * t) * freq + seed;
+    // Rotate the sampling coordinate so the value-noise integer grid is
+    // not axis-aligned with world XZ — otherwise the longest octave's
+    // 100 m-scale cells show up as visible square patches on the surface.
+    let p_drift = (p - drift * t);
+    let p_rot   = vec2<f32>(
+        rot_cos * p_drift.x - rot_sin * p_drift.y,
+        rot_sin * p_drift.x + rot_cos * p_drift.y,
+    );
+    let pp    = p_rot * freq + seed;
     let n     = cap_value_noise_d(pp);
+    // Rotate the gradient back into world space (R^T · grad_noise).
+    let grad_noise = vec2<f32>(n.y, n.z);
+    let dhdx  = ( rot_cos * grad_noise.x + rot_sin * grad_noise.y) * 2.0 * height * freq * lod_w;
+    let dhdz  = (-rot_sin * grad_noise.x + rot_cos * grad_noise.y) * 2.0 * height * freq * lod_w;
     // Centre value around 0 so vertices both lift and sink relative to rest.
     let h     = (n.x - 0.5) * 2.0 * height * lod_w;
-    let dhdx  = n.y * 2.0 * height * freq * lod_w;
-    let dhdz  = n.z * 2.0 * height * freq * lod_w;
     return vec3(h, dhdx, dhdz);
 }
 
@@ -645,12 +697,17 @@ fn macro_noise_height_grad(p: vec2<f32>, footprint: f32) -> vec3<f32> {
     let base  = water_macro_noise_scale();
 
     var sum = vec3(0.0);
-    // Three octaves at base × {1.0, 0.46, 0.22}.  Amplitude tapers ~× 0.55
-    // per octave (Phillips-like roll-off) so the macro signal is dominated by
-    // the longest wavelength — the bit that survives at the horizon.
-    sum += macro_noise_octave(p, t, wind, cross, base * 1.00, 0.18, 0.06, amp * 1.00,  vec2( 0.0,  0.0), footprint);
-    sum += macro_noise_octave(p, t, wind, cross, base * 0.46, 0.27, 0.09, amp * 0.55,  vec2(31.7, -7.1), footprint);
-    sum += macro_noise_octave(p, t, wind, cross, base * 0.22, 0.42, 0.13, amp * 0.30,  vec2(-12.3, 19.5), footprint);
+    // Three octaves at base × {1.0, 0.46, 0.22} with mutually-irrational
+    // rotation angles so no octave's value-noise cell grid aligns with
+    // world XZ or with another octave's grid.  Amplitude tapers ~× 0.55
+    // per octave (Phillips-like roll-off) so the macro signal is dominated
+    // by the longest wavelength.
+    let r0 = vec2<f32>(cos(0.643), sin(0.643));   //  ~37°
+    let r1 = vec2<f32>(cos(1.274), sin(1.274));   //  ~73°
+    let r2 = vec2<f32>(cos(2.011), sin(2.011));   // ~115°
+    sum += macro_noise_octave(p, t, wind, cross, base * 1.00, 0.18, 0.06, amp * 1.00,  vec2( 0.0,  0.0), r0.x, r0.y, footprint);
+    sum += macro_noise_octave(p, t, wind, cross, base * 0.46, 0.27, 0.09, amp * 0.55,  vec2(31.7, -7.1), r1.x, r1.y, footprint);
+    sum += macro_noise_octave(p, t, wind, cross, base * 0.22, 0.42, 0.13, amp * 0.30,  vec2(-12.3, 19.5), r2.x, r2.y, footprint);
     return sum;
 }
 

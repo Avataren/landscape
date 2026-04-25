@@ -99,7 +99,7 @@ pub(crate) fn water_panel_system(
                         ui.label("Tile size (m)").on_hover_text(
                             "World-space period of the FFT texture.  Larger = longer-period waves visible.",
                         );
-                        ui.add(egui::Slider::new(&mut fft.world_size, 32.0..=512.0).fixed_decimals(0));
+                        ui.add(egui::Slider::new(&mut fft.world_size, 64.0..=4096.0).logarithmic(true).fixed_decimals(0));
                         ui.end_row();
 
                         ui.label("Grid resolution").on_hover_text(

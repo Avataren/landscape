@@ -115,7 +115,7 @@ impl Default for WaterMaterial {
             shore_wave_damp_width: 5.5,
             jacobian_foam_strength: 1.0,
             capillary_strength: 1.0,
-            macro_noise_amplitude: 2.0,
+            macro_noise_amplitude: 0.0,
             macro_noise_scale: 110.0,
             terrain_height_texture: Handle::default(),
             terrain_world_bounds: Vec4::ZERO,
@@ -123,7 +123,7 @@ impl Default for WaterMaterial {
             terrain_num_levels: 0,
             terrain_clip_levels: [Vec4::ZERO; MAX_SUPPORTED_CLIPMAP_LEVELS],
             fft_displacement_texture: Handle::default(),
-            fft_cascade_world_sizes: Vec4::new(256.0, 64.0, 0.0, 0.0),
+            fft_cascade_world_sizes: Vec4::new(1024.0, 317.0, 87.0, 0.0),
             fft_strength: 0.0,
             fft_size: 128,
         }

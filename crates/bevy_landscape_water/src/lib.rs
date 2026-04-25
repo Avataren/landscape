@@ -124,7 +124,10 @@ impl Default for WaterSettings {
             shore_wave_damp_width: 3.0,
             jacobian_foam_strength: 1.0,
             capillary_strength: 1.0,
-            macro_noise_amplitude: 2.0,
+            // The 3-cascade FFT covers anti-tiling at distance, so the
+            // macro noise (which has visible axis-aligned value-noise cells)
+            // defaults off.  Users can re-enable from the panel.
+            macro_noise_amplitude: 0.0,
             macro_noise_scale: 110.0,
         }
     }
@@ -737,7 +740,7 @@ fn rebuild_water_tiles(
                         s.cascade_world_sizes.get(3).copied().unwrap_or(0.0),
                     )
                 })
-                .unwrap_or_else(|| Vec4::new(256.0, 64.0, 0.0, 0.0)),
+                .unwrap_or_else(|| Vec4::new(1024.0, 317.0, 87.0, 0.0)),
             fft_size: fft_settings.map(|s| s.size).unwrap_or(128),
             fft_strength: match (fft_settings, fft_state) {
                 (Some(s), Some(_)) if s.enabled => s.strength,
