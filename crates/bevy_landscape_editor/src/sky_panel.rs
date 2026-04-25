@@ -1,7 +1,8 @@
 use bevy::{light::light_consts::lux, prelude::*};
 use bevy_egui::{egui, EguiContexts};
+use serde::{Deserialize, Serialize};
 
-#[derive(Resource)]
+#[derive(Resource, Serialize, Deserialize)]
 pub struct TimeOfDay {
     pub hours: f32,
 }
@@ -90,7 +91,11 @@ fn update_sun_from_time(
         light.illuminance = if elevation_rad <= 0.0 {
             0.0
         } else {
-            lux::RAW_SUNLIGHT * (elevation_rad / max_elevation)
+            let daylight = (elevation_rad / max_elevation).clamp(0.0, 1.0);
+            // Avoid starving the atmosphere/environment-map pass at sunrise and
+            // sunset. The low sun angle and atmospheric transmittance still keep
+            // the direct light subdued, but sky fill remains visible.
+            lux::RAW_SUNLIGHT * daylight.max(0.25)
         };
 
         light.shadows_enabled = elevation_rad > 0.05;

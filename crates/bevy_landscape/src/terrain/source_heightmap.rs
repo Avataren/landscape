@@ -126,9 +126,7 @@ pub fn load_source_heightmap(
 
     for tz in tz_min..tz_max {
         for tx in tx_min..tx_max {
-            let path = tile_root.join(format!(
-                "height/L{source_level}/{tx}_{tz}.bin"
-            ));
+            let path = tile_root.join(format!("height/L{source_level}/{tx}_{tz}.bin"));
             let Some(tile_data) = read_r16_tile(&path, tile_size) else {
                 continue;
             };
@@ -149,8 +147,14 @@ pub fn load_source_heightmap(
         }
     }
 
-    let world_origin = Vec2::new(tx_min as f32 * tile_world_size, tz_min as f32 * tile_world_size);
-    let world_extent = Vec2::new(grid_w as f32 * tile_world_size, grid_h as f32 * tile_world_size);
+    let world_origin = Vec2::new(
+        tx_min as f32 * tile_world_size,
+        tz_min as f32 * tile_world_size,
+    );
+    let world_extent = Vec2::new(
+        grid_w as f32 * tile_world_size,
+        grid_h as f32 * tile_world_size,
+    );
 
     info!(
         "[Terrain] Source heightmap: {}×{} texels, {:.1}m/texel, \

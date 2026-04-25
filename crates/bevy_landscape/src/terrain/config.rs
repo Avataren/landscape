@@ -72,7 +72,7 @@ pub struct TerrainConfig {
 impl Default for TerrainConfig {
     fn default() -> Self {
         Self {
-            clipmap_levels: 12,
+            clipmap_levels: 16,
             // 511 = 2^9 - 1 → m = 128, texture 512×512 (same resolution as
             // the old ring_patches=8 × patch_resolution=64 defaults).
             clipmap_n: 511,

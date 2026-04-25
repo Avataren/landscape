@@ -171,7 +171,13 @@ fn setup_scene(
         }),
         Atmosphere::earthlike(scattering_mediums.add(ScatteringMedium::default())),
         AtmosphereSettings::default(),
-        AtmosphereEnvironmentMapLight::default(),
+        AtmosphereEnvironmentMapLight {
+            // The terrain relies on the atmosphere environment map for diffuse
+            // sky fill. A modest lift keeps low-angle sun scenes readable
+            // without reintroducing flat global ambient by default.
+            intensity: 2.0,
+            ..default()
+        },
         Exposure { ev100: 13.0 },
         Tonemapping::AcesFitted,
         Bloom::NATURAL,

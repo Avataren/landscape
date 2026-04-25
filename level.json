@@ -123,6 +123,77 @@
       1.2999999523162842
     ]
   },
+  "sky": {
+    "hours": 10.0
+  },
+  "water": {
+    "fft": {
+      "amplitude": 0.014999999664723873,
+      "choppy": 1.25,
+      "enabled": true,
+      "seed": 12648430,
+      "size": 128,
+      "strength": 0.7699999809265137,
+      "wind_direction": [
+        0.25,
+        0.4000000059604645
+      ],
+      "wind_speed": 11.5,
+      "world_size": 370.0
+    },
+    "settings": {
+      "amplitude": 6.0,
+      "capillary_strength": 0.8500000238418579,
+      "clarity": 0.8500000238418579,
+      "deep_color": [
+        0.03310476243495941,
+        0.13998490571975708,
+        0.25295013189315796
+      ],
+      "edge_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "edge_scale": 0.10000000149011612,
+      "foam_color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "foam_threshold": 0.8500000238418579,
+      "jacobian_foam_strength": 1.0,
+      "macro_noise_amplitude": 4.0,
+      "macro_noise_scale": 400.0,
+      "refraction_strength": 15.0,
+      "shallow_color": [
+        0.17064493894577026,
+        0.5704815983772278,
+        0.620915949344635
+      ],
+      "shore_wave_damp_width": 3.0,
+      "shoreline_foam_depth": 1.5,
+      "wave_direction": [
+        1.0,
+        1.0
+      ],
+      "wave_speed": 0.800000011920929
+    }
+  },
+  "synthesis": {
+    "enabled": true,
+    "erosion_strength": 0.8500000238418579,
+    "gain": 0.33000001311302185,
+    "lacunarity": 2.700000047683716,
+    "max_amplitude": 30.0,
+    "normal_detail_strength": 10.0,
+    "seed": [
+      2150.0,
+      0.0
+    ],
+    "slope_mask_falloff_deg": 24.0,
+    "slope_mask_threshold_deg": 47.0
+  },
   "metadata": {
     "water_level": 0.35
   }

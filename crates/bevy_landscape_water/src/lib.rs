@@ -683,71 +683,73 @@ fn rebuild_water_tiles(
     let skirt_z_mesh = Mesh3d(meshes.add(build_skirt_mesh(skirt_quads, false)));
     let skirt_x_mesh = Mesh3d(meshes.add(build_skirt_mesh(skirt_quads, true)));
 
-    let mat = MeshMaterial3d(materials.add(StandardWaterMaterial {
-        base: StandardMaterial {
-            base_color: settings.base_color,
-            alpha_mode: AlphaMode::Opaque,
-            // Low base roughness so the atmosphere IBL specular reads clearly.
-            // Fragment shader overrides perceptual_roughness per-pixel.
-            perceptual_roughness: 0.05,
-            // F0 ≈ 0.02 for water (IOR 1.333): reflectance = sqrt(0.02/0.16) ≈ 0.354
-            reflectance: 0.35,
-            // Specular transmission makes water transparent and lets PBR
-            // compute screen-space refraction via the depth buffer.  IOR 1.333
-            // bends the refracted ray correctly.  The fragment shader drives
-            // the actual per-pixel transmission value via Beer's law.
-            specular_transmission: 0.94,
-            thickness: 2.0,
-            ior: 1.333,
-            attenuation_distance: 48.0,
-            attenuation_color: settings.deep_color,
-            ..default()
-        },
-        extension: WaterMaterial {
-            amplitude: settings.amplitude,
-            clarity: settings.clarity,
-            deep_color: settings.deep_color,
-            shallow_color: settings.shallow_color,
-            edge_color: settings.edge_color,
-            edge_scale: settings.edge_scale,
-            wave_speed: settings.wave_speed,
-            quality: 4,
-            refraction_strength: settings.refraction_strength,
-            foam_threshold: settings.foam_threshold,
-            foam_color: settings.foam_color,
-            shoreline_foam_depth: settings.shoreline_foam_depth,
-            wave_direction: settings.wave_direction.normalize_or_zero(),
-            water_height,
-            shore_wave_damp_width: settings.shore_wave_damp_width,
-            jacobian_foam_strength: settings.jacobian_foam_strength,
-            capillary_strength: settings.capillary_strength,
-            macro_noise_amplitude: settings.macro_noise_amplitude,
-            macro_noise_scale: settings.macro_noise_scale,
-            terrain_height_texture: terrain_fallback.height_texture.clone(),
-            terrain_world_bounds: Vec4::ZERO,
-            terrain_height_scale: 0.0,
-            terrain_num_levels: 0,
-            terrain_clip_levels: [Vec4::ZERO; MAX_SUPPORTED_CLIPMAP_LEVELS],
-            fft_displacement_texture: fft_state
-                .map(|s| s.displacement.clone())
-                .unwrap_or_default(),
-            fft_cascade_world_sizes: fft_state
-                .map(|s| {
-                    Vec4::new(
-                        s.cascade_world_sizes.first().copied().unwrap_or(0.0),
-                        s.cascade_world_sizes.get(1).copied().unwrap_or(0.0),
-                        s.cascade_world_sizes.get(2).copied().unwrap_or(0.0),
-                        s.cascade_world_sizes.get(3).copied().unwrap_or(0.0),
-                    )
-                })
-                .unwrap_or_else(|| Vec4::new(1024.0, 317.0, 87.0, 0.0)),
-            fft_size: fft_settings.map(|s| s.size).unwrap_or(128),
-            fft_strength: match (fft_settings, fft_state) {
-                (Some(s), Some(_)) if s.enabled => s.strength,
-                _ => 0.0,
+    let mat = MeshMaterial3d(
+        materials.add(StandardWaterMaterial {
+            base: StandardMaterial {
+                base_color: settings.base_color,
+                alpha_mode: AlphaMode::Opaque,
+                // Low base roughness so the atmosphere IBL specular reads clearly.
+                // Fragment shader overrides perceptual_roughness per-pixel.
+                perceptual_roughness: 0.05,
+                // F0 ≈ 0.02 for water (IOR 1.333): reflectance = sqrt(0.02/0.16) ≈ 0.354
+                reflectance: 0.35,
+                // Specular transmission makes water transparent and lets PBR
+                // compute screen-space refraction via the depth buffer.  IOR 1.333
+                // bends the refracted ray correctly.  The fragment shader drives
+                // the actual per-pixel transmission value via Beer's law.
+                specular_transmission: 0.94,
+                thickness: 2.0,
+                ior: 1.333,
+                attenuation_distance: 48.0,
+                attenuation_color: settings.deep_color,
+                ..default()
             },
-        },
-    }));
+            extension: WaterMaterial {
+                amplitude: settings.amplitude,
+                clarity: settings.clarity,
+                deep_color: settings.deep_color,
+                shallow_color: settings.shallow_color,
+                edge_color: settings.edge_color,
+                edge_scale: settings.edge_scale,
+                wave_speed: settings.wave_speed,
+                quality: 4,
+                refraction_strength: settings.refraction_strength,
+                foam_threshold: settings.foam_threshold,
+                foam_color: settings.foam_color,
+                shoreline_foam_depth: settings.shoreline_foam_depth,
+                wave_direction: settings.wave_direction.normalize_or_zero(),
+                water_height,
+                shore_wave_damp_width: settings.shore_wave_damp_width,
+                jacobian_foam_strength: settings.jacobian_foam_strength,
+                capillary_strength: settings.capillary_strength,
+                macro_noise_amplitude: settings.macro_noise_amplitude,
+                macro_noise_scale: settings.macro_noise_scale,
+                terrain_height_texture: terrain_fallback.height_texture.clone(),
+                terrain_world_bounds: Vec4::ZERO,
+                terrain_height_scale: 0.0,
+                terrain_num_levels: 0,
+                terrain_clip_levels: [Vec4::ZERO; MAX_SUPPORTED_CLIPMAP_LEVELS],
+                fft_displacement_texture: fft_state
+                    .map(|s| s.displacement.clone())
+                    .unwrap_or_default(),
+                fft_cascade_world_sizes: fft_state
+                    .map(|s| {
+                        Vec4::new(
+                            s.cascade_world_sizes.first().copied().unwrap_or(0.0),
+                            s.cascade_world_sizes.get(1).copied().unwrap_or(0.0),
+                            s.cascade_world_sizes.get(2).copied().unwrap_or(0.0),
+                            s.cascade_world_sizes.get(3).copied().unwrap_or(0.0),
+                        )
+                    })
+                    .unwrap_or_else(|| Vec4::new(1024.0, 317.0, 87.0, 0.0)),
+                fft_size: fft_settings.map(|s| s.size).unwrap_or(128),
+                fft_strength: match (fft_settings, fft_state) {
+                    (Some(s), Some(_)) if s.enabled => s.strength,
+                    _ => 0.0,
+                },
+            },
+        }),
+    );
 
     let wave_dir = WaveDirection::with_duration(
         settings.wave_direction,
@@ -940,7 +942,11 @@ fn update_water_patch_transforms(
             let offset = skirt.origin_ws - root_center;
             t.translation.x = offset.x;
             t.translation.z = offset.y;
-            t.scale = Vec3::new(skirt.level_scale_ws, WATER_SKIRT_DEPTH, skirt.level_scale_ws);
+            t.scale = Vec3::new(
+                skirt.level_scale_ws,
+                WATER_SKIRT_DEPTH,
+                skirt.level_scale_ws,
+            );
             tile.offset = offset;
         }
     }
@@ -1195,7 +1201,11 @@ fn sync_water_materials(
                     state.cascade_world_sizes.get(3).copied().unwrap_or(0.0),
                 );
                 mat.extension.fft_size = settings.size;
-                mat.extension.fft_strength = if settings.enabled { settings.strength } else { 0.0 };
+                mat.extension.fft_strength = if settings.enabled {
+                    settings.strength
+                } else {
+                    0.0
+                };
             } else {
                 mat.extension.fft_strength = 0.0;
             }

@@ -7,7 +7,14 @@
 //! here expand in lock-step; the UI always mirrors the current shape of
 //! `MaterialLibrary`.
 
-use bevy::prelude::*;
+use bevy::{
+    light::{
+        AtmosphereEnvironmentMapLight, CascadeShadowConfig, CascadeShadowConfigBuilder,
+        DirectionalLight, DirectionalLightShadowMap, EnvironmentMapLight,
+        GeneratedEnvironmentMapLight, GlobalAmbientLight,
+    },
+    prelude::*,
+};
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 use bevy_landscape::{MaterialLibrary, MaterialSlot};
 
@@ -41,6 +48,17 @@ fn material_panel_system(
     mut browser: ResMut<TextureBrowser>,
     mut pbr_dirty: ResMut<PbrTexturesDirty>,
     rebuild_progress: Res<PbrRebuildProgress>,
+    mut sky_lights: Query<
+        (
+            Option<&mut AtmosphereEnvironmentMapLight>,
+            Option<&mut GeneratedEnvironmentMapLight>,
+            Option<&mut EnvironmentMapLight>,
+        ),
+        With<Camera3d>,
+    >,
+    mut global_ambient: ResMut<GlobalAmbientLight>,
+    mut sun_shadows: Query<(&mut DirectionalLight, &mut CascadeShadowConfig)>,
+    mut directional_shadow_map: ResMut<DirectionalLightShadowMap>,
 ) -> Result {
     if !panel.open {
         return Ok(());
@@ -62,6 +80,10 @@ fn material_panel_system(
                 &mut browser,
                 &mut pbr_dirty,
                 &rebuild_progress,
+                &mut sky_lights,
+                global_ambient.as_mut(),
+                &mut sun_shadows,
+                directional_shadow_map.as_mut(),
             );
         });
 
@@ -76,6 +98,17 @@ fn draw_material_library(
     browser: &mut TextureBrowser,
     pbr_dirty: &mut PbrTexturesDirty,
     rebuild_progress: &PbrRebuildProgress,
+    sky_lights: &mut Query<
+        (
+            Option<&mut AtmosphereEnvironmentMapLight>,
+            Option<&mut GeneratedEnvironmentMapLight>,
+            Option<&mut EnvironmentMapLight>,
+        ),
+        With<Camera3d>,
+    >,
+    global_ambient: &mut GlobalAmbientLight,
+    sun_shadows: &mut Query<(&mut DirectionalLight, &mut CascadeShadowConfig)>,
+    directional_shadow_map: &mut DirectionalLightShadowMap,
 ) {
     if rebuild_progress.active {
         let label = match (rebuild_progress.fraction * 3.0) as u32 {
@@ -128,6 +161,14 @@ fn draw_material_library(
             "No macro color texture is loaded (see landscape.toml `diffuse_exr`)."
         });
     });
+
+    draw_lighting_controls(
+        ui,
+        sky_lights,
+        global_ambient,
+        sun_shadows,
+        directional_shadow_map,
+    );
 
     ui.separator();
 
@@ -196,6 +237,213 @@ fn draw_material_library(
         }
         Some(idx) => {
             draw_slot_detail(ui, idx, &mut library.slots[idx], browser, pbr_dirty);
+        }
+    }
+}
+
+fn draw_lighting_controls(
+    ui: &mut egui::Ui,
+    sky_lights: &mut Query<
+        (
+            Option<&mut AtmosphereEnvironmentMapLight>,
+            Option<&mut GeneratedEnvironmentMapLight>,
+            Option<&mut EnvironmentMapLight>,
+        ),
+        With<Camera3d>,
+    >,
+    global_ambient: &mut GlobalAmbientLight,
+    sun_shadows: &mut Query<(&mut DirectionalLight, &mut CascadeShadowConfig)>,
+    directional_shadow_map: &mut DirectionalLightShadowMap,
+) {
+    ui.collapsing("Lighting", |ui| {
+        let mut sky_intensity = current_sky_ambient_intensity(sky_lights);
+        if let Some(intensity) = sky_intensity.as_mut() {
+            if ui
+                .add(
+                    egui::Slider::new(intensity, 0.0..=6.0)
+                        .text("Sky ambient")
+                        .step_by(0.05),
+                )
+                .on_hover_text(
+                    "Scales atmosphere image-based lighting for terrain and PBR materials.",
+                )
+                .changed()
+            {
+                set_sky_ambient_intensity(sky_lights, *intensity);
+            }
+        } else {
+            let mut disabled = 0.0;
+            ui.add_enabled(
+                false,
+                egui::Slider::new(&mut disabled, 0.0..=6.0).text("Sky ambient"),
+            )
+            .on_hover_text("No camera with AtmosphereEnvironmentMapLight is active.");
+        }
+
+        let mut flat_brightness = global_ambient.brightness;
+        if ui
+            .add(
+                egui::Slider::new(&mut flat_brightness, 0.0..=3000.0)
+                    .text("Flat fill")
+                    .suffix(" cd/m2")
+                    .step_by(10.0),
+            )
+            .on_hover_text("Adds directionless ambient fill. Keep low to preserve terrain relief.")
+            .changed()
+        {
+            global_ambient.brightness = flat_brightness.max(0.0);
+        }
+
+        ui.separator();
+        draw_cascade_shadow_controls(ui, sun_shadows, directional_shadow_map);
+    });
+}
+
+fn draw_cascade_shadow_controls(
+    ui: &mut egui::Ui,
+    sun_shadows: &mut Query<(&mut DirectionalLight, &mut CascadeShadowConfig)>,
+    directional_shadow_map: &mut DirectionalLightShadowMap,
+) {
+    ui.label("Cascaded shadows");
+
+    let mut iter = sun_shadows.iter_mut();
+    let Some((mut light, mut config)) = iter.next() else {
+        ui.label(
+            egui::RichText::new("No directional light with cascade shadows is active.").small(),
+        );
+        return;
+    };
+
+    ui.checkbox(&mut light.shadows_enabled, "Enabled")
+        .on_hover_text("Toggles shadow casting on the directional sun light.");
+
+    let mut cascade_count = config.bounds.len().max(1);
+    let mut minimum_distance = config.minimum_distance.max(0.0);
+    let mut first_bound = config.bounds.first().copied().unwrap_or(400.0).max(1.0);
+    let mut maximum_distance = config
+        .bounds
+        .last()
+        .copied()
+        .unwrap_or(5_000.0)
+        .max(first_bound + 1.0);
+    let mut overlap = config.overlap_proportion.clamp(0.0, 0.95);
+
+    let mut changed = false;
+    changed |= ui
+        .add(
+            egui::Slider::new(&mut maximum_distance, 500.0..=40_000.0)
+                .text("Range")
+                .suffix(" m")
+                .step_by(100.0),
+        )
+        .on_hover_text("Maximum camera distance that can receive directional shadows.")
+        .changed();
+    changed |= ui
+        .add(
+            egui::Slider::new(&mut first_bound, 25.0..=2_000.0)
+                .text("First split")
+                .suffix(" m")
+                .step_by(25.0),
+        )
+        .on_hover_text("Far bound of the highest-detail cascade near the camera.")
+        .changed();
+    changed |= ui
+        .add(egui::Slider::new(&mut cascade_count, 1..=6).text("Cascades"))
+        .on_hover_text(
+            "More cascades preserve quality across longer shadow ranges, at a render cost.",
+        )
+        .changed();
+    changed |= ui
+        .add(egui::Slider::new(&mut overlap, 0.0..=0.6).text("Blend overlap"))
+        .on_hover_text("Softens transitions between cascades.")
+        .changed();
+
+    ui.horizontal(|ui| {
+        ui.label("Map size");
+        for size in [1024, 2048, 4096, 8192] {
+            ui.selectable_value(&mut directional_shadow_map.size, size, size.to_string())
+                .on_hover_text("Resolution of each directional shadow cascade.");
+        }
+    });
+
+    ui.horizontal(|ui| {
+        ui.label("Depth bias");
+        ui.add(
+            egui::DragValue::new(&mut light.shadow_depth_bias)
+                .speed(0.001)
+                .range(0.0..=0.2),
+        )
+        .on_hover_text("Raise to reduce acne; lower if shadows detach from casters.");
+    });
+    ui.horizontal(|ui| {
+        ui.label("Normal bias");
+        ui.add(
+            egui::DragValue::new(&mut light.shadow_normal_bias)
+                .speed(0.05)
+                .range(0.0..=8.0),
+        )
+        .on_hover_text("Slope-scaled bias. Raise to reduce self-shadowing on terrain slopes.");
+    });
+
+    if changed {
+        first_bound = first_bound.max(minimum_distance + 1.0);
+        maximum_distance = maximum_distance.max(first_bound + 1.0);
+        minimum_distance = minimum_distance.min(first_bound - 0.001);
+        *config = CascadeShadowConfigBuilder {
+            num_cascades: cascade_count,
+            minimum_distance,
+            maximum_distance,
+            first_cascade_far_bound: first_bound,
+            overlap_proportion: overlap.clamp(0.0, 0.95),
+        }
+        .build();
+    }
+}
+
+fn current_sky_ambient_intensity(
+    sky_lights: &mut Query<
+        (
+            Option<&mut AtmosphereEnvironmentMapLight>,
+            Option<&mut GeneratedEnvironmentMapLight>,
+            Option<&mut EnvironmentMapLight>,
+        ),
+        With<Camera3d>,
+    >,
+) -> Option<f32> {
+    for (atmosphere, generated, environment) in sky_lights.iter_mut() {
+        let intensity = environment
+            .as_ref()
+            .map(|light| light.intensity)
+            .or_else(|| generated.as_ref().map(|light| light.intensity))
+            .or_else(|| atmosphere.as_ref().map(|light| light.intensity));
+        if intensity.is_some() {
+            return intensity;
+        }
+    }
+    None
+}
+
+fn set_sky_ambient_intensity(
+    sky_lights: &mut Query<
+        (
+            Option<&mut AtmosphereEnvironmentMapLight>,
+            Option<&mut GeneratedEnvironmentMapLight>,
+            Option<&mut EnvironmentMapLight>,
+        ),
+        With<Camera3d>,
+    >,
+    intensity: f32,
+) {
+    let intensity = intensity.max(0.0);
+    for (atmosphere, generated, environment) in sky_lights.iter_mut() {
+        if let Some(mut light) = atmosphere {
+            light.intensity = intensity;
+        }
+        if let Some(mut light) = generated {
+            light.intensity = intensity;
+        }
+        if let Some(mut light) = environment {
+            light.intensity = intensity;
         }
     }
 }

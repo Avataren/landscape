@@ -13,6 +13,7 @@
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::fft_ocean::{OceanFftBuffers, OceanFftSettings, NUM_CASCADES};
 use bevy::{
     asset::{embedded_asset, load_embedded_asset},
     prelude::*,
@@ -23,15 +24,14 @@ use bevy::{
             BindGroup, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
             BindingResource, BindingType, BufferBindingType, CachedComputePipelineId,
             CachedPipelineState, ComputePassDescriptor, ComputePipelineDescriptor,
-            DynamicUniformBuffer, PipelineCache, ShaderStages, ShaderType,
-            StorageTextureAccess, TextureFormat, TextureViewDimension,
+            DynamicUniformBuffer, PipelineCache, ShaderStages, ShaderType, StorageTextureAccess,
+            TextureFormat, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice, RenderQueue},
         texture::GpuImage,
         Render, RenderApp, RenderSystems,
     },
 };
-use crate::fft_ocean::{OceanFftBuffers, OceanFftSettings, NUM_CASCADES};
 
 const WG: u32 = 8;
 
@@ -266,9 +266,7 @@ fn prepare_pass_uniform(
 
     debug_assert_eq!(uniform.indices.len(), total_slots);
 
-    uniform
-        .buffer
-        .write_buffer(&render_device, &render_queue);
+    uniform.buffer.write_buffer(&render_device, &render_queue);
 }
 
 fn prepare_bind_group(
@@ -454,12 +452,13 @@ impl Node for OceanFftNode {
         let log_n = buffers.log_n;
         let indices = &uniform.indices;
 
-        let mut pass = render_context
-            .command_encoder()
-            .begin_compute_pass(&ComputePassDescriptor {
-                label: Some("ocean_fft"),
-                ..default()
-            });
+        let mut pass =
+            render_context
+                .command_encoder()
+                .begin_compute_pass(&ComputePassDescriptor {
+                    label: Some("ocean_fft"),
+                    ..default()
+                });
 
         let mut slot = 0usize;
         let dispatch = |pass: &mut bevy::render::render_resource::ComputePass<'_>,

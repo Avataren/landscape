@@ -239,14 +239,7 @@ fn build_buffers(settings: &OceanFftSettings, images: &mut Assets<Image>) -> Oce
             cs * world_wind.x - sn * world_wind.y,
             sn * world_wind.x + cs * world_wind.y,
         );
-        let (h0, omega) = build_spectrum_data(
-            settings,
-            n,
-            cascade_size,
-            amp,
-            seed,
-            cascade_wind,
-        );
+        let (h0, omega) = build_spectrum_data(settings, n, cascade_size, amp, seed, cascade_wind);
         h0_bytes.extend(h0);
         omega_bytes.extend(omega);
     }

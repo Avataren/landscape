@@ -209,10 +209,26 @@ impl AsBindGroupShaderType<WaterMaterialUniform> for WaterMaterial {
             ),
             fft_cascade_world_sizes: self.fft_cascade_world_sizes,
             fft_cascade_inv_world_sizes: Vec4::new(
-                if self.fft_cascade_world_sizes.x > 0.0 { 1.0 / self.fft_cascade_world_sizes.x } else { 0.0 },
-                if self.fft_cascade_world_sizes.y > 0.0 { 1.0 / self.fft_cascade_world_sizes.y } else { 0.0 },
-                if self.fft_cascade_world_sizes.z > 0.0 { 1.0 / self.fft_cascade_world_sizes.z } else { 0.0 },
-                if self.fft_cascade_world_sizes.w > 0.0 { 1.0 / self.fft_cascade_world_sizes.w } else { 0.0 },
+                if self.fft_cascade_world_sizes.x > 0.0 {
+                    1.0 / self.fft_cascade_world_sizes.x
+                } else {
+                    0.0
+                },
+                if self.fft_cascade_world_sizes.y > 0.0 {
+                    1.0 / self.fft_cascade_world_sizes.y
+                } else {
+                    0.0
+                },
+                if self.fft_cascade_world_sizes.z > 0.0 {
+                    1.0 / self.fft_cascade_world_sizes.z
+                } else {
+                    0.0
+                },
+                if self.fft_cascade_world_sizes.w > 0.0 {
+                    1.0 / self.fft_cascade_world_sizes.w
+                } else {
+                    0.0
+                },
             ),
             terrain_clip_levels: self.terrain_clip_levels,
         }

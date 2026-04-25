@@ -15,7 +15,7 @@
 // depending on MULTIPLE_LIGHT_PROBES_IN_ARRAY / ENVIRONMENT_MAP defines.
 #import bevy_pbr::mesh_view_bindings as view_bindings
 #import bevy_pbr::{
-    mesh_view_bindings::{lights, view, clusterable_objects, light_probes},
+    mesh_view_bindings::{lights, view, clusterable_objects, light_probes, environment_map_uniform},
     mesh_view_types::{
         DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
         POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
@@ -1040,17 +1040,20 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     var irradiance = vec3<f32>(0.0);
     let view_probe_idx = light_probes.view_cubemap_index;
     if view_probe_idx >= 0 {
+        var sample_dir = (environment_map_uniform.transform * vec4<f32>(n, 1.0)).xyz;
+        // Bevy cubemaps are left-handed; match bevy_pbr::environment_map sampling.
+        sample_dir.z = -sample_dir.z;
 #ifdef MULTIPLE_LIGHT_PROBES_IN_ARRAY
         irradiance = textureSampleLevel(
             view_bindings::diffuse_environment_maps[view_probe_idx],
             view_bindings::environment_map_sampler,
-            n, 0.0,
+            sample_dir, 0.0,
         ).rgb * light_probes.intensity_for_view;
 #else
         irradiance = textureSampleLevel(
             view_bindings::diffuse_environment_map,
             view_bindings::environment_map_sampler,
-            n, 0.0,
+            sample_dir, 0.0,
         ).rgb * light_probes.intensity_for_view;
 #endif
     }

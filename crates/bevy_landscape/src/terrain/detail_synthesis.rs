@@ -525,27 +525,8 @@ pub fn update_synthesis_state(
         }
     }
 
-    let global_dirty = !cache.initialized
-        || cache.source_origin != source.world_origin
-        || cache.source_extent != source.world_extent
-        || cache.height_scale != terrain_config.height_scale
-        || cache.source_spacing != source_spacing
-        || cache.config != *detail_config
-        || cache.resolution != terrain_config.clipmap_resolution()
-        || cache.lod_params.len() != all_lod_params.len();
-
-    let lod_params = if global_dirty {
-        all_lod_params.clone()
-    } else {
-        all_lod_params
-            .iter()
-            .zip(cache.lod_params.iter())
-            .filter_map(|(new, old)| (new != old).then_some(new.clone()))
-            .collect()
-    };
-
     cache.initialized = true;
-    cache.lod_params = all_lod_params;
+    cache.lod_params = all_lod_params.clone();
     cache.source_origin = source.world_origin;
     cache.source_extent = source.world_extent;
     cache.height_scale = terrain_config.height_scale;
@@ -554,7 +535,7 @@ pub fn update_synthesis_state(
     cache.resolution = terrain_config.clipmap_resolution();
 
     commands.insert_resource(DetailSynthesisState {
-        lod_params,
+        lod_params: all_lod_params,
         clipmap_height_handle: Some(clipmap_state.height_texture_handle.clone()),
         source_heightmap_handle: Some(source.handle.clone()),
         source_origin: source.world_origin,
