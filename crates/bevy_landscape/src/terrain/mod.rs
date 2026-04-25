@@ -17,6 +17,7 @@ pub mod residency;
 pub mod resources;
 pub mod source_heightmap;
 pub mod streamer;
+pub mod synthesis_cpu;
 pub mod world_desc;
 
 pub use debug::TerrainDebugPlugin;

@@ -7,26 +7,41 @@
 // shader reads full detail directly from height_tex without a separate residual.
 
 // ---- Noise primitives ----
+//
+// Uses an integer PCG hash so the noise field is bit-identical between the
+// GPU compute pass and the CPU collision-mesh builder (synthesis_cpu.rs).
+// The float `fract(sin(x) * 43758)` hack used previously was not portable —
+// CPU and GPU `sin()` differ in the low bits, which `fract()` amplifies.
 
 const GRADIENT_EPSILON: f32 = 0.37;
 const EROSION_RESPONSE:  f32 = 3.5;
+const U32_TO_UNIT:       f32 = 2.3283064e-10; // 1.0 / 4294967295.0
 
-fn hash2(p: vec2<f32>) -> vec2<f32> {
-    let q = vec2<f32>(
-        dot(p, vec2<f32>(127.1, 311.7)),
-        dot(p, vec2<f32>(269.5, 183.3)),
-    );
-    return fract(sin(q) * 43758.5453) * 2.0 - 1.0;
+fn pcg2d(v_in: vec2<u32>) -> vec2<u32> {
+    var v = v_in * vec2<u32>(1664525u) + vec2<u32>(1013904223u);
+    v.x = v.x + v.y * 1664525u;
+    v.y = v.y + v.x * 1664525u;
+    v = v ^ (v >> vec2<u32>(16u));
+    v.x = v.x + v.y * 1664525u;
+    v.y = v.y + v.x * 1664525u;
+    v = v ^ (v >> vec2<u32>(16u));
+    return v;
+}
+
+fn hash_grad(pi: vec2<i32>) -> vec2<f32> {
+    let h = pcg2d(bitcast<vec2<u32>>(pi));
+    return vec2<f32>(h) * (2.0 * U32_TO_UNIT) - vec2<f32>(1.0);
 }
 
 fn gradient_noise(p: vec2<f32>) -> f32 {
-    let i = floor(p);
-    let f = fract(p);
-    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
-    let a = dot(hash2(i + vec2<f32>(0.0, 0.0)), f - vec2<f32>(0.0, 0.0));
-    let b = dot(hash2(i + vec2<f32>(1.0, 0.0)), f - vec2<f32>(1.0, 0.0));
-    let c = dot(hash2(i + vec2<f32>(0.0, 1.0)), f - vec2<f32>(0.0, 1.0));
-    let d = dot(hash2(i + vec2<f32>(1.0, 1.0)), f - vec2<f32>(1.0, 1.0));
+    let pf = floor(p);
+    let i  = vec2<i32>(pf);
+    let f  = p - pf;
+    let u  = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    let a  = dot(hash_grad(i + vec2<i32>(0, 0)), f);
+    let b  = dot(hash_grad(i + vec2<i32>(1, 0)), f - vec2<f32>(1.0, 0.0));
+    let c  = dot(hash_grad(i + vec2<i32>(0, 1)), f - vec2<f32>(0.0, 1.0));
+    let d  = dot(hash_grad(i + vec2<i32>(1, 1)), f - vec2<f32>(1.0, 1.0));
     return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
 }
 

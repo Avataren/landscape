@@ -11,8 +11,10 @@ use std::sync::mpsc::{self, Receiver};
 use crate::terrain::{
     collision::TerrainCollisionCache,
     config::TerrainConfig,
-    resources::{TerrainViewState, TileKey},
-    streamer::load_tile_data,
+    detail_synthesis::DetailSynthesisConfig,
+    resources::TerrainViewState,
+    source_heightmap::SourceHeightmapState,
+    synthesis_cpu::{octave_count_for_cell, synthesise_residual},
     world_desc::TerrainSourceDesc,
     ReloadTerrainRequest,
 };
@@ -87,14 +89,19 @@ struct BuildInput {
     n: usize,
     cell_size: f32,
     height_scale: f32,
-    tile_size: u32,
-    world_scale: f32,
-    /// Snapshotted level-0 tiles keyed by (tile_x, tile_z).
-    tiles: std::collections::HashMap<TileKey, Vec<f32>>,
-    tile_root: Option<std::path::PathBuf>,
-    max_mip_level: u8,
-    world_min: Vec2,
-    world_max: Vec2,
+    /// Snapshot of the composite source heightmap, R16Unorm decoded to [0,1].
+    /// Same data the GPU detail-synthesis pass samples for `base_h`, so the
+    /// CPU and GPU agree to within float-rounding error.
+    source_heightmap: Vec<f32>,
+    source_width: u32,
+    source_height: u32,
+    source_origin: Vec2,
+    source_extent: Vec2,
+    /// Synth params snapshotted from the live config so the background thread
+    /// reproduces the exact heights the GPU pass writes to the clipmap.
+    synthesis_config: DetailSynthesisConfig,
+    /// World-space texel size of the source heightmap (= world_scale × 2^max_mip).
+    source_spacing: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -119,13 +126,25 @@ pub fn start_terrain_collider_build(
     cache: Res<TerrainCollisionCache>,
     config: Res<TerrainConfig>,
     desc: Res<TerrainSourceDesc>,
+    synthesis: Res<DetailSynthesisConfig>,
+    source_state: Option<Res<SourceHeightmapState>>,
+    images: Res<Assets<Image>>,
 ) {
     if task.receiver.is_some() || cache.tile_size == 0 {
         return;
     }
+    let Some(source_state) = source_state else { return };
+    let Some(source_image) = images.get(&source_state.handle) else {
+        return;
+    };
+    let Some(source_bytes) = source_image.data.as_ref() else {
+        return;
+    };
 
     let camera_xz = view.camera_pos_ws.xz();
-    let cell_size = config.world_scale;
+    // Match the finest visual mesh spacing so collision captures the same
+    // detail the GPU synthesis pass writes into LOD 0.
+    let cell_size = config.lod0_mesh_spacing.max(config.world_scale * 0.0625);
 
     // Odd vertex count so half_n is a whole integer and vertices land on the
     // same grid as the render mesh (even n → half-integer offsets → ridges
@@ -141,23 +160,36 @@ pub fn start_terrain_collider_build(
     let cz = (camera_xz.y / cell_size).round() * cell_size;
     let center = Vec2::new(cx, cz);
 
-    // Snapshot only the tiles that overlap this coverage area.
+    // Drain the cached snapshot once just to keep eviction consistent — the
+    // collision builder no longer reads per-tile data, but this preserves the
+    // existing LRU semantics.
     let half = (n as f32 - 1.0) * 0.5 * cell_size;
-    let tiles =
-        cache.snapshot_tiles_for_region(center - Vec2::splat(half), center + Vec2::splat(half));
+    let _ = cache.snapshot_tiles_for_region(center - Vec2::splat(half), center + Vec2::splat(half));
+
+    let source_spacing = config.world_scale * (1u32 << desc.max_mip_level as u32) as f32;
+
+    // Decode the R16Unorm composite to [0,1] floats once, on the main thread.
+    let source_size = source_image.texture_descriptor.size;
+    let source_width = source_size.width;
+    let source_height = source_size.height;
+    let mut source_heightmap = Vec::with_capacity((source_width * source_height) as usize);
+    for chunk in source_bytes.chunks_exact(2) {
+        let v = u16::from_le_bytes([chunk[0], chunk[1]]);
+        source_heightmap.push(v as f32 / 65535.0);
+    }
 
     let input = BuildInput {
         center,
         n,
         cell_size,
         height_scale: config.height_scale,
-        tile_size: config.tile_size,
-        world_scale: config.world_scale,
-        tiles,
-        tile_root: desc.tile_root.clone(),
-        max_mip_level: desc.max_mip_level,
-        world_min: desc.world_min,
-        world_max: desc.world_max,
+        source_heightmap,
+        source_width,
+        source_height,
+        source_origin: source_state.world_origin,
+        source_extent: source_state.world_extent,
+        synthesis_config: synthesis.clone(),
+        source_spacing,
     };
 
     let (tx, rx) = mpsc::channel();
@@ -257,18 +289,47 @@ fn build_mesh_data(input: BuildInput) -> ColliderBuildResult {
         n,
         cell_size,
         height_scale,
-        tile_size,
-        world_scale,
-        mut tiles,
-        tile_root,
-        max_mip_level,
-        world_min,
-        world_max,
+        source_heightmap,
+        source_width,
+        source_height,
+        source_origin,
+        source_extent,
+        synthesis_config,
+        source_spacing,
     } = input;
 
     let half_n = (n as f32 - 1.0) * 0.5;
-    let tile_world_size = tile_size as f32 * world_scale;
-    let mut fallback_tile_count = 0usize;
+    let octaves = octave_count_for_cell(cell_size, source_spacing, synthesis_config.lacunarity);
+
+    let sw = source_width as i32;
+    let sh = source_height as i32;
+    let stride = source_width as usize;
+    let tex = |x: i32, y: i32| -> f32 {
+        let xi = x.clamp(0, sw - 1) as usize;
+        let yi = y.clamp(0, sh - 1) as usize;
+        source_heightmap[yi * stride + xi]
+    };
+    // Mirrors `textureSampleLevel(source_heightmap, source_samp, src_uv, 0.0)`
+    // with clamp-to-edge wrap and a linear filter: texel I's centre lives at
+    // uv = (I + 0.5) / size, and bilinear taps come from the four texels
+    // around (uv * size - 0.5).
+    let sample_norm = |wx: f32, wz: f32| -> f32 {
+        let u = ((wx - source_origin.x) / source_extent.x).clamp(0.0, 1.0);
+        let v = ((wz - source_origin.y) / source_extent.y).clamp(0.0, 1.0);
+        let cx = u * source_width as f32 - 0.5;
+        let cy = v * source_height as f32 - 0.5;
+        let x0 = cx.floor() as i32;
+        let y0 = cy.floor() as i32;
+        let fx = cx - x0 as f32;
+        let fy = cy - y0 as f32;
+        let h00 = tex(x0, y0);
+        let h10 = tex(x0 + 1, y0);
+        let h01 = tex(x0, y0 + 1);
+        let h11 = tex(x0 + 1, y0 + 1);
+        let top = h00 + (h10 - h00) * fx;
+        let bot = h01 + (h11 - h01) * fx;
+        top + (bot - top) * fy
+    };
 
     let mut vertices: Vec<Vec3> = Vec::with_capacity(n * n);
     for zi in 0..n {
@@ -276,43 +337,29 @@ fn build_mesh_data(input: BuildInput) -> ColliderBuildResult {
             let wx = center.x + (xi as f32 - half_n) * cell_size;
             let wz = center.y + (zi as f32 - half_n) * cell_size;
 
-            let tx = (wx / tile_world_size).floor() as i32;
-            let tz = (wz / tile_world_size).floor() as i32;
-            let local_x = (wx - tx as f32 * tile_world_size) / tile_world_size;
-            let local_z = (wz - tz as f32 * tile_world_size) / tile_world_size;
-            let key = TileKey {
-                level: 0,
-                x: tx,
-                y: tz,
-            };
+            let h_norm = sample_norm(wx, wz);
+            let base_h = h_norm * height_scale;
 
-            // Load from disk only if the snapshot didn't cover this tile.
-            if !tiles.contains_key(&key) {
-                fallback_tile_count += 1;
-                let data = load_tile_data(
-                    key,
-                    tile_size,
-                    world_scale,
-                    1.0,
-                    max_mip_level,
-                    tile_root.as_deref(),
-                    None,
-                    Some((world_min, world_max)),
-                )
-                .data;
-                tiles.insert(key, data);
-            }
+            // Slope (deg) from one-source-texel finite differences — same
+            // formula as the slope_mask in detail_synthesis.wgsl.
+            let h_norm_x = sample_norm(wx + source_spacing, wz);
+            let h_norm_z = sample_norm(wx, wz + source_spacing);
+            let dh_dx = (h_norm_x - h_norm) / source_spacing * height_scale;
+            let dh_dz = (h_norm_z - h_norm) / source_spacing * height_scale;
+            let slope_deg = (dh_dx * dh_dx + dh_dz * dh_dz).sqrt().atan().to_degrees();
 
-            let h = tiles
-                .get(&key)
-                .map(|data| {
-                    bilinear_sample(data, tile_size, Vec2::new(local_x, local_z)) * height_scale
-                })
-                .unwrap_or(0.0);
+            let residual = synthesise_residual(
+                Vec2::new(wx, wz),
+                octaves,
+                slope_deg,
+                &synthesis_config,
+                source_spacing,
+            );
 
-            vertices.push(Vec3::new(wx, h, wz));
+            vertices.push(Vec3::new(wx, base_h + residual, wz));
         }
     }
+    let fallback_tile_count = 0usize;
 
     // Same winding as build_rect_mesh so physics normals match rendered geometry.
     let quads = (n - 1) * (n - 1);
