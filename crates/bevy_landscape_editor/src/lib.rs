@@ -10,6 +10,7 @@ mod sky_panel;
 mod synthesis_panel;
 mod texture_browser;
 mod toolbar;
+mod water_panel;
 
 use bevy::prelude::*;
 use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
@@ -24,6 +25,7 @@ use preferences::PreferencesPlugin;
 use sky_panel::SkyPanelPlugin;
 use synthesis_panel::SynthesisPanelPlugin;
 use texture_browser::TextureBrowserPlugin;
+use water_panel::WaterPanelPlugin;
 
 pub use level_io::LevelIoState;
 pub use preferences::AppPreferences;
@@ -46,6 +48,7 @@ impl Plugin for LandscapeEditorPlugin {
             .add_plugins(PreferencesPlugin)
             .add_plugins(SkyPanelPlugin)
             .add_plugins(SynthesisPanelPlugin)
+            .add_plugins(WaterPanelPlugin)
             .add_systems(EguiPrimaryContextPass, toolbar::toolbar_system);
     }
 }

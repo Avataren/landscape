@@ -85,6 +85,15 @@ pub struct WaterSettings {
     pub shoreline_foam_depth: f32,
     /// Water depth range over which wave displacement fades to flat near shore.
     pub shore_wave_damp_width: f32,
+    /// Multiplier on Jacobian foldover foam (0 = off, 1 = default).
+    pub jacobian_foam_strength: f32,
+    /// Multiplier on capillary high-frequency noise normals (0 = off).
+    pub capillary_strength: f32,
+    /// Macro height-noise amplitude in metres (0 disables).  Breaks the
+    /// strictly periodic Gerstner sum at distance.
+    pub macro_noise_amplitude: f32,
+    /// Macro height-noise dominant wavelength in metres.
+    pub macro_noise_scale: f32,
 }
 
 impl Default for WaterSettings {
@@ -109,7 +118,11 @@ impl Default for WaterSettings {
             foam_threshold: 0.7,
             foam_color: Color::srgba(1.0, 1.0, 1.0, 0.9),
             shoreline_foam_depth: 2.0,
-            shore_wave_damp_width: 5.5,
+            shore_wave_damp_width: 3.0,
+            jacobian_foam_strength: 1.0,
+            capillary_strength: 1.0,
+            macro_noise_amplitude: 2.0,
+            macro_noise_scale: 110.0,
         }
     }
 }
@@ -198,7 +211,7 @@ impl Plugin for LandscapeWaterPlugin {
             // 0.7 = only the top 30% of wave heights get foam (genuine crests only).
             foam_threshold: 0.7,
             shoreline_foam_depth: 1.5,
-            shore_wave_damp_width: 5.5,
+            shore_wave_damp_width: 3.0,
             spawn_tiles: None,
             ..WaterSettings::default()
         });
@@ -228,7 +241,10 @@ impl Plugin for LandscapeWaterPlugin {
 // ---------------------------------------------------------------------------
 
 const WATER_CLIPMAP_BLOCK_SIZE: u32 = 64;
-const WATER_CLIPMAP_BASE_SCALE: f32 = 4.0;
+// Fine-ring vertex spacing in metres.  Halved from 4.0 → 2.0 so vertex
+// displacement can resolve the shorter geometry waves (down to ~21 m λ
+// gets ~10 verts/wavelength instead of ~5).  Doubles fine-ring vertex count.
+const WATER_CLIPMAP_BASE_SCALE: f32 = 2.0;
 const WATER_CLIPMAP_MIN_LEVELS: u32 = 6;
 const WATER_CLIPMAP_MAX_LEVELS: u32 = 8;
 const WATER_CLIPMAP_MIN_OUTER_HALF_EXTENT: f32 = 16_384.0;
@@ -567,6 +583,10 @@ fn rebuild_water_tiles(
             wave_direction: settings.wave_direction.normalize_or_zero(),
             water_height,
             shore_wave_damp_width: settings.shore_wave_damp_width,
+            jacobian_foam_strength: settings.jacobian_foam_strength,
+            capillary_strength: settings.capillary_strength,
+            macro_noise_amplitude: settings.macro_noise_amplitude,
+            macro_noise_scale: settings.macro_noise_scale,
             terrain_height_texture: terrain_fallback.height_texture.clone(),
             terrain_world_bounds: Vec4::ZERO,
             terrain_height_scale: 0.0,
@@ -941,6 +961,10 @@ fn sync_water_materials(
         if settings_changed {
             mat.extension.water_height = settings.height;
             mat.extension.shore_wave_damp_width = settings.shore_wave_damp_width;
+            mat.extension.jacobian_foam_strength = settings.jacobian_foam_strength;
+            mat.extension.capillary_strength = settings.capillary_strength;
+            mat.extension.macro_noise_amplitude = settings.macro_noise_amplitude;
+            mat.extension.macro_noise_scale = settings.macro_noise_scale;
         }
 
         if terrain_changed {

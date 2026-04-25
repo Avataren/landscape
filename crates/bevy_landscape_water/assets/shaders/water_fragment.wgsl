@@ -129,7 +129,22 @@ fn fragment(
     let detail_slope = detail_wave.slope * shore_wave_attn * micro_detail_fade;
     let detail_slope_energy = detail_wave.slope_energy * shore_wave_attn * micro_detail_fade;
     let swell_slope  = water_fn::normal_to_slope(swell_n) * shore_wave_attn * mix(1.0, 0.78, far_field_filter);
-    let water_normal = water_fn::combine_surface_normal(macro_normal, detail_slope + swell_slope);
+    // Capillary noise: stochastic high-frequency normal perturbation that
+    // breaks the periodic look of pure analytic waves.  Faded by the same
+    // micro_detail_fade so it disappears on coarse rings.
+    let capillary = water_fn::capillary_slope(w_pos, normal_footprint)
+        * shore_wave_attn
+        * micro_detail_fade
+        * water_fn::water_capillary_strength();
+    // Macro slope — distance-immune.  Adds slow stochastic tilt to the
+    // surface normal even at the horizon, so distant water doesn't read as
+    // flat or as a tiled Gerstner pattern.
+    let macro_grad   = water_fn::macro_noise_height_grad(w_pos, normal_footprint);
+    let macro_slope  = vec2<f32>(macro_grad.y, macro_grad.z) * shore_wave_attn;
+    let water_normal = water_fn::combine_surface_normal(
+        macro_normal,
+        detail_slope + swell_slope + capillary + macro_slope,
+    );
     in.world_normal  = water_normal;
 
 #ifdef VISIBILITY_RANGE_DITHER
@@ -210,14 +225,60 @@ fn fragment(
     let norm_h        = clamp((wave.height * shore_wave_attn) / max(max_wave_h, 0.001), 0.0, 1.0);
     let transition    = max((1.0 - foam_threshold) * 0.5, 0.02);
     let crest_foam    = smoothstep(foam_threshold - transition, foam_threshold + transition, norm_h);
-    let crest_w       = crest_foam * crest_foam;
+    let crest_raw     = crest_foam * crest_foam;
     let foam_far_fade = 1.0 - smoothstep(3.5, 10.0, pixel_size);
 
-    // Fade from full foam at depth=0 to no foam at depth=shoreline_foam_depth.
-    let shore_t = 1.0 - clamp(shore_depth_m / max(shoreline_foam_depth, 0.01), 0.0, 1.0);
-    let shore_w = shore_t * shore_t;   // squared: sharper shoreline edge
+    // -----------------------------------------------------------------------
+    // Voronoi foam pattern.
+    //
+    // Modulates the crest / shoreline foam masks with an organic bubble &
+    // edge texture so foam reads as discrete patches rather than smooth
+    // discs / continuous strips along the waterline.  Two world-space scales
+    // (tighter for crests, broader for shore) and independent scroll drift.
+    // -----------------------------------------------------------------------
+    let crest_pattern  = water_fn::foam_voronoi_mask(
+        w_pos,
+        1.5,    // 1.5 m cell — bubble cluster scale
+        0.35,   // crest foam drifts with the wave train
+        clamp(crest_raw, 0.0, 1.0),
+    );
+    let crest_w        = crest_raw * mix(0.25, 1.05, crest_pattern);
 
-    let foam_weight = clamp(max(crest_w * foam_far_fade, shore_w), 0.0, 1.0);
+    // -----------------------------------------------------------------------
+    // Jacobian (foldover) foam — wave-breaking detection.
+    //
+    // For Gerstner waves with horizontal displacement, the surface "folds"
+    // onto itself where the Jacobian determinant of the displacement field
+    // J = (1+gxx)·(1+gzz) - gxz²  drops below ~0; large Q values amplify
+    // foldover.  The result is streaky organic foam at the lee side of crests
+    // — what real ocean foam actually does — rather than smooth disc-on-crest.
+    // -----------------------------------------------------------------------
+    let disp_grad = water_fn::get_wave_disp_grad(w_pos, normal_footprint) * shore_wave_attn;
+    let jacobian  = (1.0 + disp_grad.x) * (1.0 + disp_grad.z) - disp_grad.y * disp_grad.y;
+    // Foam appears as J drops below 1; classic ocean shaders trigger near 0.
+    // We band-pass between 0.55 (faint streaks) and -0.05 (full foldover).
+    let fold_foam = smoothstep(0.55, -0.05, jacobian);
+    let fold_w    = fold_foam * fold_foam * foam_far_fade
+        * water_fn::water_jacobian_foam_strength();
+
+    // Fade from full foam at depth=0 to no foam at depth=shoreline_foam_depth.
+    let shore_t      = 1.0 - clamp(shore_depth_m / max(shoreline_foam_depth, 0.01), 0.0, 1.0);
+    let shore_raw    = shore_t * shore_t;
+    // Voronoi pattern at a coarser cell size so shoreline foam reads as
+    // overlapping bubble masses rather than a uniform white strip.  The
+    // pattern drifts slowly inland (scroll along wind), giving life to
+    // otherwise-static contact lines.
+    let shore_pattern = water_fn::foam_voronoi_mask(
+        w_pos,
+        2.4,    // larger cells → broader foam patches at shore
+        0.15,   // slow drift
+        clamp(shore_raw, 0.0, 1.0),
+    );
+    // Mix the patterned mask back with the raw factor so the very-shallowest
+    // pixels stay solid white (avoids visible noise right at the contact).
+    let shore_w = mix(shore_raw * shore_pattern, shore_raw, pow(shore_t, 4.0));
+
+    let foam_weight = clamp(max(max(crest_w * foam_far_fade, fold_w), shore_w), 0.0, 1.0);
 
     // Thin-water edge scattering brightens the shoreline without making deep
     // water milky. This also gives the eye a cleaner transition at the coast.

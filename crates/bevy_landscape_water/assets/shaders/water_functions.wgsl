@@ -154,6 +154,22 @@ fn water_surface_height() -> f32 {
     return material.terrain_params.x;
 }
 
+fn water_jacobian_foam_strength() -> f32 {
+    return material.extra_params.x;
+}
+
+fn water_capillary_strength() -> f32 {
+    return material.extra_params.y;
+}
+
+fn water_macro_noise_amplitude() -> f32 {
+    return material.extra_params.z;
+}
+
+fn water_macro_noise_scale() -> f32 {
+    return max(material.extra_params.w, 1.0);
+}
+
 fn terrain_height_scale() -> f32 {
     return material.terrain_params.y;
 }
@@ -262,6 +278,49 @@ fn gerstner_wave(
     );
 }
 
+// Per-wave horizontal-displacement gradient terms for Jacobian foldover.
+// Returns (∂xz_disp.x/∂x, ∂xz_disp.x/∂z, ∂xz_disp.z/∂z) — note ∂xz_disp.z/∂x
+// equals ∂xz_disp.x/∂z for Gerstner waves so we collapse to three components.
+fn gerstner_disp_grad(
+    p:        vec2<f32>,
+    t:        f32,
+    params:   vec4<f32>,
+    base_amp: f32,
+    lod_w:    f32,
+) -> vec3<f32> {
+    let dir      = rotate_local_dir(params.xy);
+    let L        = params.z;
+    let Q_artist = params.w;
+
+    let omega = 2.0 * PI / L;
+    let amp   = base_amp * GEOM_AMP_RATIO * L;
+    let phase = water_wave_speed() * sqrt(G * omega);
+
+    let f    = omega * dot(dir, p) + phase * t + wave_phase_offset(params);
+    let sinf = sin(f);
+
+    let Q_eff = Q_artist / (omega * amp * NUM_GEOM_WAVES);
+    // ∂(Q_eff·amp·D_x·cos f)/∂x = -Q_eff·amp·omega·D_x² · sin f, etc.
+    let k = -Q_eff * amp * omega * sinf * lod_w;
+    return vec3(k * dir.x * dir.x, k * dir.x * dir.y, k * dir.y * dir.y);
+}
+
+// Aggregate displacement gradient over all geometry waves. Foldover is detected
+// via the Jacobian J = (1+gxx)(1+gzz) - gxz²; J < 0 means the surface has
+// folded onto itself (wave breaking).
+fn get_wave_disp_grad(p: vec2<f32>, footprint: f32) -> vec3<f32> {
+    let t   = globals.time;
+    let amp = water_amplitude();
+    var g = vec3(0.0);
+    g += gerstner_disp_grad(p, t, GEOM_WAVE_0, amp, wave_lod_weight(GEOM_WAVE_0.z, footprint));
+    g += gerstner_disp_grad(p, t, GEOM_WAVE_1, amp, wave_lod_weight(GEOM_WAVE_1.z, footprint));
+    g += gerstner_disp_grad(p, t, GEOM_WAVE_2, amp, wave_lod_weight(GEOM_WAVE_2.z, footprint));
+    g += gerstner_disp_grad(p, t, GEOM_WAVE_3, amp, wave_lod_weight(GEOM_WAVE_3.z, footprint));
+    g += gerstner_disp_grad(p, t, GEOM_WAVE_4, amp, wave_lod_weight(GEOM_WAVE_4.z, footprint));
+    g += gerstner_disp_grad(p, t, GEOM_WAVE_5, amp, wave_lod_weight(GEOM_WAVE_5.z, footprint));
+    return g;
+}
+
 fn get_wave_result(p: vec2<f32>, footprint: f32) -> WaveResult {
     let t   = globals.time;
     let amp = water_amplitude();
@@ -322,6 +381,211 @@ fn get_detail_wave_result(p: vec2<f32>, footprint: f32) -> DetailWaveResult {
     let d7 = detail_wave(p, t, DETAIL_WAVE_7, amp, detail_wave_lod_weight(DETAIL_WAVE_7.z, footprint)); slope += d7.slope; crest = max(crest, d7.crest); slope_energy += d7.slope_energy;
 
     return DetailWaveResult(slope, crest, slope_energy);
+}
+
+// -----------------------------------------------------------------------
+// 2-D value noise primitive shared by macro-noise and capillary-noise
+// passes.  Returns (value ∈ [0,1], dvalue/dx, dvalue/dy).
+// -----------------------------------------------------------------------
+fn cap_hash21(p: vec2<f32>) -> f32 {
+    let h = dot(p, vec2(127.1, 311.7));
+    return fract(sin(h) * 43758.5453);
+}
+
+// Two-channel hash for voronoi cell offsets.
+fn voro_hash22(p: vec2<f32>) -> vec2<f32> {
+    let q = vec2<f32>(
+        dot(p, vec2(127.1, 311.7)),
+        dot(p, vec2(269.5, 183.3)),
+    );
+    return fract(sin(q) * 43758.5453);
+}
+
+// 2D voronoi (worley) noise.  Returns:
+//   .x = distance to nearest cell point (0 at cell centre, ~1 at cell edge)
+//   .y = distance to second-nearest cell point
+// (.y - .x) is small along Voronoi edges, large inside cells — useful for
+// extracting bubble-edge silhouettes.
+fn voronoi_f1f2(p: vec2<f32>) -> vec2<f32> {
+    let n = floor(p);
+    let f = p - n;
+    var f1 = 8.0;
+    var f2 = 8.0;
+    for (var j: i32 = -1; j <= 1; j = j + 1) {
+        for (var i: i32 = -1; i <= 1; i = i + 1) {
+            let g = vec2<f32>(f32(i), f32(j));
+            let o = voro_hash22(n + g);
+            let r = g + o - f;
+            let d = dot(r, r);
+            if d < f1 {
+                f2 = f1;
+                f1 = d;
+            } else if d < f2 {
+                f2 = d;
+            }
+        }
+    }
+    return vec2(sqrt(f1), sqrt(f2));
+}
+
+// Foam mask from voronoi.  Two octaves at related but irrational scales so
+// the bubble pattern doesn't tile.  `coverage` ∈ [0,1] controls how much of
+// the mask is filled (0 = sparse bubbles, 1 = full white).
+// `cell_size` is the world-space cell size in metres.
+// `drift_speed` (m/s) scrolls cells along the wind direction over time so
+// foam patches translate naturally with the surface.
+fn foam_voronoi_mask(
+    p:           vec2<f32>,
+    cell_size:   f32,
+    drift_speed: f32,
+    coverage:    f32,
+) -> f32 {
+    let scale  = 1.0 / max(cell_size, 0.05);
+    let wind   = dominant_wind_direction();
+    let scroll = -wind * drift_speed * globals.time;
+    let q1 = (p + scroll) * scale;
+    let v1 = voronoi_f1f2(q1);
+    // Bubble bodies: bright at cell centres (low f1), dimmer near edges.
+    let bubbles = 1.0 - smoothstep(0.18, 0.62, v1.x);
+    // Edge ridges: bright lines along Voronoi cell boundaries.
+    let edges   = 1.0 - smoothstep(0.0, 0.10, v1.y - v1.x);
+    let layer1  = clamp(bubbles + edges * 0.35, 0.0, 1.0);
+
+    // Second octave at ~1.7× scale, offset, decorrelates the pattern.
+    let q2 = (p + scroll * 0.65 + vec2(13.7, 47.1)) * (scale * 1.73);
+    let v2 = voronoi_f1f2(q2);
+    let layer2 = 1.0 - smoothstep(0.20, 0.65, v2.x);
+
+    let combined = mix(layer1, layer1 * (0.55 + 0.45 * layer2), 0.6);
+    // Coverage maps the mask through smoothstep so a single slider goes from
+    // sparse foam pockets to a continuous foam sheet.
+    let lo = mix(0.85, 0.05, coverage);
+    let hi = mix(0.95, 0.40, coverage);
+    return smoothstep(lo, hi, combined);
+}
+
+fn cap_value_noise_d(p: vec2<f32>) -> vec3<f32> {
+    let i  = floor(p);
+    let f  = p - i;
+    let u  = f * f * (3.0 - 2.0 * f);
+    let du = 6.0 * f * (1.0 - f);
+
+    let a = cap_hash21(i);
+    let b = cap_hash21(i + vec2(1.0, 0.0));
+    let c = cap_hash21(i + vec2(0.0, 1.0));
+    let d = cap_hash21(i + vec2(1.0, 1.0));
+
+    let v    = a + (b - a) * u.x + (c - a) * u.y + (a - b - c + d) * u.x * u.y;
+    let dvdx = du.x * ((b - a) + (a - b - c + d) * u.y);
+    let dvdy = du.y * ((c - a) + (a - b - c + d) * u.x);
+    return vec3(v, dvdx, dvdy);
+}
+
+// -----------------------------------------------------------------------
+// Macro height-noise — long-wavelength stochastic FBM that breaks the
+// strictly periodic Gerstner sum.  Evaluated in the vertex shader (height
+// displacement) AND the fragment shader (slope contribution).  Crucially
+// the longest octave is footprint-immune so it survives all the way to the
+// horizon, where the high-frequency Gerstner waves alias away.
+//
+// Returns (height, dh/dx, dh/dz) in world units.
+// -----------------------------------------------------------------------
+fn macro_noise_octave(
+    p:        vec2<f32>,
+    t:        f32,
+    wind:     vec2<f32>,
+    cross:    vec2<f32>,
+    wavelen:  f32,
+    drift_a:  f32,
+    drift_b:  f32,
+    height:   f32,
+    seed:     vec2<f32>,
+    footprint: f32,
+) -> vec3<f32> {
+    // Fade if the octave is finer than the pixel footprint (cheap aliasing
+    // guard — the longest octave at default settings has wavelen = 80 m so
+    // it never fades at typical view distances).
+    let lod_w = 1.0 - smoothstep(wavelen * 0.4, wavelen * 1.0, footprint);
+    if lod_w <= 0.0 {
+        return vec3(0.0);
+    }
+    let freq  = 1.0 / wavelen;
+    let drift = wind * drift_a + cross * drift_b;
+    let pp    = (p - drift * t) * freq + seed;
+    let n     = cap_value_noise_d(pp);
+    // Centre value around 0 so vertices both lift and sink relative to rest.
+    let h     = (n.x - 0.5) * 2.0 * height * lod_w;
+    let dhdx  = n.y * 2.0 * height * freq * lod_w;
+    let dhdz  = n.z * 2.0 * height * freq * lod_w;
+    return vec3(h, dhdx, dhdz);
+}
+
+fn macro_noise_height_grad(p: vec2<f32>, footprint: f32) -> vec3<f32> {
+    let amp = water_macro_noise_amplitude();
+    if amp <= 0.0 {
+        return vec3(0.0);
+    }
+    let t     = globals.time;
+    let wind  = dominant_wind_direction();
+    let cross = vec2(-wind.y, wind.x);
+    let base  = water_macro_noise_scale();
+
+    var sum = vec3(0.0);
+    // Three octaves at base × {1.0, 0.46, 0.22}.  Amplitude tapers ~× 0.55
+    // per octave (Phillips-like roll-off) so the macro signal is dominated by
+    // the longest wavelength — the bit that survives at the horizon.
+    sum += macro_noise_octave(p, t, wind, cross, base * 1.00, 0.18, 0.06, amp * 1.00,  vec2( 0.0,  0.0), footprint);
+    sum += macro_noise_octave(p, t, wind, cross, base * 0.46, 0.27, 0.09, amp * 0.55,  vec2(31.7, -7.1), footprint);
+    sum += macro_noise_octave(p, t, wind, cross, base * 0.22, 0.42, 0.13, amp * 0.30,  vec2(-12.3, 19.5), footprint);
+    return sum;
+}
+
+// -----------------------------------------------------------------------
+// Capillary / micro-noise normal layer
+//
+// Procedural value noise FBM with analytic gradient.  Adds stochastic
+// high-frequency surface roughness that the regular Gerstner sums cannot
+// produce — kills the visible periodicity of pure analytic waves and gives
+// sun glitter something to scintillate on.
+// -----------------------------------------------------------------------
+// Returns the surface-slope contribution from a 3-octave scrolling FBM.
+// Per-octave amplitude is calibrated for peak per-octave slope ≈ 0.04, so the
+// summed perturbation stays within the same order of magnitude as the existing
+// detail-wave slope (≈0.2 sustained).
+fn capillary_octave(
+    p:        vec2<f32>,
+    t:        f32,
+    wind:     vec2<f32>,
+    cross:    vec2<f32>,
+    wavelen:  f32,
+    drift_a:  f32,
+    drift_b:  f32,
+    height:   f32,
+    seed:     vec2<f32>,
+    footprint: f32,
+) -> vec2<f32> {
+    // Fade out octaves that fall below the pixel footprint to avoid alias.
+    let lod_w = 1.0 - smoothstep(wavelen * 0.6, wavelen * 1.6, footprint);
+    if lod_w <= 0.0 {
+        return vec2(0.0);
+    }
+    let freq  = 1.0 / wavelen;
+    let drift = wind * drift_a + cross * drift_b;
+    let pp    = (p - drift * t) * freq + seed;
+    let n     = cap_value_noise_d(pp);
+    return vec2(n.y, n.z) * freq * height * lod_w;
+}
+
+fn capillary_slope(p: vec2<f32>, footprint: f32) -> vec2<f32> {
+    let t     = globals.time;
+    let wind  = dominant_wind_direction();
+    let cross = vec2(-wind.y, wind.x);
+
+    var slope = vec2(0.0);
+    slope += capillary_octave(p, t, wind, cross, 3.0, 0.55, 0.18, 0.085, vec2( 0.0,  0.0), footprint);
+    slope += capillary_octave(p, t, wind, cross, 1.1, 0.95, 0.22, 0.024, vec2(17.3, 41.7), footprint);
+    slope += capillary_octave(p, t, wind, cross, 0.4, 1.30, 0.31, 0.0058, vec2(-9.1, 23.5), footprint);
+    return slope;
 }
 
 // Returns a normalised surface normal contributed by the swell waves only.

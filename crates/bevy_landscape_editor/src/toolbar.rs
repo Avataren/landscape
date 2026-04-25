@@ -16,6 +16,7 @@ use crate::material_panel::MaterialPanelState;
 use crate::preferences::{AppPreferences, PreferencesDialog};
 use crate::sky_panel::SkyPanelState;
 use crate::synthesis_panel::SynthesisPanelState;
+use crate::water_panel::WaterPanelState;
 
 /// Bundled water params — counts as a single system parameter.
 #[derive(SystemParam)]
@@ -78,6 +79,7 @@ pub(crate) fn toolbar_system(
     mut fog_panel: ResMut<FogPanelState>,
     mut generator_panel: ResMut<GeneratorPanelState>,
     mut synthesis_panel: ResMut<SynthesisPanelState>,
+    mut water_panel: ResMut<WaterPanelState>,
     mut reload_tx: MessageWriter<ReloadTerrainRequest>,
     mut water: WaterParams<'_>,
     terrain: TerrainParams<'_>,
@@ -157,6 +159,9 @@ pub(crate) fn toolbar_system(
                     ui.close();
                 }
                 if ui.checkbox(&mut fog_panel.open, "Fog").clicked() {
+                    ui.close();
+                }
+                if ui.checkbox(&mut water_panel.open, "Water").clicked() {
                     ui.close();
                 }
                 if ui.checkbox(&mut generator_panel.open, "Terrain Generator").clicked() {

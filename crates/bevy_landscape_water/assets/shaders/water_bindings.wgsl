@@ -14,6 +14,9 @@ struct WaterMaterial {
     // x = refraction_strength, y = foam_threshold,
     // z = shoreline_foam_depth, w = shore_wave_damp_width
     optical_params:       vec4<f32>,
+    // x = jacobian_foam_strength, y = capillary_strength,
+    // z = macro_noise_amplitude (m), w = macro_noise_scale (m)
+    extra_params:         vec4<f32>,
     // x = water_height, y = terrain_height_scale,
     // z = terrain_num_levels, w = reserved
     terrain_params:       vec4<f32>,

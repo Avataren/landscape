@@ -48,11 +48,24 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     // shader.  vertex_size ≈ 4m (fine ring) growing to 64m at the horizon.
     let orig_world_xz = world_position.xz;
     let cam_dist      = distance(orig_world_xz, vec2<f32>(view.world_position.x, view.world_position.z));
-    let vertex_size   = clamp(cam_dist / 128.0, 4.0, 64.0);
+    // Min 2 m matches WATER_CLIPMAP_BASE_SCALE on the fine ring.
+    let vertex_size   = clamp(cam_dist / 128.0, 2.0, 64.0);
     let wave = water_fn::get_wave_result(orig_world_xz, vertex_size);
+    // Macro height-noise: long-wavelength stochastic FBM that survives all
+    // the way to the horizon and breaks Gerstner periodicity.  Only the
+    // height component is applied here; the slope feeds the fragment shader
+    // through a fresh evaluation (vertex/fragment derivatives diverge so we
+    // can't hand the slope across).
+    let macro_v = water_fn::macro_noise_height_grad(orig_world_xz, vertex_size);
     let shore_wave_attn = water_fn::shoreline_wave_attenuation(orig_world_xz);
+    // Horizontal Gerstner displacement is fully damped near shore — without
+    // this, vertices slide laterally onto the beach and cause z-fighting /
+    // intersect terrain.  Vertical height is only partially damped (≥ 50 %
+    // retained) so waves continue to swell up to the contact line instead
+    // of flattening into a clipped polygon edge.
     let damped_xz_disp = wave.xz_disp * shore_wave_attn;
-    let damped_height = wave.height * shore_wave_attn;
+    let height_attn   = mix(0.5, 1.0, shore_wave_attn);
+    let damped_height = wave.height * height_attn + macro_v.x;
 
     out.world_position = world_position + vec4<f32>(damped_xz_disp.x, damped_height, damped_xz_disp.y, 0.0);
     out.position       = position_world_to_clip(out.world_position.xyz);

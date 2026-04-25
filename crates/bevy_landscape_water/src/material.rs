@@ -50,6 +50,14 @@ pub struct WaterMaterial {
     pub water_height: f32,
     /// Water depth range over which shore displacement fades out.
     pub shore_wave_damp_width: f32,
+    /// Multiplier on Jacobian foldover foam (0 = off, 1 = default).
+    pub jacobian_foam_strength: f32,
+    /// Multiplier on capillary noise normal layer (0 = off, 1 = default).
+    pub capillary_strength: f32,
+    /// Macro-noise vertical amplitude in metres (breaks Gerstner repetition).
+    pub macro_noise_amplitude: f32,
+    /// Macro-noise dominant wavelength in metres.
+    pub macro_noise_scale: f32,
     /// Terrain height clipmap bound for shoreline damping.
     #[texture(101, visibility(vertex, fragment), dimension = "2d_array")]
     #[sampler(102, visibility(vertex, fragment))]
@@ -87,6 +95,10 @@ impl Default for WaterMaterial {
             wave_direction: Vec2::X,
             water_height: 0.0,
             shore_wave_damp_width: 5.5,
+            jacobian_foam_strength: 1.0,
+            capillary_strength: 1.0,
+            macro_noise_amplitude: 2.0,
+            macro_noise_scale: 110.0,
             terrain_height_texture: Handle::default(),
             terrain_world_bounds: Vec4::ZERO,
             terrain_height_scale: 0.0,
@@ -118,6 +130,7 @@ pub struct WaterMaterialUniform {
     pub terrain_world_bounds: Vec4,
     pub wave_params: Vec4,
     pub optical_params: Vec4,
+    pub extra_params: Vec4,
     pub terrain_params: Vec4,
     pub terrain_clip_levels: [Vec4; MAX_SUPPORTED_CLIPMAP_LEVELS],
 }
@@ -142,6 +155,12 @@ impl AsBindGroupShaderType<WaterMaterialUniform> for WaterMaterial {
                 self.foam_threshold,
                 self.shoreline_foam_depth,
                 self.shore_wave_damp_width,
+            ),
+            extra_params: Vec4::new(
+                self.jacobian_foam_strength,
+                self.capillary_strength,
+                self.macro_noise_amplitude,
+                self.macro_noise_scale.max(1.0),
             ),
             terrain_params: Vec4::new(
                 self.water_height,
