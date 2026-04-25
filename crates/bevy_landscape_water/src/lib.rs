@@ -174,6 +174,8 @@ struct WaterPatchEntities {
     block_entities: Vec<Entity>,
     /// Interior trim strip entities (4 per ring boundary).
     trim_entities: Vec<Entity>,
+    /// Outer-edge skirt entities (4 per ring level).
+    skirt_entities: Vec<Entity>,
     last_clip_centers: Vec<IVec2>,
 }
 
@@ -460,8 +462,125 @@ fn build_trim_instances(clip_centers: &[IVec2]) -> Vec<WaterTrimCpu> {
 }
 
 // ---------------------------------------------------------------------------
+// Skirts — vertical strips hanging down from each ring's outer edge that
+// fill the visual gap at LOD ring boundaries.  Even with the trim strips
+// matching boundary world positions, the coarse ring linearly interpolates
+// between coarse-stride vertices while the fine ring has actual sub-stride
+// values from the displacement field, so any non-linear wave content shows
+// as a step at the boundary.  The skirt is a wall of water-coloured pixels
+// that masks that step from any viewing angle.
+//
+// One skirt per outer edge of every ring (LEFT, RIGHT, BOTTOM, TOP).  Vertex
+// density along the skirt's perimeter axis matches the ring's stride, so the
+// skirt's top edge attaches seamlessly to the ring's outer edge.
+// ---------------------------------------------------------------------------
+
+/// World-space depth of every skirt below the ring's outer edge.
+const WATER_SKIRT_DEPTH: f32 = 8.0;
+
+#[derive(Clone, Debug)]
+struct WaterSkirtCpu {
+    /// World position of the skirt's "first" top corner (perimeter t=0).
+    origin_ws: Vec2,
+    /// World units per perimeter quad — matches the ring's stride.
+    level_scale_ws: f32,
+    /// false = perimeter runs along Z (skirt on a constant-X edge),
+    /// true  = perimeter runs along X (skirt on a constant-Z edge).
+    along_x: bool,
+}
+
+fn build_skirt_instances(clip_centers: &[IVec2]) -> Vec<WaterSkirtCpu> {
+    let m = WATER_CLIPMAP_BLOCK_SIZE as i32;
+    let mut out = Vec::with_capacity(4 * clip_centers.len());
+
+    for (level, &c) in clip_centers.iter().enumerate() {
+        let scale = water_level_scale(level as u32);
+        let outer_min_x = (c.x - 2 * m) as f32 * scale;
+        let outer_max_x = (c.x + 2 * m) as f32 * scale;
+        let outer_min_z = (c.y - 2 * m) as f32 * scale;
+        let outer_max_z = (c.y + 2 * m) as f32 * scale;
+
+        // LEFT outer edge: x = outer_min_x, z runs outer_min_z → outer_max_z.
+        out.push(WaterSkirtCpu {
+            origin_ws: Vec2::new(outer_min_x, outer_min_z),
+            level_scale_ws: scale,
+            along_x: false,
+        });
+        // RIGHT outer edge: x = outer_max_x.
+        out.push(WaterSkirtCpu {
+            origin_ws: Vec2::new(outer_max_x, outer_min_z),
+            level_scale_ws: scale,
+            along_x: false,
+        });
+        // BOTTOM outer edge: z = outer_min_z, x runs outer_min_x → outer_max_x.
+        out.push(WaterSkirtCpu {
+            origin_ws: Vec2::new(outer_min_x, outer_min_z),
+            level_scale_ws: scale,
+            along_x: true,
+        });
+        // TOP outer edge: z = outer_max_z.
+        out.push(WaterSkirtCpu {
+            origin_ws: Vec2::new(outer_min_x, outer_max_z),
+            level_scale_ws: scale,
+            along_x: true,
+        });
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
 // Mesh
 // ---------------------------------------------------------------------------
+
+/// Builds a vertical strip mesh: `quads` segments along the perimeter axis,
+/// 1 segment along Y.  The "perimeter axis" is X if `along_x` is true,
+/// otherwise Z.  Mesh Y is in [-1, 0] (top at 0, bottom at -1) — apply
+/// world-space scale (perimeter_scale, skirt_depth, perimeter_scale) on the
+/// owning Transform.
+fn build_skirt_mesh(quads: u32, along_x: bool) -> Mesh {
+    let vquads = quads + 1;
+    let inv_q = 1.0 / quads as f32;
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity((vquads * 2) as usize);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity((vquads * 2) as usize);
+    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity((vquads * 2) as usize);
+    for i in 0..vquads {
+        let t = i as f32;
+        let (top, bot) = if along_x {
+            ([t, 0.0, 0.0], [t, -1.0, 0.0])
+        } else {
+            ([0.0, 0.0, t], [0.0, -1.0, t])
+        };
+        positions.push(top);
+        positions.push(bot);
+        // Outward normal — kept arbitrary (fragment shader recomputes from
+        // FFT slopes anyway).  Pointing "up" keeps PBR sane for the rare
+        // pixel where the skirt is the visible surface.
+        normals.push([0.0, 1.0, 0.0]);
+        normals.push([0.0, 1.0, 0.0]);
+        uvs.push([t * inv_q, 0.0]);
+        uvs.push([t * inv_q, 1.0]);
+    }
+    let mut indices: Vec<u32> = Vec::with_capacity((quads * 6) as usize);
+    for i in 0..quads {
+        let i00 = i * 2;
+        let i01 = i * 2 + 1;
+        let i10 = (i + 1) * 2;
+        let i11 = (i + 1) * 2 + 1;
+        // Wind both ways so the skirt is double-sided (visible from inside
+        // the ring as well as outside).
+        indices.extend_from_slice(&[i00, i01, i10, i10, i01, i11]);
+        indices.extend_from_slice(&[i10, i01, i00, i11, i01, i10]);
+    }
+    let mut mesh = Mesh::new(
+        bevy::mesh::PrimitiveTopology::TriangleList,
+        bevy::asset::RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(bevy::mesh::Indices::U32(indices));
+    mesh
+}
 
 fn build_rect_mesh(nx: u32, nz: u32) -> Mesh {
     let vx = nx + 1;
@@ -531,6 +650,7 @@ fn rebuild_water_tiles(
     }
     patches.block_entities.clear();
     patches.trim_entities.clear();
+    patches.skirt_entities.clear();
     patches.last_clip_centers.clear();
 
     let Some(clipmap) = layout.clipmap else {
@@ -541,6 +661,7 @@ fn rebuild_water_tiles(
     let root_center = clip_centers[0].as_vec2() * water_level_scale(0);
     let patch_list = build_patch_instances(&clip_centers);
     let trim_list = build_trim_instances(&clip_centers);
+    let skirt_list = build_skirt_instances(&clip_centers);
     let water_height = layout.height;
 
     let trim_quads = 4 * WATER_CLIPMAP_BLOCK_SIZE;
@@ -552,6 +673,12 @@ fn rebuild_water_tiles(
     // vertices align with the fine-ring vertex grid, eliminating T-junction cracks.
     let trim_v_mesh = Mesh3d(meshes.add(build_rect_mesh(2, trim_quads)));
     let trim_h_mesh = Mesh3d(meshes.add(build_rect_mesh(trim_quads, 2)));
+    // Skirt strips run along an outer ring edge (4*BLOCK_SIZE quads).  Two
+    // orientation variants — perimeter along Z (constant-X edge) and along X
+    // (constant-Z edge).
+    let skirt_quads = 4 * WATER_CLIPMAP_BLOCK_SIZE;
+    let skirt_z_mesh = Mesh3d(meshes.add(build_skirt_mesh(skirt_quads, false)));
+    let skirt_x_mesh = Mesh3d(meshes.add(build_skirt_mesh(skirt_quads, true)));
 
     let mat = MeshMaterial3d(materials.add(StandardWaterMaterial {
         base: StandardMaterial {
@@ -626,6 +753,7 @@ fn rebuild_water_tiles(
 
     let mut block_spawned = Vec::with_capacity(patch_list.len());
     let mut trim_spawned = Vec::with_capacity(trim_list.len());
+    let mut skirt_spawned = Vec::with_capacity(skirt_list.len());
 
     let root = commands
         .spawn((
@@ -687,10 +815,46 @@ fn rebuild_water_tiles(
                 .id();
             trim_spawned.push(entity);
         }
+
+        // --- Outer-edge skirts (mask LOD T-junction steps from any view angle) ---
+        for skirt in &skirt_list {
+            let offset = skirt.origin_ws - root_center;
+            let mesh = if skirt.along_x {
+                skirt_x_mesh.clone()
+            } else {
+                skirt_z_mesh.clone()
+            };
+            let entity = parent
+                .spawn((
+                    WaterTile { offset },
+                    Name::new("Water Skirt"),
+                    Transform {
+                        translation: Vec3::new(offset.x, 0.0, offset.y),
+                        // Y scale is the world-space skirt depth.  Lateral
+                        // axis matches the ring's stride; the unused
+                        // perpendicular axis stays unscaled (mesh is flat
+                        // along it).
+                        scale: Vec3::new(
+                            skirt.level_scale_ws,
+                            WATER_SKIRT_DEPTH,
+                            skirt.level_scale_ws,
+                        ),
+                        ..default()
+                    },
+                    mesh,
+                    mat.clone(),
+                    wave_dir,
+                    NotShadowCaster,
+                    NotShadowReceiver,
+                ))
+                .id();
+            skirt_spawned.push(entity);
+        }
     });
 
     patches.block_entities = block_spawned;
     patches.trim_entities = trim_spawned;
+    patches.skirt_entities = skirt_spawned;
     patches.last_clip_centers = clip_centers;
 }
 
@@ -746,6 +910,7 @@ fn update_water_patch_transforms(
 
     let patch_list = build_patch_instances(&clip_centers);
     let trim_list = build_trim_instances(&clip_centers);
+    let skirt_list = build_skirt_instances(&clip_centers);
 
     for (entity, p) in patch_entities.block_entities.iter().zip(patch_list.iter()) {
         if let Ok((mut t, mut tile)) = tile_q.get_mut(*entity) {
@@ -763,6 +928,16 @@ fn update_water_patch_transforms(
             t.translation.x = offset.x;
             t.translation.z = offset.y;
             t.scale = Vec3::new(trim.level_scale_ws, 1.0, trim.level_scale_ws);
+            tile.offset = offset;
+        }
+    }
+
+    for (entity, skirt) in patch_entities.skirt_entities.iter().zip(skirt_list.iter()) {
+        if let Ok((mut t, mut tile)) = tile_q.get_mut(*entity) {
+            let offset = skirt.origin_ws - root_center;
+            t.translation.x = offset.x;
+            t.translation.z = offset.y;
+            t.scale = Vec3::new(skirt.level_scale_ws, WATER_SKIRT_DEPTH, skirt.level_scale_ws);
             tile.offset = offset;
         }
     }

@@ -225,6 +225,33 @@ fn sample_fft_displacement(world_xz: vec2<f32>) -> vec4<f32> {
 #endif
 }
 
+// LOD-filtered displacement sample.  Low-passes the FFT by a 5-tap kernel
+// whose radius scales with vertex spacing — vertices on coarser clipmap rings
+// see correspondingly lower-frequency content, so adjacent rings' linear
+// triangle interpolation produces matching surfaces and the T-junction crack
+// disappears.  At zero radius it collapses back to a single sample.
+fn sample_fft_displacement_lod(world_xz: vec2<f32>, vertex_size: f32) -> vec4<f32> {
+#ifdef OCEAN_FFT_ENABLED
+    let strength = fft_strength();
+    if strength <= 0.0 {
+        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    }
+    let r = max(vertex_size * 0.5, 0.0);
+    let center = sample_fft_displacement(world_xz);
+    if r < 0.05 {
+        return center;
+    }
+    let s_e = sample_fft_displacement(world_xz + vec2<f32>( r, 0.0));
+    let s_w = sample_fft_displacement(world_xz + vec2<f32>(-r, 0.0));
+    let s_n = sample_fft_displacement(world_xz + vec2<f32>( 0.0,  r));
+    let s_s = sample_fft_displacement(world_xz + vec2<f32>( 0.0, -r));
+    // 5-tap binomial-ish kernel: centre weighted 0.5, neighbours 0.125 each.
+    return center * 0.5 + (s_e + s_w + s_n + s_s) * 0.125;
+#else
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+#endif
+}
+
 // Surface slope (∂h/∂x, ∂h/∂z) of the FFT height field, sampled via central
 // differences over one texel.  Returned slope is in world units.
 fn fft_height_slope(world_xz: vec2<f32>) -> vec2<f32> {

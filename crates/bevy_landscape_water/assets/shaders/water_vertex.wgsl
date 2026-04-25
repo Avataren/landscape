@@ -59,16 +59,10 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let macro_v = water_fn::macro_noise_height_grad(orig_world_xz, vertex_size);
     let shore_wave_attn = water_fn::shoreline_wave_attenuation(orig_world_xz);
 
-    // Tessendorf FFT displacement (h, dx, dz, jacobian).  When fft_strength
-    // is zero the lookup returns zero and we fall back to pure Gerstner.
+    // Tessendorf FFT displacement (h, dx, dz, jacobian).
     let fft = water_fn::sample_fft_displacement(orig_world_xz);
-    // The FFT spectrum carries frequencies down to ~2× the texel size; coarse
-    // clipmap rings can't resolve those, producing visible cracks at LOD
-    // boundaries.  Fade FFT contribution as vertex spacing grows beyond the
-    // resolvable range.
-    let fft_lod_w = 1.0 - smoothstep(4.0, 16.0, vertex_size);
-    let fft_s = water_fn::fft_strength() * fft_lod_w;
-    let gerstner_w = 1.0 - water_fn::fft_strength() * fft_lod_w;
+    let fft_s = water_fn::fft_strength();
+    let gerstner_w = 1.0 - fft_s;
 
     // Horizontal Gerstner displacement is fully damped near shore — without
     // this, vertices slide laterally onto the beach and cause z-fighting /
