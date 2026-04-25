@@ -9,8 +9,11 @@ struct Config {
     inverse_camera_view: mat4x4<f32>,
     inverse_camera_projection: mat4x4<f32>,
     previous_view_proj: mat4x4<f32>,
+    current_view_proj: mat4x4<f32>,
     wind_displacement: vec3<f32>,
     _pad2: f32,
+    previous_wind_displacement: vec3<f32>,
+    _pad_prev_wind: f32,
     sun_direction: vec4<f32>,
     sun_color: vec4<f32>,
     cloud_heights: vec4<f32>,
@@ -200,24 +203,38 @@ fn cloud_map_base(p: vec3<f32>, normalized_height: f32) -> f32 {
     return remap(cloud.r - n, cloud.g, 1.0);
 }
 
+fn worley_sample(coord: vec3<u32>) -> f32 {
+    return textureLoad(cloud_worley_texture, coord).r;
+}
+
 fn cloud_map_detail(position: vec3<f32>) -> f32 {
-    // Scroll only the Y axis of the 3D Worley lookup: at any fixed world XZ
-    // position the sampled noise slice changes over time, making cloud edges
-    // erode and grow without any horizontal translation.
+    // Scroll only the Y axis of the 3D Worley lookup so cloud edges erode/grow over
+    // time without any horizontal translation.
     let evo_y = config.softness.y * config.time * 0.4;
     let p = position * (0.0016 * config.noise_scales.x * config.noise_scales.y)
           + vec3<f32>(0.0, evo_y, 0.0);
-    let p1 = wrap_worley(p);
-    let a = textureLoad(
-        cloud_worley_texture,
-        vec3<u32>(u32(p1.x), u32(p1.y), u32(p1.z)),
-    ).r;
-    let p2 = (p1 + 1.0) % CLOUD_WORLEY_SIZE_F32;
-    let b = textureLoad(
-        cloud_worley_texture,
-        vec3<u32>(u32(p2.x), u32(p2.y), u32(p2.z)),
-    ).r;
-    return mix(a, b, fract(p.y));
+    let pw = wrap_worley(p);
+    let p0 = vec3<u32>(u32(pw.x), u32(pw.y), u32(pw.z));
+    let p1f = (pw + 1.0) % CLOUD_WORLEY_SIZE_F32;
+    let p1 = vec3<u32>(u32(p1f.x), u32(p1f.y), u32(p1f.z));
+    let f = fract(pw);
+
+    let c000 = worley_sample(vec3<u32>(p0.x, p0.y, p0.z));
+    let c100 = worley_sample(vec3<u32>(p1.x, p0.y, p0.z));
+    let c010 = worley_sample(vec3<u32>(p0.x, p1.y, p0.z));
+    let c110 = worley_sample(vec3<u32>(p1.x, p1.y, p0.z));
+    let c001 = worley_sample(vec3<u32>(p0.x, p0.y, p1.z));
+    let c101 = worley_sample(vec3<u32>(p1.x, p0.y, p1.z));
+    let c011 = worley_sample(vec3<u32>(p0.x, p1.y, p1.z));
+    let c111 = worley_sample(vec3<u32>(p1.x, p1.y, p1.z));
+
+    let c00 = mix(c000, c100, f.x);
+    let c10 = mix(c010, c110, f.x);
+    let c01 = mix(c001, c101, f.x);
+    let c11 = mix(c011, c111, f.x);
+    let c0 = mix(c00, c10, f.y);
+    let c1 = mix(c01, c11, f.y);
+    return mix(c0, c1, f.z);
 }
 
 fn cloud_gradient(normalized_height: f32) -> f32 {
@@ -487,14 +504,17 @@ fn update(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
         if abs(ray_dir.y) > 0.001 {
             let t = (cloud_mid_y_sky - ray_origin_sky.y) / ray_dir.y;
             if t > 0.0 && t < MAX_CLOUD_DISTANCE {
-                // Convert sky-shifted world pos back to actual world space.
-                // sky_ray_origin = camera_translation - wind_displacement + (0, planet_radius, 0)
-                // actual_world = sky_world - (0, planet_radius, 0) + wind_displacement
-                //              = camera_translation + ray_dir * t  (wind terms cancel)
+                // World position of the cloud-mid intersection this frame.
                 let world_pos = config.camera_translation + ray_dir * t;
 
+                // Cloud features drift through world space at +wind_velocity, because the
+                // shader samples noise at (p - wind_displacement). The same feature that's
+                // at world_pos this frame was at world_pos - wind_delta last frame.
+                let wind_delta = config.wind_displacement - config.previous_wind_displacement;
+                let prev_world_pos = world_pos - wind_delta;
+
                 // Reproject through the previous frame's view-projection matrix (world -> clip).
-                let prev_clip = config.previous_view_proj * vec4<f32>(world_pos, 1.0);
+                let prev_clip = config.previous_view_proj * vec4<f32>(prev_world_pos, 1.0);
                 if prev_clip.w > EPSILON {
                     let prev_ndc = prev_clip.xy / prev_clip.w;
                     // NDC -> UV: X right, Y up in NDC; Y flipped for texture (top=0).

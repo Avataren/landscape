@@ -49,7 +49,7 @@ impl Default for CloudsConfig {
             cloud_detail_strength: 0.27,
             cloud_base_edge_softness: 0.10,
             cloud_bottom_softness: 0.25,
-            cloud_history_blend: 0.9,
+            cloud_history_blend: 0.85,
             cloud_ambient_color_top: Vec4::new(0.72, 0.80, 0.92, 0.0),
             cloud_ambient_color_bottom: Vec4::new(0.32, 0.42, 0.58, 0.0),
             cloud_min_transmittance: 0.08,

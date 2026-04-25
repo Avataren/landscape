@@ -99,16 +99,28 @@ fn sync_cloud_uniforms(
     uniform.previous_camera_translation = previous_camera_translation;
     uniform.camera_translation = camera_transform.translation();
 
-    // Compute previous_view_proj from stored matrices before overwriting them.
-    // inverse_camera_view = view-to-world, so its inverse is world-to-view.
-    // inverse_camera_projection = clip-to-view, so its inverse is view-to-clip (projection).
-    let prev_view = uniform.inverse_camera_view.inverse();
-    let prev_proj = uniform.inverse_camera_projection.inverse();
-    uniform.previous_view_proj = prev_proj * prev_view;
+    // Reuse last frame's world-to-clip directly instead of round-tripping through inverses.
+    let new_view = camera_transform.to_matrix();
+    let new_proj = camera.computed.clip_from_view;
+    uniform.previous_view_proj = uniform.current_view_proj;
+    uniform.current_view_proj = new_proj * new_view.inverse();
+    uniform.inverse_camera_view = new_view;
+    uniform.inverse_camera_projection = new_proj.inverse();
 
-    uniform.inverse_camera_view = camera_transform.to_matrix();
-    uniform.inverse_camera_projection = camera.computed.clip_from_view.inverse();
-    uniform.wind_displacement += config.wind_velocity * time.delta_secs();
+    let frame_wind_delta = config.wind_velocity * time.delta_secs();
+    let new_wind = uniform.wind_displacement + frame_wind_delta;
+    // Bound the magnitude so f32 precision doesn't degrade modulo'd cloud-noise lookups
+    // after long sessions. 100 km is well above any noise tile period the shader uses.
+    const WIND_WRAP: f32 = 100_000.0;
+    uniform.wind_displacement = Vec3::new(
+        new_wind.x.rem_euclid(WIND_WRAP),
+        new_wind.y,
+        new_wind.z.rem_euclid(WIND_WRAP),
+    );
+    // The shader needs (current - previous) to equal exactly the per-frame drift,
+    // so derive previous from current minus this frame's delta — this stays correct
+    // across wrap boundaries.
+    uniform.previous_wind_displacement = uniform.wind_displacement - frame_wind_delta;
     uniform.cloud_heights = Vec4::new(
         config.cloud_bottom_height,
         config.cloud_top_height,
