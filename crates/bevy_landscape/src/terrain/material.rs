@@ -90,6 +90,21 @@ pub struct TerrainMaterialUniforms {
     pub slot_header: Vec4,
     /// Per-slot procedural blend data.  Unused entries have `visibility = 0`.
     pub slots: [MaterialSlotGpu; MAX_SHADER_MATERIAL_SLOTS],
+    /// Per-fragment fBM normal perturbation params (must mirror the GPU
+    /// detail-synthesis state so the noise field stays coherent):
+    ///   x = seed_x, y = seed_z, z = base_freq (= 2 / source_spacing),
+    ///   w = octave_count (as f32; 0 disables the perturbation).
+    pub synthesis_norm: Vec4,
+    /// Continuation of the above:
+    ///   x = lacunarity, y = gain, z = erosion_strength, w = normal_strength.
+    pub synthesis_norm2: Vec4,
+    /// Source-heightmap geometry, mirroring `SourceHeightmapState`:
+    ///   xy = world_origin, zw = world_extent.
+    /// Used by the fragment shader to derive the macro normal directly from
+    /// the source heightmap (avoids FD on the displacement clipmap, which
+    /// quantises per-texel and produces visible "flat" regions where the
+    /// fBM detail isn't masking the underlying jumps).
+    pub source_meta: Vec4,
 }
 
 // ---------------------------------------------------------------------------

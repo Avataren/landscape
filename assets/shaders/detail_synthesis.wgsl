@@ -29,8 +29,14 @@ fn pcg2d(v_in: vec2<u32>) -> vec2<u32> {
 }
 
 fn hash_grad(pi: vec2<i32>) -> vec2<f32> {
+    // Unit-length gradient: rejection-free polar mapping of one PCG sample.
+    // Using a uniform-square distribution biases gradients toward the lattice
+    // axes, which makes the cell grid visible whenever fewer octaves
+    // contribute (low gain, low octave count).  Wrapping the hash through an
+    // angle in [0, 2π) gives an isotropic gradient with no lattice artefact.
     let h = pcg2d(bitcast<vec2<u32>>(pi));
-    return vec2<f32>(h) * (2.0 * U32_TO_UNIT) - vec2<f32>(1.0);
+    let theta = f32(h.x) * U32_TO_UNIT * 6.2831853;
+    return vec2<f32>(cos(theta), sin(theta));
 }
 
 fn gradient_noise(p: vec2<f32>) -> f32 {

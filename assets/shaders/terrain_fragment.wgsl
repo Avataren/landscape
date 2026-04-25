@@ -49,6 +49,9 @@ struct TerrainParams {
     clip_levels: array<vec4<f32>, 32>,
     slot_header: vec4<f32>,                     // x = slot count
     slots:       array<MaterialSlotGpu, 8>,
+    synthesis_norm:  vec4<f32>,  // x=seed_x, y=seed_z, z=base_freq, w=octaves
+    synthesis_norm2: vec4<f32>,  // x=lacunarity, y=gain, z=erosion, w=normal_strength
+    source_meta:     vec4<f32>,  // xy = source world origin, zw = source world extent
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0)  var height_tex:       texture_2d_array<f32>;
@@ -64,6 +67,8 @@ struct TerrainParams {
 @group(#{MATERIAL_BIND_GROUP}) @binding(10) var pbr_normal_samp:  sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(11) var pbr_orm_arr:      texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(12) var pbr_orm_samp:     sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(13) var source_height_tex:  texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(14) var source_height_samp: sampler;
 
 // Must match TerrainVOut in terrain_vertex.wgsl.
 struct TerrainVOut {
@@ -542,13 +547,45 @@ fn hemisphere_ambient(world_normal: vec3<f32>, albedo: vec3<f32>) -> vec3<f32> {
 
 /// Sample height in world-space metres from the R32Float clipmap.
 /// The clipmap stores metres directly — no height_scale multiply needed.
+///
+/// Manual bilinear: R32Float is not in the `FLOAT32_FILTERABLE` set on most
+/// devices Bevy initialises by default, so `textureSample` with a linear
+/// sampler silently returns nearest texels.  That makes every clipmap texel
+/// a flat plateau and the FD-derived per-pixel normal then jumps at every
+/// texel boundary — visible as a hard grid all over the surface.  Doing the
+/// 2×2 lerp manually with `textureLoad` sidesteps the feature requirement.
 fn height_at_frag(lod: u32, xz: vec2<f32>) -> f32 {
-    let lvl        = terrain.clip_levels[lod];
-    let world_min  = terrain.world_bounds.xy;
-    let world_max  = terrain.world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
-    let sample_xz  = clamp(xz, world_min, world_max);
-    let uv         = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
-    return textureSample(height_tex, height_samp, uv, i32(lod)).r;
+    let lvl       = terrain.clip_levels[lod];
+    let world_min = terrain.world_bounds.xy;
+    let world_max = terrain.world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
+    let sample_xz = clamp(xz, world_min, world_max);
+
+    let dims_u    = textureDimensions(height_tex, 0);
+    let dims_i    = vec2<i32>(dims_u);
+    let dims_f    = vec2<f32>(dims_u);
+
+    // Toroidal layer UV → continuous texel coord with the standard −0.5
+    // half-texel shift that puts texel I's centre at uv = (I+0.5)/N.
+    let uv     = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
+    let coord  = uv * dims_f - vec2<f32>(0.5);
+    let i0_f   = floor(coord);
+    let f      = coord - i0_f;
+
+    // Repeat-wrap each integer corner into [0, dims).
+    let i0 = vec2<i32>(i0_f);
+    let x0 = ((i0.x % dims_i.x) + dims_i.x) % dims_i.x;
+    let y0 = ((i0.y % dims_i.y) + dims_i.y) % dims_i.y;
+    let x1 = (x0 + 1) % dims_i.x;
+    let y1 = (y0 + 1) % dims_i.y;
+
+    let h00 = textureLoad(height_tex, vec2<i32>(x0, y0), i32(lod), 0).r;
+    let h10 = textureLoad(height_tex, vec2<i32>(x1, y0), i32(lod), 0).r;
+    let h01 = textureLoad(height_tex, vec2<i32>(x0, y1), i32(lod), 0).r;
+    let h11 = textureLoad(height_tex, vec2<i32>(x1, y1), i32(lod), 0).r;
+
+    let top = mix(h00, h10, f.x);
+    let bot = mix(h01, h11, f.x);
+    return mix(top, bot, f.y);
 }
 
 fn pixel_normal(lod: u32, xz: vec2<f32>) -> vec3<f32> {
@@ -557,6 +594,176 @@ fn pixel_normal(lod: u32, xz: vec2<f32>) -> vec3<f32> {
     let h_r = height_at_frag(lod, xz + vec2<f32>(eps, 0.0));
     let h_u = height_at_frag(lod, xz + vec2<f32>(0.0, eps));
     return normalize(vec3<f32>(h - h_r, eps, h - h_u));
+}
+
+// ---------------------------------------------------------------------------
+// Source-heightmap macro normal
+// ---------------------------------------------------------------------------
+// FD on the displacement clipmap is unreliable as a "macro" normal: the
+// clipmap stores `base_h + amplitude * detail`, the per-texel jumps in `base_h`
+// (sampled bilinearly from a R16Unorm source) become visible whenever the fBM
+// detail is small or zero, and on devices without FLOAT32_FILTERABLE the
+// linear sampler degenerates to nearest, which makes every clipmap texel a
+// flat plateau.
+//
+// Sampling the source heightmap directly with a linear sampler (R16Unorm is
+// always filterable) gives a smooth macro normal that tracks the actual
+// terrain shape, independent of the displacement amplitude.  fBM detail can
+// then be added on top via fbm_perturb_normal without these artefacts.
+fn source_macro_normal(world_xz: vec2<f32>) -> vec3<f32> {
+    let origin = terrain.source_meta.xy;
+    let extent = terrain.source_meta.zw;
+    if extent.x <= 0.0 || extent.y <= 0.0 {
+        // No source-heightmap state yet — fall back to the legacy clipmap FD.
+        return pixel_normal(0u, world_xz);
+    }
+    let inv_extent = vec2<f32>(1.0) / extent;
+
+    // Source texel size in world space = 2 / base_freq (synthesis sets
+    // base_freq = 2 / source_spacing).
+    let base_freq = max(terrain.synthesis_norm.z, 1e-6);
+    let src_spacing = 2.0 / base_freq;
+    let eps_uv = vec2<f32>(src_spacing) * inv_extent;
+    let height_scale = terrain.height_scale;
+
+    let uv  = clamp((world_xz - origin) * inv_extent, vec2<f32>(0.0), vec2<f32>(1.0));
+    let h0n = textureSample(source_height_tex, source_height_samp, uv).r;
+    let hxn = textureSample(source_height_tex, source_height_samp,
+                            clamp(uv + vec2<f32>(eps_uv.x, 0.0), vec2<f32>(0.0), vec2<f32>(1.0))).r;
+    let hzn = textureSample(source_height_tex, source_height_samp,
+                            clamp(uv + vec2<f32>(0.0, eps_uv.y), vec2<f32>(0.0), vec2<f32>(1.0))).r;
+
+    let dh_dx = (hxn - h0n) * height_scale;       // metres per source-spacing
+    let dh_dz = (hzn - h0n) * height_scale;
+    return normalize(vec3<f32>(-dh_dx, src_spacing, -dh_dz));
+}
+
+// ---------------------------------------------------------------------------
+// Per-fragment fBM normal perturbation
+// ---------------------------------------------------------------------------
+// Re-evaluates the same fBM noise field used by the detail-synthesis compute
+// pass and uses its analytic-ish gradient to perturb the macro normal.
+// Decoupled from displacement amplitude so the surface keeps visible noise
+// shading even when the geometric displacement is zero.
+//
+// Hash + gradient noise must stay bit-identical with detail_synthesis.wgsl
+// and synthesis_cpu.rs — using a deterministic PCG so all three agree.
+// ---------------------------------------------------------------------------
+
+const FBM_GRADIENT_EPSILON: f32 = 0.37;
+const FBM_EROSION_RESPONSE: f32 = 3.5;
+const FBM_U32_TO_UNIT:      f32 = 2.3283064e-10;
+
+fn fbm_pcg2d(v_in: vec2<u32>) -> vec2<u32> {
+    var v = v_in * vec2<u32>(1664525u) + vec2<u32>(1013904223u);
+    v.x = v.x + v.y * 1664525u;
+    v.y = v.y + v.x * 1664525u;
+    v = v ^ (v >> vec2<u32>(16u));
+    v.x = v.x + v.y * 1664525u;
+    v.y = v.y + v.x * 1664525u;
+    v = v ^ (v >> vec2<u32>(16u));
+    return v;
+}
+
+fn fbm_hash_grad(pi: vec2<i32>) -> vec2<f32> {
+    // Unit-length gradient — see detail_synthesis.wgsl for rationale.
+    let h = fbm_pcg2d(bitcast<vec2<u32>>(pi));
+    let theta = f32(h.x) * FBM_U32_TO_UNIT * 6.2831853;
+    return vec2<f32>(cos(theta), sin(theta));
+}
+
+fn fbm_gradient_noise(p: vec2<f32>) -> f32 {
+    let pf = floor(p);
+    let i  = vec2<i32>(pf);
+    let f  = p - pf;
+    let u  = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    let a  = dot(fbm_hash_grad(i + vec2<i32>(0, 0)), f);
+    let b  = dot(fbm_hash_grad(i + vec2<i32>(1, 0)), f - vec2<f32>(1.0, 0.0));
+    let c  = dot(fbm_hash_grad(i + vec2<i32>(0, 1)), f - vec2<f32>(0.0, 1.0));
+    let d  = dot(fbm_hash_grad(i + vec2<i32>(1, 1)), f - vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+fn fbm_rot2(p: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(0.8 * p.x - 0.6 * p.y, 0.6 * p.x + 0.8 * p.y);
+}
+
+fn fbm_height(base: vec2<f32>, octaves: u32, lac: f32, g: f32, erosion: f32) -> f32 {
+    var value     = 0.0;
+    var amplitude = 0.5;
+    var pos       = base;
+    var acc_grad  = vec2<f32>(0.0, 0.0);
+    for (var i = 0u; i < octaves; i++) {
+        let n = fbm_gradient_noise(pos);
+        let grad = vec2<f32>(
+            fbm_gradient_noise(pos + vec2<f32>(FBM_GRADIENT_EPSILON, 0.0)) - n,
+            fbm_gradient_noise(pos + vec2<f32>(0.0, FBM_GRADIENT_EPSILON)) - n,
+        ) / FBM_GRADIENT_EPSILON;
+        acc_grad += grad * amplitude;
+        let atten = mix(1.0, 1.0 / (1.0 + dot(acc_grad, acc_grad) * FBM_EROSION_RESPONSE), erosion);
+        value    += amplitude * n * atten;
+        pos       = fbm_rot2(pos) * lac;
+        amplitude *= g;
+    }
+    return value;
+}
+
+// Perturb `macro_n` by the analytic gradient of the same fBM the displacement
+// compute pass uses.  Uses three fBM evaluations (centre + two world-space
+// neighbours) so the perturbation magnitude is in metres-per-metre, which is
+// then projected into the local tangent frame of `macro_n`.
+fn fbm_perturb_normal(macro_n: vec3<f32>, world_xz: vec2<f32>, slope_deg: f32) -> vec3<f32> {
+    let cfg_octaves = u32(terrain.synthesis_norm.w);
+    let strength = terrain.synthesis_norm2.w;
+    if cfg_octaves == 0u || strength <= 0.0 {
+        return macro_n;
+    }
+
+    let base_freq = terrain.synthesis_norm.z;
+    let lac       = terrain.synthesis_norm2.x;
+    let g         = terrain.synthesis_norm2.y;
+    let erosion   = terrain.synthesis_norm2.z;
+    let seed      = terrain.synthesis_norm.xy;
+
+    // Use at most 4 octaves for the lighting perturbation.  The displacement
+    // compute pass can keep its full octave count because the clipmap stores
+    // pre-evaluated heights and the FD step there matches its texel size, but
+    // fragment-shader FD over arbitrarily fine wavelengths aliases — adjacent
+    // pixels can land on opposite ends of an octave-5 wave and produce wildly
+    // different gradients, splattering noise into the lighting.
+    let octaves = min(cfg_octaves, 4u);
+
+    // FD step = half the wavelength of the finest contributing octave.  Below
+    // that, FD becomes a sample-rate aliasing operation; above it the
+    // perturbation gets blurry but never spiky.
+    let finest_freq = base_freq * pow(lac, f32(octaves) - 1.0);
+    let eps_ws = max(0.5 / finest_freq, 0.5);
+
+    let p0 = (world_xz + seed) * base_freq;
+    let px = (world_xz + vec2<f32>(eps_ws, 0.0) + seed) * base_freq;
+    let pz = (world_xz + vec2<f32>(0.0, eps_ws) + seed) * base_freq;
+
+    let h0 = fbm_height(p0, octaves, lac, g, erosion);
+    let hx = fbm_height(px, octaves, lac, g, erosion);
+    let hz = fbm_height(pz, octaves, lac, g, erosion);
+
+    // Cliff fade — keep rock faces shaded by their macro normal so the noise
+    // doesn't fight strong silhouettes.
+    let cliff_fade = 1.0 - smoothstep(40.0, 80.0, slope_deg);
+
+    // (hx - h0) is dimensionless fBM output; multiplying by `strength`
+    // (metres) gives metres of "virtual" displacement, then dividing by
+    // eps_ws (metres) yields a unitless slope that perturbs the normal.
+    let dh_dx = (hx - h0) * strength / eps_ws * cliff_fade;
+    let dh_dz = (hz - h0) * strength / eps_ws * cliff_fade;
+
+    // Build a local frame from macro_n and tilt it by the fBM gradient.
+    let ref_up   = select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0),
+                          abs(macro_n.y) < 0.99);
+    let tangent   = normalize(cross(ref_up, macro_n));
+    let bitangent = cross(macro_n, tangent);
+
+    return normalize(macro_n - tangent * dh_dx - bitangent * dh_dz);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -640,12 +847,22 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     let vertex_n   = normalize(in.world_normal);
     let coarse_lod = min(in.lod_level + 1u, u32(terrain.num_lod_levels) - 1u);
     let frag_xz    = in.world_pos.xz;
-    let n_macro    = shading_normal_blended(in.lod_level, coarse_lod, frag_xz, in.morph_alpha);
+    // Macro normal sourced directly from the source heightmap (linear sampled,
+    // R16Unorm is always filterable) — bypasses both the FD-on-clipmap quantisation
+    // and the FLOAT32_FILTERABLE feature requirement.
+    let n_macro_raw = source_macro_normal(frag_xz);
 
-    // Slope from the unperturbed macro normal drives zone weights so material
-    // blending is stable (not jittered by sub-texel detail noise).
-    let macro_ndotu = abs(dot(n_macro, vec3<f32>(0.0, 1.0, 0.0)));
+    // Slope drives material zone weights and stays based on the unperturbed
+    // macro normal — using the noisy fBM-perturbed normal here splatters rock
+    // material everywhere because the gradient varies wildly per-pixel.
+    let macro_ndotu = abs(dot(n_macro_raw, vec3<f32>(0.0, 1.0, 0.0)));
     let slope_deg   = degrees(acos(clamp(macro_ndotu, 0.0, 1.0)));
+
+    // Per-fragment fBM perturbation — only affects the *lighting* normal, not
+    // the slope used for material selection.  Decoupled from the geometric
+    // displacement amplitude so the surface keeps shading detail when
+    // amplitude is small.
+    let n_macro = fbm_perturb_normal(n_macro_raw, frag_xz, slope_deg);
 
     // Apply per-slot PBR normal maps on top of the macro normal.
     // Detail geometry is already captured in height_at_frag (the clipmap stores

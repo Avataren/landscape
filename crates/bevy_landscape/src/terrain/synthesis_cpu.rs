@@ -36,12 +36,13 @@ fn pcg2d(v_in: [u32; 2]) -> [u32; 2] {
 
 #[inline]
 fn hash_grad(pi: [i32; 2]) -> Vec2 {
-    // `i32 as u32` is a bit-cast (matches WGSL `bitcast<vec2<u32>>(vec2<i32>)`).
+    // Unit-length gradient — must match the WGSL `hash_grad` exactly.
+    // Mapping a single hash channel into an angle in [0, 2π) and emitting
+    // (cos θ, sin θ) gives an isotropic gradient with no lattice bias.
+    // `i32 as u32` is a bit-cast (matches WGSL `bitcast<vec2<u32>>`).
     let h = pcg2d([pi[0] as u32, pi[1] as u32]);
-    Vec2::new(
-        (h[0] as f32) * (2.0 * U32_TO_UNIT) - 1.0,
-        (h[1] as f32) * (2.0 * U32_TO_UNIT) - 1.0,
-    )
+    let theta = (h[0] as f32) * U32_TO_UNIT * std::f32::consts::TAU;
+    Vec2::new(theta.cos(), theta.sin())
 }
 
 #[inline]

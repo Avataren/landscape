@@ -27,6 +27,7 @@ use bevy::{
     prelude::*,
     window::{CursorGrabMode, CursorOptions, PrimaryWindow},
 };
+use bevy_egui::EguiContexts;
 use bevy_landscape::{
     LocalColliderState, ShowTerrainCollision, TerrainCamera, TerrainCollisionCache, TerrainConfig,
 };
@@ -332,10 +333,18 @@ fn shoot_cube(
     cam_q: Query<&Transform, With<TerrainCamera>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut contexts: EguiContexts,
     mut commands: Commands,
 ) {
     if !buttons.just_pressed(MouseButton::Left) {
         return;
+    }
+    // Don't fire when the click is consumed by the editor UI — clicking a
+    // toolbar button or slider would otherwise also launch a cube.
+    if let Ok(ctx) = contexts.ctx_mut() {
+        if ctx.wants_pointer_input() || ctx.is_pointer_over_area() {
+            return;
+        }
     }
     let Ok(cam_t) = cam_q.single() else { return };
 

@@ -70,6 +70,12 @@ pub struct DetailSynthesisConfig {
     pub slope_mask_threshold_deg: f32,
     /// Angular width (degrees) of the fade band above the threshold.
     pub slope_mask_falloff_deg: f32,
+    /// Per-fragment normal perturbation strength.  Independent of
+    /// `max_amplitude` so the surface can carry visible noise lighting even
+    /// when the displacement amplitude is zero (or vice versa).  Evaluated
+    /// directly in the fragment shader against the same fBM field used by
+    /// the displacement compute pass, so perturbed normals stay coherent.
+    pub normal_detail_strength: f32,
 }
 
 impl Default for DetailSynthesisConfig {
@@ -83,6 +89,7 @@ impl Default for DetailSynthesisConfig {
             enabled: true,
             slope_mask_threshold_deg: 40.0,
             slope_mask_falloff_deg: 20.0,
+            normal_detail_strength: 30.0,
         }
     }
 }
@@ -402,7 +409,7 @@ impl Node for DetailSynthesisNode {
 /// Runs in `Update`, after `update_terrain_view_state`.
 pub fn update_synthesis_state(
     clipmap_state: Res<TerrainClipmapState>,
-    materials: Res<Assets<TerrainMaterial>>,
+    mut materials: ResMut<Assets<TerrainMaterial>>,
     source_state: Option<Res<SourceHeightmapState>>,
     terrain_config: Res<TerrainConfig>,
     detail_config: Res<DetailSynthesisConfig>,
@@ -410,9 +417,39 @@ pub fn update_synthesis_state(
     mut commands: Commands,
 ) {
     let Some(source) = source_state else { return };
-    let Some(mat) = materials.get(&clipmap_state.material_handle) else { return };
+    let Some(mat) = materials.get_mut(&clipmap_state.material_handle) else {
+        return;
+    };
 
     let source_spacing = source.texel_size;
+    // Mirror the synthesis params into the material uniform so the fragment
+    // shader can re-evaluate the same fBM field for normal perturbation.
+    // octave_count = 0 (or normal_strength = 0) disables the perturbation.
+    let base_freq = 2.0 / source_spacing.max(0.001);
+    let normal_octaves = if detail_config.enabled && detail_config.normal_detail_strength > 0.0 {
+        6.0
+    } else {
+        0.0
+    };
+    mat.params.synthesis_norm = Vec4::new(
+        detail_config.seed.x,
+        detail_config.seed.y,
+        base_freq,
+        normal_octaves,
+    );
+    mat.params.synthesis_norm2 = Vec4::new(
+        detail_config.lacunarity,
+        detail_config.gain,
+        detail_config.erosion_strength,
+        detail_config.normal_detail_strength,
+    );
+    mat.params.source_meta = Vec4::new(
+        source.world_origin.x,
+        source.world_origin.y,
+        source.world_extent.x,
+        source.world_extent.y,
+    );
+    let mat = &*mat;
     let active_levels = mat.params.num_lod_levels as usize;
     let mut lod_params: Vec<PerLodSynthParams> = Vec::new();
 

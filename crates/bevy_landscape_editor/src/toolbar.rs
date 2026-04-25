@@ -2,7 +2,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 use bevy_landscape::{
-    DetailSynthesisConfig, MaterialLibrary, ReloadTerrainRequest, TerrainConfig, TerrainSourceDesc,
+    MaterialLibrary, ReloadTerrainRequest, TerrainConfig, TerrainSourceDesc,
     MAX_SUPPORTED_CLIPMAP_LEVELS,
 };
 use bevy_landscape_water::{WaterEnabled, WaterSettings};
@@ -15,6 +15,7 @@ use crate::level_io::LevelIoState;
 use crate::material_panel::MaterialPanelState;
 use crate::preferences::{AppPreferences, PreferencesDialog};
 use crate::sky_panel::SkyPanelState;
+use crate::synthesis_panel::SynthesisPanelState;
 
 /// Bundled water params — counts as a single system parameter.
 #[derive(SystemParam)]
@@ -23,13 +24,12 @@ pub(crate) struct WaterParams<'w> {
     enabled: Option<Res<'w, WaterEnabled>>,
 }
 
-/// Bundled read-only terrain resources + optional synthesis config.
+/// Bundled read-only terrain resources.
 #[derive(SystemParam)]
 pub(crate) struct TerrainParams<'w> {
     config: Res<'w, TerrainConfig>,
     desc: Res<'w, TerrainSourceDesc>,
     library: Res<'w, MaterialLibrary>,
-    synthesis: Option<ResMut<'w, DetailSynthesisConfig>>,
 }
 
 /// Bundled preferences params — counts as a single system parameter.
@@ -77,9 +77,10 @@ pub(crate) fn toolbar_system(
     mut cloud_panel: ResMut<CloudPanelState>,
     mut fog_panel: ResMut<FogPanelState>,
     mut generator_panel: ResMut<GeneratorPanelState>,
+    mut synthesis_panel: ResMut<SynthesisPanelState>,
     mut reload_tx: MessageWriter<ReloadTerrainRequest>,
     mut water: WaterParams<'_>,
-    mut terrain: TerrainParams<'_>,
+    terrain: TerrainParams<'_>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
 
@@ -161,6 +162,12 @@ pub(crate) fn toolbar_system(
                 if ui.checkbox(&mut generator_panel.open, "Terrain Generator").clicked() {
                     ui.close();
                 }
+                if ui
+                    .checkbox(&mut synthesis_panel.open, "Landscape Synthesis")
+                    .clicked()
+                {
+                    ui.close();
+                }
             });
 
             ui.separator();
@@ -222,39 +229,6 @@ pub(crate) fn toolbar_system(
                 }
             }
 
-            if let Some(ref mut syn) = terrain.synthesis {
-                ui.separator();
-                ui.checkbox(&mut syn.enabled, "Detail Synthesis")
-                    .on_hover_text("Enable/disable GPU fBM detail synthesis for fine clipmap LODs.");
-                if syn.enabled {
-                    ui.add_sized(
-                        [160.0, 0.0],
-                        egui::Slider::new(&mut syn.max_amplitude, 0.0_f32..=500.0)
-                            .suffix(" m")
-                            .text("Amplitude"),
-                    )
-                    .on_hover_text("Maximum fBM height residual in world-space metres.");
-                    ui.add_sized(
-                        [160.0, 0.0],
-                        egui::Slider::new(&mut syn.erosion_strength, 0.0_f32..=1.0)
-                            .text("Erosion"),
-                    )
-                    .on_hover_text("0 = plain fBM, 1 = gradient-attenuated erosion shaping.");
-                    ui.add_sized(
-                        [160.0, 0.0],
-                        egui::Slider::new(&mut syn.gain, 0.1_f32..=0.9)
-                            .text("Gain"),
-                    )
-                    .on_hover_text("fBM amplitude multiplier per octave (persistence).");
-                    ui.add_sized(
-                        [160.0, 0.0],
-                        egui::Slider::new(&mut syn.slope_mask_threshold_deg, 0.0_f32..=80.0)
-                            .suffix("°")
-                            .text("Slope cutoff"),
-                    )
-                    .on_hover_text("Slope angle above which fBM is suppressed (cliff faces).");
-                }
-            }
         });
     });
     Ok(())

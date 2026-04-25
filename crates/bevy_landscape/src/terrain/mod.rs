@@ -482,6 +482,11 @@ fn setup_terrain(
             // shader falls back to the built-in procedural palette (count == 0).
             slot_header: Vec4::ZERO,
             slots: [material::MaterialSlotGpu::default(); material::MAX_SHADER_MATERIAL_SLOTS],
+            // Filled in each frame by `update_synthesis_state` from the live
+            // DetailSynthesisConfig.  Zero octaves disables the perturbation.
+            synthesis_norm: Vec4::ZERO,
+            synthesis_norm2: Vec4::ZERO,
+            source_meta: Vec4::ZERO,
         },
     });
     patch_entities.material_handle = mat_handle.clone();

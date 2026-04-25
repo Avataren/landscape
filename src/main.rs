@@ -1,7 +1,6 @@
 mod player;
 
 use bevy::{
-    anti_alias::taa::TemporalAntiAliasing,
     camera::{Exposure, ScreenSpaceTransmissionQuality},
     core_pipeline::{prepass::DepthPrepass, tonemapping::Tonemapping},
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
@@ -157,8 +156,11 @@ fn setup_scene(
             ..default()
         },
         DepthPrepass,
-        TemporalAntiAliasing::default(),
-        Msaa::Off,
+        // 4× MSAA — switched away from TAA because the temporal accumulation
+        // smeared the high-frequency synthesis detail and ghosted around fast
+        // camera movement.  4× is the typical sweet spot for forward-rendered
+        // terrain on desktop GPUs.
+        Msaa::Sample4,
         Projection::Perspective(PerspectiveProjection {
             near: 0.1,
             // Terrain world is ~4 096 m across; 100 km gives comfortable margin

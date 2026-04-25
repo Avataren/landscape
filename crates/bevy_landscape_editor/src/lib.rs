@@ -7,6 +7,7 @@ mod level_io;
 mod material_panel;
 mod preferences;
 mod sky_panel;
+mod synthesis_panel;
 mod texture_browser;
 mod toolbar;
 
@@ -21,6 +22,7 @@ use level_io::LevelIoPlugin;
 use material_panel::MaterialPanelPlugin;
 use preferences::PreferencesPlugin;
 use sky_panel::SkyPanelPlugin;
+use synthesis_panel::SynthesisPanelPlugin;
 use texture_browser::TextureBrowserPlugin;
 
 pub use level_io::LevelIoState;
@@ -43,6 +45,7 @@ impl Plugin for LandscapeEditorPlugin {
             .add_plugins(LevelIoPlugin)
             .add_plugins(PreferencesPlugin)
             .add_plugins(SkyPanelPlugin)
+            .add_plugins(SynthesisPanelPlugin)
             .add_systems(EguiPrimaryContextPass, toolbar::toolbar_system);
     }
 }
