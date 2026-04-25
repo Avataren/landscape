@@ -1,9 +1,10 @@
 //! Tessendorf FFT ocean — main-world settings + spectrum init.
 //!
 //! Phillips spectrum H₀(k) and dispersion ω(k) are computed on CPU once per
-//! parameter change and uploaded into two storage textures.  The per-frame
-//! work (animation + IFFT + compose) lives entirely on the GPU; see
-//! `fft_ocean_compute.rs`.
+//! parameter change and uploaded into 2-D-array storage textures (one layer
+//! per cascade).  The per-frame work — animation + IFFT + compose — runs on
+//! the GPU and processes all cascades in parallel via the workgroup z axis.
+//! See `fft_ocean_compute.rs`.
 
 use bevy::{
     asset::RenderAssetUsages,
@@ -18,6 +19,17 @@ use bevy::{
 use crate::fft_ocean_compute::OceanFftComputePlugin;
 
 const G: f32 = 9.81;
+
+/// Number of FFT cascades.  Two is enough to mask the visible single-tile
+/// pattern: cascade 0 carries large-period swell, cascade 1 fine chop.
+pub const NUM_CASCADES: usize = 2;
+
+/// World-size multipliers per cascade.  Cascade 0 = master tile size,
+/// cascade 1 = master / 4.  Indexed by cascade.
+pub const CASCADE_WORLD_FACTORS: [f32; NUM_CASCADES] = [1.0, 0.25];
+
+/// Phillips amplitude weight per cascade.  Larger cascades dominate.
+pub const CASCADE_AMP_WEIGHTS: [f32; NUM_CASCADES] = [1.0, 0.55];
 
 const STORAGE_USAGE: TextureUsages = TextureUsages::from_bits_retain(
     TextureUsages::COPY_SRC.bits()
@@ -38,17 +50,20 @@ pub struct OceanFftSettings {
     pub enabled: bool,
     /// Grid resolution N (must be a power of two; we clamp to {64, 128, 256}).
     pub size: u32,
-    /// World-space tile size in metres (texture period when sampled).
+    /// Master cascade-0 tile size in metres.  Cascade k uses
+    /// `world_size * CASCADE_WORLD_FACTORS[k]`.
     pub world_size: f32,
-    /// Wind speed in m/s — drives Phillips L = V²/g.
+    /// Wind speed in m/s — drives Phillips L = V²/g.  Shared across cascades.
     pub wind_speed: f32,
-    /// Wind direction in world XZ.
+    /// Wind direction in world XZ.  Shared across cascades.
     pub wind_direction: Vec2,
-    /// Phillips spectrum scalar amplitude.
+    /// Phillips spectrum scalar amplitude.  Distributed across cascades by
+    /// `CASCADE_AMP_WEIGHTS`.
     pub amplitude: f32,
     /// Horizontal-displacement (choppy) factor.  ≥ 1 produces foldover (foam).
     pub choppy: f32,
-    /// Hash seed for the Gaussian noise that randomises H₀ phases.
+    /// Hash seed.  Each cascade uses `seed XOR (k * GOLDEN_RATIO_INT)` so they
+    /// don't share random phases.
     pub seed: u32,
     /// Output strength in the shader: 1 = full FFT, 0 = pure Gerstner.
     pub strength: f32,
@@ -59,10 +74,13 @@ impl Default for OceanFftSettings {
         Self {
             enabled: false,
             size: 128,
-            world_size: 128.0,
+            world_size: 256.0,
             wind_speed: 12.0,
             wind_direction: Vec2::new(1.0, 0.4),
-            amplitude: 4.0e-3,
+            // The 1/N² IFFT normalisation crushes spectral magnitudes hard
+            // at small tile sizes, so this defaults much larger than the
+            // reference papers' values.  Tune via the panel slider.
+            amplitude: 200.0,
             choppy: 0.85,
             seed: 0xC0FFEE,
             strength: 1.0,
@@ -79,24 +97,21 @@ impl Default for OceanFftSettings {
 pub struct OceanFftBuffers {
     pub n: u32,
     pub log_n: u32,
-    pub world_size: f32,
-    /// (H₀.re, H₀.im, conj(H₀(-k)).re, conj(H₀(-k)).im) — written once on CPU.
+    /// Per-cascade tile size in metres.  Indexed by cascade.
+    pub cascade_world_sizes: [f32; NUM_CASCADES],
+    /// (H₀.re, H₀.im, conj(H₀(-k)).re, conj(H₀(-k)).im) per cascade layer.
     pub init_h0: Handle<Image>,
-    /// (ω, kx, kz, _) — written once on CPU.
+    /// (ω, kx, kz, _) per cascade layer.
     pub init_omega_kvec: Handle<Image>,
-    /// (h.re, h.im, dx.re, dx.im) packed.  Storage RW.
+    /// (h.re, h.im, dx.re, dx.im) packed per cascade layer.
     pub freq_a: Handle<Image>,
     pub freq_b: Handle<Image>,
-    /// (dz.re, dz.im, _, _).  Storage RW.
+    /// (dz.re, dz.im, _, _) per cascade layer.
     pub freq_dz_a: Handle<Image>,
     pub freq_dz_b: Handle<Image>,
-    /// Final (h, dx, dz, jacobian) sampled by the water material.
+    /// Final (h, dx, dz, jacobian) per cascade layer.  Sampled by the water
+    /// material via a `texture_2d_array` binding.
     pub displacement: Handle<Image>,
-    /// Sequence of (pingpong_after_animate, pingpong_after_horizontal,
-    /// pingpong_after_vertical).  pingpong=0 means current data is in *_a,
-    /// 1 means *_b.  After log_n butterfly passes the slot flips iff
-    /// log_n is odd.
-    pub final_pingpong: u32,
 }
 
 impl OceanFftBuffers {
@@ -128,10 +143,7 @@ impl Plugin for OceanFftPlugin {
             .add_plugins(ExtractResourcePlugin::<OceanFftSettings>::default())
             .add_plugins(OceanFftComputePlugin)
             .add_systems(PreStartup, setup_ocean_fft)
-            .add_systems(
-                Update,
-                (rebuild_on_settings_change, update_displacement_handle).chain(),
-            );
+            .add_systems(Update, rebuild_on_settings_change);
     }
 }
 
@@ -175,72 +187,87 @@ fn rebuild_on_settings_change(
     *buffers = build_buffers(&settings, &mut images);
 }
 
-/// Notify the water material whenever the displacement handle (potentially)
-/// changes after a rebuild — handled in `lib.rs` via change detection on
-/// `OceanFftBuffers`.
-fn update_displacement_handle(_buffers: Res<OceanFftBuffers>) {}
-
 fn build_buffers(settings: &OceanFftSettings, images: &mut Assets<Image>) -> OceanFftBuffers {
     let n_raw = settings.size.max(8).next_power_of_two();
     let n = n_raw.clamp(64, 1024);
     let log_n = n.trailing_zeros();
-    let total = (n * n) as usize;
-    let world_size = settings.world_size.max(1.0);
+    let total_per_layer = (n * n) as usize;
+    let master_size = settings.world_size.max(1.0);
 
-    let (h0_bytes, omega_bytes) = build_spectrum_data(settings, n, world_size);
+    let mut cascade_world_sizes = [0.0_f32; NUM_CASCADES];
+    for k in 0..NUM_CASCADES {
+        cascade_world_sizes[k] = master_size * CASCADE_WORLD_FACTORS[k];
+    }
 
-    let init_h0 = images.add(make_storage_image(
+    // Build H₀ + omega data for each cascade and concatenate the layers.
+    let mut h0_bytes = Vec::with_capacity(total_per_layer * 16 * NUM_CASCADES);
+    let mut omega_bytes = Vec::with_capacity(total_per_layer * 16 * NUM_CASCADES);
+    for k in 0..NUM_CASCADES {
+        let cascade_size = cascade_world_sizes[k];
+        let amp = settings.amplitude * CASCADE_AMP_WEIGHTS[k];
+        // Decorrelate cascades' random phases — golden-ratio multiplier so
+        // each layer sees an unrelated noise stream.
+        let seed = settings
+            .seed
+            .wrapping_add((k as u32).wrapping_mul(0x9E37_79B9));
+        let (h0, omega) = build_spectrum_data(
+            settings,
+            n,
+            cascade_size,
+            amp,
+            seed,
+        );
+        h0_bytes.extend(h0);
+        omega_bytes.extend(omega);
+    }
+
+    let init_h0 = images.add(make_storage_array(
         n,
         TextureFormat::Rgba32Float,
         h0_bytes,
         false,
     ));
-    let init_omega_kvec = images.add(make_storage_image(
+    let init_omega_kvec = images.add(make_storage_array(
         n,
         TextureFormat::Rgba32Float,
         omega_bytes,
         false,
     ));
-    let freq_a = images.add(make_storage_image(
+    let freq_a = images.add(make_storage_array(
         n,
         TextureFormat::Rgba32Float,
-        zero_bytes(total * 16),
+        zero_bytes(total_per_layer * 16 * NUM_CASCADES),
         false,
     ));
-    let freq_b = images.add(make_storage_image(
+    let freq_b = images.add(make_storage_array(
         n,
         TextureFormat::Rgba32Float,
-        zero_bytes(total * 16),
+        zero_bytes(total_per_layer * 16 * NUM_CASCADES),
         false,
     ));
-    let freq_dz_a = images.add(make_storage_image(
+    let freq_dz_a = images.add(make_storage_array(
         n,
         TextureFormat::Rgba32Float,
-        zero_bytes(total * 16),
+        zero_bytes(total_per_layer * 16 * NUM_CASCADES),
         false,
     ));
-    let freq_dz_b = images.add(make_storage_image(
+    let freq_dz_b = images.add(make_storage_array(
         n,
         TextureFormat::Rgba32Float,
-        zero_bytes(total * 16),
+        zero_bytes(total_per_layer * 16 * NUM_CASCADES),
         false,
     ));
-    let displacement = images.add(make_storage_image(
+    let displacement = images.add(make_storage_array(
         n,
         TextureFormat::Rgba16Float,
-        zero_bytes(total * 8),
+        zero_bytes(total_per_layer * 8 * NUM_CASCADES),
         true,
     ));
-
-    // After 2·log_n butterfly passes starting from freq_a, the final data is
-    // in freq_a iff (2·log_n) is even — which is always true.  So compose
-    // reads from *_a.
-    let final_pingpong = 0u32;
 
     OceanFftBuffers {
         n,
         log_n,
-        world_size,
+        cascade_world_sizes,
         init_h0,
         init_omega_kvec,
         freq_a,
@@ -248,7 +275,6 @@ fn build_buffers(settings: &OceanFftSettings, images: &mut Assets<Image>) -> Oce
         freq_dz_a,
         freq_dz_b,
         displacement,
-        final_pingpong,
     }
 }
 
@@ -256,7 +282,7 @@ fn zero_bytes(len: usize) -> Vec<u8> {
     vec![0u8; len]
 }
 
-fn make_storage_image(
+fn make_storage_array(
     n: u32,
     format: TextureFormat,
     data: Vec<u8>,
@@ -266,7 +292,7 @@ fn make_storage_image(
         Extent3d {
             width: n,
             height: n,
-            depth_or_array_layers: 1,
+            depth_or_array_layers: NUM_CASCADES as u32,
         },
         TextureDimension::D2,
         data,
@@ -297,6 +323,8 @@ fn build_spectrum_data(
     settings: &OceanFftSettings,
     n: u32,
     world_size: f32,
+    amplitude: f32,
+    seed: u32,
 ) -> (Vec<u8>, Vec<u8>) {
     let total = (n * n) as usize;
     let wind_speed = settings.wind_speed.max(0.001);
@@ -305,9 +333,8 @@ fn build_spectrum_data(
     let small_l = (world_size / n as f32) * 0.5;
     let dk = std::f32::consts::TAU / world_size;
 
-    let mut rng = SimpleLcg::new(settings.seed);
+    let mut rng = SimpleLcg::new(seed);
 
-    // First pass: generate H₀ at every k.
     let mut h0_re = vec![0.0_f32; total];
     let mut h0_im = vec![0.0_f32; total];
     let mut omega = vec![0.0_f32; total];
@@ -334,16 +361,12 @@ fn build_spectrum_data(
             kz_arr[idx] = kz;
 
             if k_mag < 1.0e-6 {
-                h0_re[idx] = 0.0;
-                h0_im[idx] = 0.0;
-                omega[idx] = 0.0;
                 continue;
             }
             let k_hat_dot_w = (kx * wind_dir.x + kz * wind_dir.y) / k_mag;
             let directional = k_hat_dot_w * k_hat_dot_w;
             let k_l = k_mag * big_l;
-            let phillips = settings.amplitude * (-1.0 / (k_l * k_l)).exp()
-                / k_mag.powi(4)
+            let phillips = amplitude * (-1.0 / (k_l * k_l)).exp() / k_mag.powi(4)
                 * directional
                 * (-(k_mag * small_l).powi(2)).exp();
             let scale = (phillips.max(0.0) * 0.5).sqrt();
@@ -354,13 +377,12 @@ fn build_spectrum_data(
         }
     }
 
-    // Second pass: pack (H₀.re, H₀.im, conj(H₀(-k)).re, conj(H₀(-k)).im).
+    // Pack: (H₀.re, H₀.im, conj(H₀(-k)).re, conj(H₀(-k)).im) | (ω, kx, kz, 0).
     let mut h0_packed = Vec::with_capacity(total * 16);
     let mut omega_packed = Vec::with_capacity(total * 16);
     for j in 0..n {
         for i in 0..n {
             let idx = (j * n + i) as usize;
-            // -k → ((N - i) mod N, (N - j) mod N).
             let ni = (n - i) % n;
             let nj = (n - j) % n;
             let nidx = (nj * n + ni) as usize;
@@ -374,7 +396,6 @@ fn build_spectrum_data(
             }
         }
     }
-
     (h0_packed, omega_packed)
 }
 

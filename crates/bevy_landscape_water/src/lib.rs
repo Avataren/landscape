@@ -601,7 +601,16 @@ fn rebuild_water_tiles(
             fft_displacement_texture: fft_state
                 .map(|s| s.displacement.clone())
                 .unwrap_or_default(),
-            fft_world_size: fft_state.map(|s| s.world_size).unwrap_or(128.0),
+            fft_cascade_world_sizes: fft_state
+                .map(|s| {
+                    Vec4::new(
+                        s.cascade_world_sizes.first().copied().unwrap_or(0.0),
+                        s.cascade_world_sizes.get(1).copied().unwrap_or(0.0),
+                        s.cascade_world_sizes.get(2).copied().unwrap_or(0.0),
+                        s.cascade_world_sizes.get(3).copied().unwrap_or(0.0),
+                    )
+                })
+                .unwrap_or_else(|| Vec4::new(256.0, 64.0, 0.0, 0.0)),
             fft_size: fft_settings.map(|s| s.size).unwrap_or(128),
             fft_strength: match (fft_settings, fft_state) {
                 (Some(s), Some(_)) if s.enabled => s.strength,
@@ -1001,7 +1010,12 @@ fn sync_water_materials(
         if fft_changed {
             if let (Some(state), Some(settings)) = (fft_state.as_ref(), fft_settings.as_ref()) {
                 mat.extension.fft_displacement_texture = state.displacement.clone();
-                mat.extension.fft_world_size = state.world_size;
+                mat.extension.fft_cascade_world_sizes = Vec4::new(
+                    state.cascade_world_sizes.first().copied().unwrap_or(0.0),
+                    state.cascade_world_sizes.get(1).copied().unwrap_or(0.0),
+                    state.cascade_world_sizes.get(2).copied().unwrap_or(0.0),
+                    state.cascade_world_sizes.get(3).copied().unwrap_or(0.0),
+                );
                 mat.extension.fft_size = settings.size;
                 mat.extension.fft_strength = if settings.enabled { settings.strength } else { 0.0 };
             } else {

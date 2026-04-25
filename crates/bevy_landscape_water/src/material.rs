@@ -76,15 +76,16 @@ pub struct WaterMaterial {
     #[reflect(ignore)]
     pub terrain_clip_levels: [Vec4; MAX_SUPPORTED_CLIPMAP_LEVELS],
 
-    /// Tessendorf FFT displacement texture: RGBA32Float (h, dx, dz, jacobian),
-    /// tiled with period `fft_world_size` in world XZ.
-    #[texture(103, visibility(vertex, fragment))]
+    /// Tessendorf FFT displacement texture: RGBA16Float (h, dx, dz, jacobian),
+    /// 2-D array with one layer per cascade.  Each cascade tiles at its own
+    /// `cascade_world_sizes[k]` period in world XZ.
+    #[texture(103, visibility(vertex, fragment), dimension = "2d_array")]
     #[sampler(104, visibility(vertex, fragment))]
     #[reflect(ignore)]
     pub fft_displacement_texture: Handle<Image>,
-    /// World-space tile size of the FFT texture (metres).
+    /// Per-cascade tile size in metres (xy = cascade 0/1, zw reserved).
     #[reflect(ignore)]
-    pub fft_world_size: f32,
+    pub fft_cascade_world_sizes: Vec4,
     /// Mix strength: 0 = ignore FFT (legacy Gerstner only), 1 = full FFT.
     #[reflect(ignore)]
     pub fft_strength: f32,
@@ -122,7 +123,7 @@ impl Default for WaterMaterial {
             terrain_num_levels: 0,
             terrain_clip_levels: [Vec4::ZERO; MAX_SUPPORTED_CLIPMAP_LEVELS],
             fft_displacement_texture: Handle::default(),
-            fft_world_size: 128.0,
+            fft_cascade_world_sizes: Vec4::new(256.0, 64.0, 0.0, 0.0),
             fft_strength: 0.0,
             fft_size: 128,
         }
@@ -157,8 +158,13 @@ pub struct WaterMaterialUniform {
     pub optical_params: Vec4,
     pub extra_params: Vec4,
     pub terrain_params: Vec4,
-    /// x = fft_world_size_inv, y = fft_strength, z = reserved, w = reserved
+    /// x = fft_strength, y = 1/N (UV per texel), zw = reserved.
     pub fft_params: Vec4,
+    /// Per-cascade tile size in metres (xy = cascade 0/1, zw reserved).
+    pub fft_cascade_world_sizes: Vec4,
+    /// 1.0 / fft_cascade_world_sizes (matched components).  Pre-divided to
+    /// save divides on the fragment shader hot path.
+    pub fft_cascade_inv_world_sizes: Vec4,
     pub terrain_clip_levels: [Vec4; MAX_SUPPORTED_CLIPMAP_LEVELS],
 }
 
@@ -196,10 +202,17 @@ impl AsBindGroupShaderType<WaterMaterialUniform> for WaterMaterial {
                 0.0,
             ),
             fft_params: Vec4::new(
-                1.0 / self.fft_world_size.max(1.0),
                 self.fft_strength,
                 1.0 / self.fft_size.max(1) as f32,
                 0.0,
+                0.0,
+            ),
+            fft_cascade_world_sizes: self.fft_cascade_world_sizes,
+            fft_cascade_inv_world_sizes: Vec4::new(
+                if self.fft_cascade_world_sizes.x > 0.0 { 1.0 / self.fft_cascade_world_sizes.x } else { 0.0 },
+                if self.fft_cascade_world_sizes.y > 0.0 { 1.0 / self.fft_cascade_world_sizes.y } else { 0.0 },
+                if self.fft_cascade_world_sizes.z > 0.0 { 1.0 / self.fft_cascade_world_sizes.z } else { 0.0 },
+                if self.fft_cascade_world_sizes.w > 0.0 { 1.0 / self.fft_cascade_world_sizes.w } else { 0.0 },
             ),
             terrain_clip_levels: self.terrain_clip_levels,
         }

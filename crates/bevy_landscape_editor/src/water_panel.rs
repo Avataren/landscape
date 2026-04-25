@@ -81,12 +81,12 @@ pub(crate) fn water_panel_system(
                         ui.end_row();
 
                         ui.label("Spectrum amplitude").on_hover_text(
-                            "Phillips A.  Logarithmic — small numbers, big visual range.",
+                            "Phillips A — overall wave-height knob.  Logarithmic.",
                         );
                         ui.add(
-                            egui::Slider::new(&mut fft.amplitude, 1.0e-5..=1.0e-1)
+                            egui::Slider::new(&mut fft.amplitude, 1.0e-3..=10_000.0)
                                 .logarithmic(true)
-                                .fixed_decimals(6),
+                                .fixed_decimals(3),
                         );
                         ui.end_row();
 

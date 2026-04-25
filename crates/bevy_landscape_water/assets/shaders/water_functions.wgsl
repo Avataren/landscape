@@ -173,13 +173,18 @@ fn water_macro_noise_scale() -> f32 {
     return max(material.extra_params.w, 1.0);
 }
 
-fn fft_world_size_inv() -> f32 {
+fn fft_strength() -> f32 {
     return material.fft_params.x;
 }
 
-fn fft_strength() -> f32 {
-    return material.fft_params.y;
+fn fft_cascade_inv_world_size(cascade: i32) -> f32 {
+    if cascade == 0 { return material.fft_cascade_inv_world_sizes.x; }
+    if cascade == 1 { return material.fft_cascade_inv_world_sizes.y; }
+    if cascade == 2 { return material.fft_cascade_inv_world_sizes.z; }
+    return material.fft_cascade_inv_world_sizes.w;
 }
+
+const FFT_NUM_CASCADES: i32 = 2;
 
 // Returns (height, dx, dz, jacobian) sampled from the Tessendorf FFT
 // displacement texture.  World XZ is converted to UV by multiplying with
@@ -195,13 +200,26 @@ fn sample_fft_displacement(world_xz: vec2<f32>) -> vec4<f32> {
     if strength <= 0.0 {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
-    let uv = world_xz * fft_world_size_inv();
-    return textureSampleLevel(
-        fft_displacement_tex,
-        fft_displacement_samp,
-        uv,
-        0.0,
-    );
+    var sum_h_dx_dz = vec3<f32>(0.0, 0.0, 0.0);
+    // The Jacobian is multiplicative — start at 1 and multiply each
+    // cascade's local J onto it.
+    var jac = 1.0;
+    for (var k: i32 = 0; k < FFT_NUM_CASCADES; k = k + 1) {
+        let inv_l = fft_cascade_inv_world_size(k);
+        if inv_l <= 0.0 {
+            continue;
+        }
+        let s = textureSampleLevel(
+            fft_displacement_tex,
+            fft_displacement_samp,
+            world_xz * inv_l,
+            k,
+            0.0,
+        );
+        sum_h_dx_dz += s.xyz;
+        jac = jac * s.w;
+    }
+    return vec4<f32>(sum_h_dx_dz, jac);
 #else
     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
 #endif
@@ -215,19 +233,25 @@ fn fft_height_slope(world_xz: vec2<f32>) -> vec2<f32> {
     if strength <= 0.0 {
         return vec2<f32>(0.0, 0.0);
     }
-    let uv_per_world = fft_world_size_inv();
-    let uv_per_texel = material.fft_params.z;
-    let uv = world_xz * uv_per_world;
-    let world_per_texel = uv_per_texel / max(uv_per_world, 1.0e-6);
-    let inv_2dx = 1.0 / max(2.0 * world_per_texel, 1.0e-6);
-
+    let uv_per_texel = material.fft_params.y;
     let off_u = vec2<f32>(uv_per_texel, 0.0);
     let off_v = vec2<f32>(0.0, uv_per_texel);
-    let h_e = textureSampleLevel(fft_displacement_tex, fft_displacement_samp, uv + off_u, 0.0).x;
-    let h_w = textureSampleLevel(fft_displacement_tex, fft_displacement_samp, uv - off_u, 0.0).x;
-    let h_n = textureSampleLevel(fft_displacement_tex, fft_displacement_samp, uv + off_v, 0.0).x;
-    let h_s = textureSampleLevel(fft_displacement_tex, fft_displacement_samp, uv - off_v, 0.0).x;
-    return vec2<f32>(h_e - h_w, h_n - h_s) * inv_2dx;
+    var slope = vec2<f32>(0.0, 0.0);
+    for (var k: i32 = 0; k < FFT_NUM_CASCADES; k = k + 1) {
+        let inv_l = fft_cascade_inv_world_size(k);
+        if inv_l <= 0.0 {
+            continue;
+        }
+        let world_per_texel = uv_per_texel / inv_l;
+        let inv_2dx = 1.0 / max(2.0 * world_per_texel, 1.0e-6);
+        let uv = world_xz * inv_l;
+        let h_e = textureSampleLevel(fft_displacement_tex, fft_displacement_samp, uv + off_u, k, 0.0).x;
+        let h_w = textureSampleLevel(fft_displacement_tex, fft_displacement_samp, uv - off_u, k, 0.0).x;
+        let h_n = textureSampleLevel(fft_displacement_tex, fft_displacement_samp, uv + off_v, k, 0.0).x;
+        let h_s = textureSampleLevel(fft_displacement_tex, fft_displacement_samp, uv - off_v, k, 0.0).x;
+        slope += vec2<f32>(h_e - h_w, h_n - h_s) * inv_2dx;
+    }
+    return slope;
 #else
     return vec2<f32>(0.0, 0.0);
 #endif

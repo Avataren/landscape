@@ -31,7 +31,7 @@ use bevy::{
         Render, RenderApp, RenderSystems,
     },
 };
-use crate::fft_ocean::{OceanFftBuffers, OceanFftSettings};
+use crate::fft_ocean::{OceanFftBuffers, OceanFftSettings, NUM_CASCADES};
 
 const WG: u32 = 8;
 
@@ -49,10 +49,7 @@ pub struct PassParams {
     pub pingpong: u32,
     pub choppy: f32,
     pub time_seconds: f32,
-    pub world_size: f32,
-    pub _pad0: f32,
-    pub _pad1: f32,
-    pub _pad2: f32,
+    pub cascade_world_sizes: Vec4,
 }
 
 // ---------------------------------------------------------------------------
@@ -67,7 +64,13 @@ pub(crate) struct OceanFftPassUniform {
 }
 
 #[derive(Resource)]
-pub(crate) struct OceanFftBindGroup(pub BindGroup, pub u32);
+pub(crate) struct OceanFftBindGroup {
+    pub group: BindGroup,
+    /// Asset-id fingerprint of the seven textures bound.  Bind group is
+    /// rebuilt when any of them changes (e.g. spectrum-rebuild creates new
+    /// images for wind/amplitude/world_size changes).
+    pub fingerprint: [bevy::asset::AssetId<Image>; 7],
+}
 
 #[derive(Resource)]
 pub(crate) struct OceanFftPipeline {
@@ -85,7 +88,7 @@ impl FromWorld for OceanFftPipeline {
             ty: BindingType::StorageTexture {
                 access: StorageTextureAccess::ReadWrite,
                 format: TextureFormat::Rgba32Float,
-                view_dimension: TextureViewDimension::D2,
+                view_dimension: TextureViewDimension::D2Array,
             },
             count: None,
         };
@@ -95,7 +98,7 @@ impl FromWorld for OceanFftPipeline {
             ty: BindingType::StorageTexture {
                 access: StorageTextureAccess::ReadOnly,
                 format: TextureFormat::Rgba32Float,
-                view_dimension: TextureViewDimension::D2,
+                view_dimension: TextureViewDimension::D2Array,
             },
             count: None,
         };
@@ -105,7 +108,7 @@ impl FromWorld for OceanFftPipeline {
             ty: BindingType::StorageTexture {
                 access: StorageTextureAccess::WriteOnly,
                 format: TextureFormat::Rgba16Float,
-                view_dimension: TextureViewDimension::D2,
+                view_dimension: TextureViewDimension::D2Array,
             },
             count: None,
         };
@@ -177,9 +180,15 @@ fn prepare_pass_uniform(
     };
     let n = buf.n;
     let log_n = buf.log_n;
-    let world_size = buf.world_size;
     let choppy = settings.choppy;
     let t = time.elapsed_secs();
+    let cw = buf.cascade_world_sizes.as_slice();
+    let cascade_world_sizes = Vec4::new(
+        cw.first().copied().unwrap_or(0.0),
+        cw.get(1).copied().unwrap_or(0.0),
+        cw.get(2).copied().unwrap_or(0.0),
+        cw.get(3).copied().unwrap_or(0.0),
+    );
 
     // Slot list:
     //   0                        animate                (writes freq_a)
@@ -200,7 +209,7 @@ fn prepare_pass_uniform(
         pingpong: 0,
         choppy,
         time_seconds: t,
-        world_size,
+        cascade_world_sizes,
         ..Default::default()
     });
     uniform.indices.push(idx);
@@ -218,7 +227,7 @@ fn prepare_pass_uniform(
             pingpong,
             choppy,
             time_seconds: t,
-            world_size,
+            cascade_world_sizes,
             ..Default::default()
         });
         uniform.indices.push(idx);
@@ -234,7 +243,7 @@ fn prepare_pass_uniform(
             pingpong,
             choppy,
             time_seconds: t,
-            world_size,
+            cascade_world_sizes,
             ..Default::default()
         });
         uniform.indices.push(idx);
@@ -250,7 +259,7 @@ fn prepare_pass_uniform(
         pingpong,
         choppy,
         time_seconds: t,
-        world_size,
+        cascade_world_sizes,
         ..Default::default()
     });
     uniform.indices.push(idx);
@@ -275,7 +284,7 @@ fn prepare_bind_group(
     let Some(buf) = buffers else {
         return;
     };
-    let needed = [
+    let handles = [
         &buf.init_h0,
         &buf.init_omega_kvec,
         &buf.freq_a,
@@ -284,7 +293,7 @@ fn prepare_bind_group(
         &buf.freq_dz_b,
         &buf.displacement,
     ];
-    let images = needed
+    let images = handles
         .iter()
         .map(|h| images.get(*h))
         .collect::<Option<Vec<&GpuImage>>>();
@@ -292,10 +301,11 @@ fn prepare_bind_group(
         return;
     };
 
+    let fingerprint: [bevy::asset::AssetId<Image>; 7] = std::array::from_fn(|i| handles[i].id());
     if let Some(existing) = existing.as_ref() {
-        if existing.1 == buf.n {
-            // Bind group already valid for this resolution; the uniform's
-            // dynamic offsets are still good since the buffer was updated.
+        if existing.fingerprint == fingerprint {
+            // Same set of textures — bind group is still valid.  The uniform
+            // buffer was updated this frame in `prepare_pass_uniform`.
             return;
         }
     }
@@ -343,7 +353,10 @@ fn prepare_bind_group(
         &pipeline_cache.get_bind_group_layout(&pipeline.layout),
         &entries,
     );
-    commands.insert_resource(OceanFftBindGroup(bg, buf.n));
+    commands.insert_resource(OceanFftBindGroup {
+        group: bg,
+        fingerprint,
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -435,6 +448,9 @@ impl Node for OceanFftNode {
         let n = buffers.n;
         let wg_x = n.div_ceil(WG);
         let wg_y = n.div_ceil(WG);
+        // The shader uses gid.z as the cascade index — dispatch one z slot
+        // per cascade so all cascades run in parallel within each pass.
+        let wg_z = NUM_CASCADES as u32;
         let log_n = buffers.log_n;
         let indices = &uniform.indices;
 
@@ -449,9 +465,9 @@ impl Node for OceanFftNode {
         let dispatch = |pass: &mut bevy::render::render_resource::ComputePass<'_>,
                         pl: &bevy::render::render_resource::ComputePipeline,
                         offset: u32| {
-            pass.set_bind_group(0, &bg.0, &[offset]);
+            pass.set_bind_group(0, &bg.group, &[offset]);
             pass.set_pipeline(pl);
-            pass.dispatch_workgroups(wg_x, wg_y, 1);
+            pass.dispatch_workgroups(wg_x, wg_y, wg_z);
         };
 
         // animate
