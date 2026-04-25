@@ -90,6 +90,11 @@ pub struct TerrainResidency {
     /// Set when eviction removed cached CPU height data and clipmap layers must
     /// be rebuilt from fallback before resident tiles are re-applied.
     pub clipmap_needs_rebuild: bool,
+    /// Maps each tile key to the clipmap ring levels (texture array layers) it
+    /// should be written to.  A single source tile (e.g. an L2 tile) may serve
+    /// multiple coarse rings when lod0_mesh_spacing != world_scale.
+    /// Rebuilt every frame by update_required_tiles.
+    pub tile_key_to_rings: HashMap<TileKey, Vec<u8>>,
 }
 
 impl TerrainResidency {

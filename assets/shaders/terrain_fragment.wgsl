@@ -46,7 +46,7 @@ struct TerrainParams {
     world_bounds:       vec4<f32>,
     bounds_fade:        vec4<f32>, // x = fade dist, y = use_macro_color, z = flip_v, w = show_wireframe
     debug_flags:        vec4<f32>, // x = show_normals_only, yzw reserved
-    clip_levels: array<vec4<f32>, 16>,
+    clip_levels: array<vec4<f32>, 32>,
     slot_header: vec4<f32>,                     // x = slot count
     slots:       array<MaterialSlotGpu, 8>,
 }
@@ -64,10 +64,6 @@ struct TerrainParams {
 @group(#{MATERIAL_BIND_GROUP}) @binding(10) var pbr_normal_samp:  sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(11) var pbr_orm_arr:      texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(12) var pbr_orm_samp:     sampler;
-// Detail height residual (R32Float, world-space metres) — written by the
-// synthesis compute pass and also read here to derive per-pixel normal perturbation.
-@group(#{MATERIAL_BIND_GROUP}) @binding(15) var detail_tex:       texture_2d_array<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(16) var detail_samp:      sampler;
 
 // Must match TerrainVOut in terrain_vertex.wgsl.
 struct TerrainVOut {
@@ -544,14 +540,15 @@ fn hemisphere_ambient(world_normal: vec3<f32>, albedo: vec3<f32>) -> vec3<f32> {
 // procedural_fallback is false and no baked normal tiles are loaded).
 // ---------------------------------------------------------------------------
 
+/// Sample height in world-space metres from the R32Float clipmap.
+/// The clipmap stores metres directly — no height_scale multiply needed.
 fn height_at_frag(lod: u32, xz: vec2<f32>) -> f32 {
     let lvl        = terrain.clip_levels[lod];
     let world_min  = terrain.world_bounds.xy;
     let world_max  = terrain.world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
     let sample_xz  = clamp(xz, world_min, world_max);
     let uv         = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
-    return textureSample(height_tex, height_samp, uv, i32(lod)).r
-        * terrain.height_scale;
+    return textureSample(height_tex, height_samp, uv, i32(lod)).r;
 }
 
 fn pixel_normal(lod: u32, xz: vec2<f32>) -> vec3<f32> {
@@ -560,58 +557,6 @@ fn pixel_normal(lod: u32, xz: vec2<f32>) -> vec3<f32> {
     let h_r = height_at_frag(lod, xz + vec2<f32>(eps, 0.0));
     let h_u = height_at_frag(lod, xz + vec2<f32>(0.0, eps));
     return normalize(vec3<f32>(h - h_r, eps, h - h_u));
-}
-
-// ── Detail normal perturbation ────────────────────────────────────────────────
-// Per-pixel normal perturbation derived from the R32Float synthesis residual.
-//
-// Uses the surface-gradient method so the result is always above the horizon:
-//   1. Extract the base surface gradient  g_base = -n_base.xz / n_base.y
-//   2. Compute detail gradient            g_detail = (dD/dx, dD/dz)
-//   3. Reconstruct                        normalize(-g_total.x, 1, -g_total.y)
-//
-// Coarse LOD layers contain no synthesis data (zeroed), so
-//   mix(grad_fine, grad_coarse=0, alpha) = grad_fine * (1 - alpha)
-// which naturally fades the perturbation to zero at LOD seam boundaries.
-// This halves the texture sample count vs sampling both LODs.
-
-fn sample_detail_f(lod: u32, xz: vec2<f32>) -> f32 {
-    if !in_world_bounds(xz) { return 0.0; }
-    let lvl       = terrain.clip_levels[lod];
-    let world_min = terrain.world_bounds.xy;
-    let world_max = terrain.world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
-    let sample_xz = clamp(xz, world_min, world_max);
-    let uv        = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
-    return textureSample(detail_tex, detail_samp, uv, i32(lod)).r;
-}
-
-fn detail_gradient(lod: u32, xz: vec2<f32>, eps: f32) -> vec2<f32> {
-    let d_xp = sample_detail_f(lod, xz + vec2<f32>(eps, 0.0));
-    let d_xm = sample_detail_f(lod, xz - vec2<f32>(eps, 0.0));
-    let d_zp = sample_detail_f(lod, xz + vec2<f32>(0.0, eps));
-    let d_zm = sample_detail_f(lod, xz - vec2<f32>(0.0, eps));
-    return vec2<f32>((d_xp - d_xm) / (2.0 * eps), (d_zp - d_zm) / (2.0 * eps));
-}
-
-fn perturb_normal_with_detail(
-    base_n: vec3<f32>,
-    lod: u32,
-    xz: vec2<f32>,
-    alpha: f32,
-) -> vec3<f32> {
-    let eps = terrain.clip_levels[lod].w;
-
-    // Only sample the fine LOD; coarse layers are zero, so the morph fade is
-    // achieved by scaling by (1 - alpha) rather than a second texture lookup.
-    let grad = detail_gradient(lod, xz, eps) * (1.0 - alpha);
-
-    // Surface-gradient reconstruction: recover the base slope from the normal,
-    // add the detail slope, then rebuild a proper unit normal.
-    // Clamping base_n.y avoids blow-up on near-vertical faces.
-    let n_y      = max(base_n.y, 0.05);
-    let g_base   = -base_n.xz / n_y;          // (dH/dx, dH/dz) encoded in base normal
-    let g_total  = g_base + grad;
-    return normalize(vec3<f32>(-g_total.x, 1.0, -g_total.y));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -634,19 +579,12 @@ fn baked_normal_rgba(lod: u32, xz: vec2<f32>) -> vec4<f32> {
 }
 
 // Returns the shading normal blended between fine and coarse using morph_alpha.
-// Single texture lookup (RGBA8Snorm): rg=fine XZ, ba=coarse XZ.
-// Falls back to per-pixel FD normals when debug_flags.y is set.
+// Always uses per-pixel FD normals so fBM detail from the compute pass
+// appears in lighting without a separate baked normal update.
 fn shading_normal_blended(lod: u32, coarse_lod: u32, xz: vec2<f32>, alpha: f32) -> vec3<f32> {
-    if terrain.debug_flags.y > 0.5 {
-        let n_fine   = pixel_normal(lod, xz);
-        let n_coarse = pixel_normal(coarse_lod, xz);
-        return normalize(mix(n_fine, n_coarse, alpha));
-    }
-    let rgba = baked_normal_rgba(lod, xz);
-    // Blend fine (rg) and coarse (ba) XZ components, then reconstruct Y.
-    let xz_n = mix(rgba.rg, rgba.ba, alpha);
-    let y2   = max(1.0 - dot(xz_n, xz_n), 0.0);
-    return normalize(vec3<f32>(xz_n.x, sqrt(y2), xz_n.y));
+    let n_fine   = pixel_normal(lod, xz);
+    let n_coarse = pixel_normal(coarse_lod, xz);
+    return normalize(mix(n_fine, n_coarse, alpha));
 }
 
 // ---------------------------------------------------------------------------
@@ -709,16 +647,11 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     let macro_ndotu = abs(dot(n_macro, vec3<f32>(0.0, 1.0, 0.0)));
     let slope_deg   = degrees(acos(clamp(macro_ndotu, 0.0, 1.0)));
 
-    // Perturb the macro normal with the detail height gradient (central
-    // differences on the R32Float synthesis residual).  The gradient is
-    // morph-blended so it fades to zero at LOD boundaries in sync with the
-    // height residual, preventing normal discontinuities at seams.
-    let n_detailed = perturb_normal_with_detail(
-        n_macro, in.lod_level, frag_xz, in.morph_alpha,
-    );
-
-    // Apply per-slot PBR normal maps on top of the detail-perturbed macro normal.
-    let n = apply_normal_detail(n_detailed, in.world_pos.xz, in.world_pos.y, slope_deg);
+    // Apply per-slot PBR normal maps on top of the macro normal.
+    // Detail geometry is already captured in height_at_frag (the clipmap stores
+    // full height including fBM detail), so pixel_normal / shading_normal_blended
+    // naturally includes it when debug_flags.y is set.
+    let n = apply_normal_detail(n_macro, in.world_pos.xz, in.world_pos.y, slope_deg);
 
     // --- PBR texture debug (debug_flags.z) ---
     // Samples slot 0 directly at world UV — bypasses zone blending so you
@@ -741,6 +674,12 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     }
 
     // --- Debug: render normals as colour and skip lighting/material ---
+    if terrain.debug_flags.x > 1.5 {
+        // debug_flags.x == 2: show height normalised by height_scale as greyscale.
+        let h = height_at_frag(in.lod_level, frag_xz);
+        let scaled = clamp(h / max(terrain.height_scale, 1.0), 0.0, 1.0);
+        return vec4<f32>(scaled, scaled, scaled, 1.0);
+    }
     if terrain.debug_flags.x > 0.5 {
         return vec4<f32>(n * 0.5 + vec3<f32>(0.5), 1.0);
     }

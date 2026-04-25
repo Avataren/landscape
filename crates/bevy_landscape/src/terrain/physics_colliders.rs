@@ -298,7 +298,6 @@ fn build_mesh_data(input: BuildInput) -> ColliderBuildResult {
                     tile_root.as_deref(),
                     None,
                     Some((world_min, world_max)),
-                    false,
                 )
                 .data;
                 tiles.insert(key, data);

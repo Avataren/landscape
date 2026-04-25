@@ -24,7 +24,11 @@ collision_mip_level = 0
 # The app copies this into the runtime `TerrainConfig.world_scale` field, and
 # bake_tiles uses it automatically when --world-scale is not provided.
 # Set to 2.0 to make the same landscape twice as large in X, Y, and Z.
-world_scale     = 1.0
+world_scale         = 1.0
+# Finest clipmap vertex spacing in world-space metres, independent of world_scale.
+# LOD k spacing = lod0_mesh_spacing × 2^k.
+# Set finer than source resolution to let GPU synthesis fill the detail gap.
+lod0_mesh_spacing   = 2.0
 
 # Clipmap LOD ring count. Each extra level doubles the view radius.
 # Outermost radius = 512 * 2^(clipmap_levels-1) world units.

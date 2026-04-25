@@ -74,7 +74,7 @@ pub struct TerrainMaterialUniforms {
     /// x = fade distance, y = use_macro_color, z = flip_v, w = show_wireframe.
     pub bounds_fade: Vec4,
     /// Per-pixel debug toggles applied in the fragment shader.
-    /// x = show_normals_only (0 = normal shading, 1 = output `n*0.5+0.5` as colour).
+    /// x = fragment_debug_mode (0 = normal shading, 1 = normals as colour, 2 = detail height).
     /// y = use_baked_normals (1 = sample baked RG8Snorm normal array for shading,
     ///     0 = recompute via finite-differences on the height clipmap).
     /// z, w = reserved.
@@ -151,13 +151,6 @@ pub struct TerrainMaterial {
     #[sampler(14, visibility(vertex, fragment))]
     pub source_heightmap: Handle<Image>,
 
-    /// R32Float texture array — one layer per LOD level.
-    /// Stores world-space-metre height residuals synthesised by the detail
-    /// compute pass.  Vertex stage adds them to the base height; fragment
-    /// stage derives a normal perturbation via central differences.
-    #[texture(15, visibility(vertex, fragment), dimension = "2d_array")]
-    #[sampler(16, visibility(vertex, fragment))]
-    pub detail_texture: Handle<Image>,
 }
 
 impl Material for TerrainMaterial {

@@ -7,10 +7,11 @@
 #import bevy_pbr::mesh_view_bindings::globals
 #endif
 
-#import bevy_landscape_water::water_bindings::material
+#import bevy_landscape_water::water_bindings::{material, terrain_height_samp, terrain_height_tex}
 
 const PI: f32  = 3.14159265358979323846;
 const G:  f32  = 9.81;
+const MAX_TERRAIN_CLIPMAP_LEVELS: i32 = 16;
 
 struct WaveResult {
     height:  f32,
@@ -56,19 +57,34 @@ const SWELL_WAVE_1: vec4<f32> = vec4( 0.574,  0.819, 131.0, 0.0);  // 55° cross
 const SWELL_WAVE_2: vec4<f32> = vec4( 0.766, -0.643, 173.0, 0.0);  // -40° broad swell (173/92 ≈ φ×1.16)
 
 const NUM_GEOM_WAVES:      f32 = 6.0;
-const GEOM_AMP_RATIO:      f32 = 0.0048;
+const GEOM_AMP_RATIO:      f32 = 0.0042;
 // Swell waves use the same ratio but are scaled down so they add variation
 // without fighting the primary geometry normal.
-const SWELL_AMP_SCALE:     f32 = 0.40;
-const DETAIL_AMP_RATIO:    f32 = 0.0016;
-const DETAIL_SHARPNESS:    f32 = 3.5;
-const DETAIL_SPEED_BOOST:  f32 = 1.35;
+const SWELL_AMP_SCALE:     f32 = 0.26;
+const DETAIL_AMP_RATIO:    f32 = 0.0021;
+const DETAIL_SHARPNESS:    f32 = 4.2;
+const DETAIL_SPEED_BOOST:  f32 = 2.15;
 
 fn wave_lod_weight(wavelength: f32, footprint: f32) -> f32 {
     if footprint <= 0.0 {
         return 1.0;
     }
     return smoothstep(footprint * 2.0, footprint * 4.0, wavelength);
+}
+
+fn detail_wave_lod_weight(wavelength: f32, footprint: f32) -> f32 {
+    if footprint <= 0.0 {
+        return 1.0;
+    }
+    return smoothstep(footprint * 3.0, footprint * 6.5, wavelength);
+}
+
+fn filtered_normal_footprint(footprint: f32) -> f32 {
+    return max(footprint * 1.85, footprint + 0.75);
+}
+
+fn micro_detail_fade(footprint: f32) -> f32 {
+    return 1.0 - smoothstep(0.7, 3.0, footprint);
 }
 
 fn dominant_wind_direction() -> vec2<f32> {
@@ -102,6 +118,117 @@ fn combine_surface_normal(base_normal: vec3<f32>, detail_slope: vec2<f32>) -> ve
     return slope_to_normal(normal_to_slope(base_normal) + detail_slope);
 }
 
+fn water_amplitude() -> f32 {
+    return material.wave_params.x;
+}
+
+fn water_clarity() -> f32 {
+    return material.wave_params.y;
+}
+
+fn water_edge_scale() -> f32 {
+    return material.wave_params.z;
+}
+
+fn water_wave_speed() -> f32 {
+    return material.wave_params.w;
+}
+
+fn water_refraction_strength() -> f32 {
+    return material.optical_params.x;
+}
+
+fn water_foam_threshold() -> f32 {
+    return material.optical_params.y;
+}
+
+fn shoreline_foam_depth() -> f32 {
+    return material.optical_params.z;
+}
+
+fn shore_wave_damp_width() -> f32 {
+    return material.optical_params.w;
+}
+
+fn water_surface_height() -> f32 {
+    return material.terrain_params.x;
+}
+
+fn terrain_height_scale() -> f32 {
+    return material.terrain_params.y;
+}
+
+fn terrain_num_levels() -> i32 {
+    return i32(material.terrain_params.z + 0.5);
+}
+
+fn terrain_data_available() -> bool {
+    return terrain_num_levels() > 0
+        && all(material.terrain_world_bounds.zw > material.terrain_world_bounds.xy);
+}
+
+fn terrain_in_world_bounds(world_xz: vec2<f32>) -> bool {
+    if !terrain_data_available() {
+        return false;
+    }
+    return all(world_xz >= material.terrain_world_bounds.xy)
+        && all(world_xz <= material.terrain_world_bounds.zw);
+}
+
+fn terrain_level_contains(world_xz: vec2<f32>, lvl: vec4<f32>) -> bool {
+    if lvl.z <= 0.0 {
+        return false;
+    }
+    let half_span = 0.5 / lvl.z;
+    let delta = abs(world_xz - lvl.xy);
+    return max(delta.x, delta.y) <= half_span;
+}
+
+fn terrain_lod_for_world(world_xz: vec2<f32>) -> i32 {
+    let num_levels = terrain_num_levels();
+    var fallback_lod = max(num_levels - 1, 0);
+    for (var lod = 0; lod < MAX_TERRAIN_CLIPMAP_LEVELS; lod = lod + 1) {
+        if lod >= num_levels {
+            break;
+        }
+        let lvl = material.terrain_clip_levels[lod];
+        if terrain_level_contains(world_xz, lvl) {
+            return lod;
+        }
+    }
+    return fallback_lod;
+}
+
+fn terrain_height_at(world_xz: vec2<f32>) -> f32 {
+    if !terrain_in_world_bounds(world_xz) {
+        return 0.0;
+    }
+
+    let lod = terrain_lod_for_world(world_xz);
+    let lvl = material.terrain_clip_levels[lod];
+    let world_min = material.terrain_world_bounds.xy;
+    let world_max = material.terrain_world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
+    let sample_xz = clamp(world_xz, world_min, world_max);
+    let uv = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
+    // terrain_height_tex is R32Float storing world-space metres directly.
+    return textureSampleLevel(terrain_height_tex, terrain_height_samp, uv, lod, 0.0).r;
+}
+
+fn terrain_water_depth_at(world_xz: vec2<f32>) -> f32 {
+    if !terrain_in_world_bounds(world_xz) {
+        return 1e6;
+    }
+    return max(water_surface_height() - terrain_height_at(world_xz), 0.0);
+}
+
+fn shoreline_wave_attenuation(world_xz: vec2<f32>) -> f32 {
+    if !terrain_in_world_bounds(world_xz) {
+        return 1.0;
+    }
+    let depth = terrain_water_depth_at(world_xz);
+    return smoothstep(0.0, max(shore_wave_damp_width(), 0.001), depth);
+}
+
 fn gerstner_wave(
     p:         vec2<f32>,
     t:         f32,
@@ -115,7 +242,7 @@ fn gerstner_wave(
 
     let omega = 2.0 * PI / L;
     let amp   = base_amp * GEOM_AMP_RATIO * L;
-    let phase = material.wave_speed * sqrt(G * omega);
+    let phase = water_wave_speed() * sqrt(G * omega);
 
     let f    = omega * dot(dir, p) + phase * t + wave_phase_offset(params);
     let sinf = sin(f);
@@ -137,7 +264,7 @@ fn gerstner_wave(
 
 fn get_wave_result(p: vec2<f32>, footprint: f32) -> WaveResult {
     let t   = globals.time;
-    let amp = material.amplitude;
+    let amp = water_amplitude();
 
     var h    = 0.0;
     var xz   = vec2(0.0);
@@ -165,7 +292,7 @@ fn detail_wave(
     let strength   = params.w;
     let omega      = 2.0 * PI / wavelength;
     let amp        = base_amp * DETAIL_AMP_RATIO * wavelength * strength;
-    let phase      = material.wave_speed * DETAIL_SPEED_BOOST * sqrt(G * omega);
+    let phase      = water_wave_speed() * DETAIL_SPEED_BOOST * sqrt(G * omega);
     let f          = omega * dot(dir, p) + phase * t + wave_phase_offset(params) * 1.71;
 
     let crest_base = clamp(0.5 + 0.5 * sin(f), 0.0, 1.0);
@@ -179,20 +306,20 @@ fn detail_wave(
 
 fn get_detail_wave_result(p: vec2<f32>, footprint: f32) -> DetailWaveResult {
     let t   = globals.time;
-    let amp = material.amplitude;
+    let amp = water_amplitude();
 
     var slope        = vec2(0.0);
     var crest        = 0.0;
     var slope_energy = 0.0;
 
-    let d0 = detail_wave(p, t, DETAIL_WAVE_0, amp, wave_lod_weight(DETAIL_WAVE_0.z, footprint * 0.85)); slope += d0.slope; crest = max(crest, d0.crest); slope_energy += d0.slope_energy;
-    let d1 = detail_wave(p, t, DETAIL_WAVE_1, amp, wave_lod_weight(DETAIL_WAVE_1.z, footprint * 0.85)); slope += d1.slope; crest = max(crest, d1.crest); slope_energy += d1.slope_energy;
-    let d2 = detail_wave(p, t, DETAIL_WAVE_2, amp, wave_lod_weight(DETAIL_WAVE_2.z, footprint * 0.85)); slope += d2.slope; crest = max(crest, d2.crest); slope_energy += d2.slope_energy;
-    let d3 = detail_wave(p, t, DETAIL_WAVE_3, amp, wave_lod_weight(DETAIL_WAVE_3.z, footprint * 0.85)); slope += d3.slope; crest = max(crest, d3.crest); slope_energy += d3.slope_energy;
-    let d4 = detail_wave(p, t, DETAIL_WAVE_4, amp, wave_lod_weight(DETAIL_WAVE_4.z, footprint * 0.85)); slope += d4.slope; crest = max(crest, d4.crest); slope_energy += d4.slope_energy;
-    let d5 = detail_wave(p, t, DETAIL_WAVE_5, amp, wave_lod_weight(DETAIL_WAVE_5.z, footprint * 0.85)); slope += d5.slope; crest = max(crest, d5.crest); slope_energy += d5.slope_energy;
-    let d6 = detail_wave(p, t, DETAIL_WAVE_6, amp, wave_lod_weight(DETAIL_WAVE_6.z, footprint * 0.85)); slope += d6.slope; crest = max(crest, d6.crest); slope_energy += d6.slope_energy;
-    let d7 = detail_wave(p, t, DETAIL_WAVE_7, amp, wave_lod_weight(DETAIL_WAVE_7.z, footprint * 0.85)); slope += d7.slope; crest = max(crest, d7.crest); slope_energy += d7.slope_energy;
+    let d0 = detail_wave(p, t, DETAIL_WAVE_0, amp, detail_wave_lod_weight(DETAIL_WAVE_0.z, footprint)); slope += d0.slope; crest = max(crest, d0.crest); slope_energy += d0.slope_energy;
+    let d1 = detail_wave(p, t, DETAIL_WAVE_1, amp, detail_wave_lod_weight(DETAIL_WAVE_1.z, footprint)); slope += d1.slope; crest = max(crest, d1.crest); slope_energy += d1.slope_energy;
+    let d2 = detail_wave(p, t, DETAIL_WAVE_2, amp, detail_wave_lod_weight(DETAIL_WAVE_2.z, footprint)); slope += d2.slope; crest = max(crest, d2.crest); slope_energy += d2.slope_energy;
+    let d3 = detail_wave(p, t, DETAIL_WAVE_3, amp, detail_wave_lod_weight(DETAIL_WAVE_3.z, footprint)); slope += d3.slope; crest = max(crest, d3.crest); slope_energy += d3.slope_energy;
+    let d4 = detail_wave(p, t, DETAIL_WAVE_4, amp, detail_wave_lod_weight(DETAIL_WAVE_4.z, footprint)); slope += d4.slope; crest = max(crest, d4.crest); slope_energy += d4.slope_energy;
+    let d5 = detail_wave(p, t, DETAIL_WAVE_5, amp, detail_wave_lod_weight(DETAIL_WAVE_5.z, footprint)); slope += d5.slope; crest = max(crest, d5.crest); slope_energy += d5.slope_energy;
+    let d6 = detail_wave(p, t, DETAIL_WAVE_6, amp, detail_wave_lod_weight(DETAIL_WAVE_6.z, footprint)); slope += d6.slope; crest = max(crest, d6.crest); slope_energy += d6.slope_energy;
+    let d7 = detail_wave(p, t, DETAIL_WAVE_7, amp, detail_wave_lod_weight(DETAIL_WAVE_7.z, footprint)); slope += d7.slope; crest = max(crest, d7.crest); slope_energy += d7.slope_energy;
 
     return DetailWaveResult(slope, crest, slope_energy);
 }
@@ -203,7 +330,7 @@ fn get_detail_wave_result(p: vec2<f32>, footprint: f32) -> DetailWaveResult {
 // the foam height calculation.
 fn get_swell_normal(p: vec2<f32>, footprint: f32) -> vec3<f32> {
     let t   = globals.time;
-    let amp = material.amplitude * SWELL_AMP_SCALE;
+    let amp = water_amplitude() * SWELL_AMP_SCALE;
 
     var sumn = vec3(0.0);
     let s0 = gerstner_wave(p, t, SWELL_WAVE_0, amp, wave_lod_weight(SWELL_WAVE_0.z, footprint));

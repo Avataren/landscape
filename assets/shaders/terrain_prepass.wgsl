@@ -1,9 +1,9 @@
 // terrain_prepass.wgsl
 // Depth-only prepass for terrain shadow casting.
 //
-// Replicates the height sampling and CDLOD morphing from terrain_vertex.wgsl so
-// that the shadow-map geometry matches the visible displaced surface exactly.
-// Only outputs clip position (and world_position required by VertexOutput).
+// The height clipmap (height_tex, R32Float) stores world-space metres directly,
+// including the fBM detail for fine LODs written by the compute pass.  No
+// separate detail texture is needed — height_at() reads the full displaced value.
 
 #import bevy_pbr::{
     mesh_functions::get_world_from_local,
@@ -27,20 +27,22 @@ struct TerrainParams {
     world_bounds:       vec4<f32>,
     bounds_fade:        vec4<f32>,
     debug_flags:        vec4<f32>,
-    clip_levels: array<vec4<f32>, 16>,
+    clip_levels: array<vec4<f32>, 32>,
     slot_header: vec4<f32>,
     slots:       array<MaterialSlotGpu, 8>,
 }
 
-@group(#{MATERIAL_BIND_GROUP}) @binding(0) var height_tex:  texture_2d_array<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(1) var height_samp: sampler;
-@group(#{MATERIAL_BIND_GROUP}) @binding(2) var<uniform> terrain: TerrainParams;
+@group(#{MATERIAL_BIND_GROUP}) @binding(0)  var height_tex:  texture_2d_array<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(1)  var height_samp: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(2)  var<uniform> terrain: TerrainParams;
 
 fn in_world_bounds(world_xz: vec2<f32>) -> bool {
     return all(world_xz >= terrain.world_bounds.xy)
         && all(world_xz <= terrain.world_bounds.zw);
 }
 
+/// Sample height in world-space metres from the R32Float clipmap.
+/// The clipmap already contains full height (source + fBM detail for fine LODs).
 fn height_at(lod: u32, xz: vec2<f32>) -> f32 {
     if !in_world_bounds(xz) {
         return 0.0;
@@ -50,9 +52,7 @@ fn height_at(lod: u32, xz: vec2<f32>) -> f32 {
     let world_max = terrain.world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
     let sample_xz = clamp(xz, world_min, world_max);
     let uv = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
-    let h = textureSampleLevel(height_tex, height_samp, uv, i32(lod), 0.0).r
-        * terrain.height_scale;
-    return h;
+    return textureSampleLevel(height_tex, height_samp, uv, i32(lod), 0.0).r;
 }
 
 @vertex
@@ -96,20 +96,16 @@ fn vertex(v: Vertex) -> VertexOutput {
     let coarse_world_xz = floor(world_xz_orig / coarse_step_ws) * coarse_step_ws;
     let world_xz = mix(world_xz_orig, coarse_world_xz, morph_alpha);
 
-    // --- Height blend (same as main pass) ---
-    let h   = mix(height_at(lod_level, world_xz), height_at(coarse_lod, world_xz), morph_alpha);
+    // height_at reads full height (metres) directly — no separate detail fetch.
+    let h_fine   = height_at(lod_level, world_xz);
+    let h_coarse = height_at(coarse_lod,  world_xz);
+    let h        = mix(h_fine, h_coarse, morph_alpha);
     let pos = vec3<f32>(world_xz.x, h, world_xz.y);
 
     var out: VertexOutput;
     out.world_position = vec4<f32>(pos, 1.0);
     out.position       = position_world_to_clip(pos);
 
-    // Push out-of-bounds vertices to the far plane (z=0 in Bevy's reversed-Z).
-    // The depth prepass is vertex-only for opaque materials — no fragment stage
-    // runs to discard these pixels.  If we leave the normal clip depth, the
-    // prepass writes a finite depth value that blocks sky rendering, making
-    // the out-of-bounds quads appear as black rectangles.  Writing depth=0
-    // (far plane) lets the sky renderer overwrite those pixels.
     if !in_world_bounds(world_xz) {
         out.position.z = 0.0;
     }
@@ -117,11 +113,6 @@ fn vertex(v: Vertex) -> VertexOutput {
     return out;
 }
 
-// Only emit a fragment function when the renderer expects prepass fragment output
-// (normal/motion-vector/deferred prepass).  Shadow and plain depth passes have
-// PREPASS_FRAGMENT undefined and write depth automatically via rasterization —
-// but we still need a fragment stage to discard out-of-bounds geometry so it
-// does not cast incorrect shadows.
 #ifdef PREPASS_FRAGMENT
 @fragment
 fn fragment(in: VertexOutput) -> FragmentOutput {
@@ -138,9 +129,6 @@ fn fragment(in: VertexOutput) -> FragmentOutput {
 #else
 @fragment
 fn fragment(in: VertexOutput) {
-    // Shadow / depth-only pass: no FragmentOutput needed, but we must discard
-    // vertices outside the terrain boundary so the out-of-bounds height-0 rim
-    // does not occlude lights or cast rectangular shadow bands.
     if !in_world_bounds(in.world_position.xz) {
         discard;
     }

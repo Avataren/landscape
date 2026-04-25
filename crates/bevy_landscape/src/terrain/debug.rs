@@ -20,7 +20,9 @@ pub struct TerrainDebugConfig {
     pub show_lod_colors: bool,
     pub show_stats: bool,
     pub show_wireframe: bool,
-    pub show_normals_only: bool,
+    /// Cycles through fragment debug modes (debug_flags.x):
+    ///   0 = normal shading, 1 = normals as colour, 2 = height as greyscale
+    pub fragment_debug_mode: u8,
     pub show_ruler: bool,
     pub show_pbr_debug: u8,
 }
@@ -32,7 +34,7 @@ impl Default for TerrainDebugConfig {
             show_lod_colors: false,
             show_stats: false,
             show_wireframe: false,
-            show_normals_only: false,
+            fragment_debug_mode: 0,
             show_ruler: false,
             show_pbr_debug: 0,
         }
@@ -57,7 +59,7 @@ const LOD_COLORS: [Color; 8] = [
 /// Runtime debug hotkeys:
 /// - F5  = cycle PBR texture debug (off / raw normal-map / ORM roughness)
 /// - F6  = ruler grid
-/// - F8  = render terrain normals as colour (no lighting/material)
+/// - F8  = cycle fragment debug (off → normals → height greyscale → off)
 /// - F9  = stats logging
 /// - F10 = patch bounds
 /// - F11 = LOD center markers
@@ -86,15 +88,9 @@ pub fn toggle_terrain_debug_hotkeys(
     }
 
     if keys.just_pressed(KeyCode::F8) {
-        debug_cfg.show_normals_only = !debug_cfg.show_normals_only;
-        info!(
-            "[Terrain] Normals-only debug {} (F8)",
-            if debug_cfg.show_normals_only {
-                "enabled"
-            } else {
-                "disabled"
-            }
-        );
+        debug_cfg.fragment_debug_mode = (debug_cfg.fragment_debug_mode + 1) % 3;
+        let label = ["off", "normals", "detail height"][debug_cfg.fragment_debug_mode as usize];
+        info!("[Terrain] Fragment debug: {label} (F8)");
     }
 
     if keys.just_pressed(KeyCode::F9) {
@@ -166,11 +162,7 @@ pub fn sync_wireframe_modes(
         material.params.bounds_fade.w = desired;
     }
 
-    let desired_normals = if debug_cfg.show_normals_only {
-        1.0
-    } else {
-        0.0
-    };
+    let desired_normals = debug_cfg.fragment_debug_mode as f32;
     if material.params.debug_flags.x != desired_normals {
         material.params.debug_flags.x = desired_normals;
     }
@@ -192,6 +184,7 @@ pub fn draw_terrain_debug(
     view: Res<TerrainViewState>,
     debug_cfg: Res<TerrainDebugConfig>,
     _residency: Res<TerrainResidency>,
+    clipmap_state: Res<TerrainClipmapState>,
     mut gizmos: Gizmos,
 ) {
     if debug_cfg.show_patch_bounds {
@@ -201,18 +194,29 @@ pub fn draw_terrain_debug(
             desc.world_min,
             desc.world_max,
         );
+        let res = config.clipmap_resolution();
         for patch in &patches {
             let color = LOD_COLORS[patch.lod_level as usize % LOD_COLORS.len()];
             let cx = patch.origin_ws.x + patch.block_world_size * 0.5;
             let cz = patch.origin_ws.y + patch.block_world_size * 0.5;
             let size = patch.block_world_size;
-            // Draw the 4 bottom edges of the patch bounding box.
-            let corners = [
-                Vec3::new(cx - size * 0.5, 0.0, cz - size * 0.5),
-                Vec3::new(cx + size * 0.5, 0.0, cz - size * 0.5),
-                Vec3::new(cx + size * 0.5, 0.0, cz + size * 0.5),
-                Vec3::new(cx - size * 0.5, 0.0, cz + size * 0.5),
+            let half = size * 0.5;
+            let corner_xzs = [
+                Vec2::new(cx - half, cz - half),
+                Vec2::new(cx + half, cz - half),
+                Vec2::new(cx + half, cz + half),
+                Vec2::new(cx - half, cz + half),
             ];
+            let corners: [Vec3; 4] = std::array::from_fn(|i| {
+                let xz = corner_xzs[i];
+                let y = clipmap_state.sample_height_cpu(
+                    xz,
+                    &view.clip_centers,
+                    &view.level_scales,
+                    res,
+                );
+                Vec3::new(xz.x, y, xz.y)
+            });
             for i in 0..4 {
                 gizmos.line(corners[i], corners[(i + 1) % 4], color);
             }

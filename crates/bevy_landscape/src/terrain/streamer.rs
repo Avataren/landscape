@@ -1,5 +1,4 @@
 use crate::terrain::{
-    clipmap_texture::{height_at_world, normal_at_world},
     resources::{HeightTileCpu, TerrainResidency, TerrainStreamQueue, TileKey, TileState},
     world_desc::TerrainSourceDesc,
 };
@@ -32,7 +31,6 @@ pub(crate) fn load_tile_data(
     tile_root: Option<&std::path::Path>,
     normal_root: Option<&std::path::Path>,
     world_bounds: Option<(Vec2, Vec2)>,
-    use_procedural: bool,
 ) -> HeightTileCpu {
     let level_scale_ws = world_scale * (1u32 << (key.level as u32)) as f32;
     // Geometry can use more clipmap levels than the baked tile hierarchy.
@@ -64,24 +62,7 @@ pub(crate) fn load_tile_data(
                 )
             }
         })
-        .unwrap_or_else(|| {
-            let len = (tile_size * tile_size) as usize;
-            if use_procedural {
-                let mut pixels = Vec::with_capacity(len);
-                for row in 0..tile_size {
-                    for col in 0..tile_size {
-                        let world_x =
-                            ((key.x * tile_size as i32 + col as i32) as f32 + 0.5) * level_scale_ws;
-                        let world_z =
-                            ((key.y * tile_size as i32 + row as i32) as f32 + 0.5) * level_scale_ws;
-                        pixels.push(height_at_world(world_x, world_z));
-                    }
-                }
-                pixels
-            } else {
-                vec![0.0f32; len]
-            }
-        });
+        .unwrap_or_else(|| vec![0.0f32; (tile_size * tile_size) as usize]);
 
     let normal_data = normal_root
         .as_deref()
@@ -104,13 +85,7 @@ pub(crate) fn load_tile_data(
                 None
             }
         })
-        .unwrap_or_else(|| {
-            if use_procedural {
-                build_procedural_normal_tile(key, tile_size, level_scale_ws, height_scale)
-            } else {
-                vec![[0u8; 4]; (tile_size * tile_size) as usize]
-            }
-        });
+        .unwrap_or_else(|| vec![[0u8; 4]; (tile_size * tile_size) as usize]);
 
     HeightTileCpu {
         key,
@@ -131,7 +106,6 @@ pub fn spawn_background_height_job(
     tile_root: Option<std::path::PathBuf>,
     normal_root: Option<std::path::PathBuf>,
     world_bounds: Option<(Vec2, Vec2)>,
-    use_procedural: bool,
     generation: u64,
     tx: Sender<HeightTileCpu>,
 ) {
@@ -145,7 +119,6 @@ pub fn spawn_background_height_job(
             tile_root.as_deref(),
             normal_root.as_deref(),
             world_bounds,
-            use_procedural,
         );
         data.generation = generation;
         let _ = tx.send(data);
@@ -444,27 +417,6 @@ fn encode_normal_pair(fine: Vec3, coarse: Vec3) -> [u8; 4] {
     ]
 }
 
-fn build_procedural_normal_tile(
-    key: TileKey,
-    tile_size: u32,
-    level_scale_ws: f32,
-    height_scale: f32,
-) -> Vec<[u8; 4]> {
-    let len = (tile_size * tile_size) as usize;
-    let mut pixels = Vec::with_capacity(len);
-    for row in 0..tile_size {
-        for col in 0..tile_size {
-            let world_x = ((key.x * tile_size as i32 + col as i32) as f32 + 0.5) * level_scale_ws;
-            let world_z = ((key.y * tile_size as i32 + row as i32) as f32 + 0.5) * level_scale_ws;
-            pixels.push(encode_normal_pair(
-                normal_at_world(world_x, world_z, level_scale_ws, height_scale),
-                normal_at_world(world_x, world_z, level_scale_ws * 2.0, height_scale),
-            ));
-        }
-    }
-    pixels
-}
-
 fn sobel_normal(
     col: i32,
     row: i32,
@@ -570,7 +522,6 @@ pub fn request_tile_loads(
             desc.tile_root.clone(),
             desc.normal_root.as_ref().map(PathBuf::from),
             Some((desc.world_min, desc.world_max)),
-            config.procedural_fallback,
             queue.reload_generation,
             sender.0.clone(),
         );

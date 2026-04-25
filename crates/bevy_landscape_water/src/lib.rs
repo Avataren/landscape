@@ -3,10 +3,17 @@ mod material;
 pub use material::{StandardWaterMaterial, WaterMaterial, WaterMaterialPlugin};
 
 use bevy::{
+    asset::RenderAssetUsages,
+    image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     light::{NotShadowCaster, NotShadowReceiver},
     prelude::*,
+    render::render_resource::{Extent3d, TextureDimension, TextureFormat},
 };
-use bevy_landscape::{TerrainCamera, TerrainConfig, TerrainMetadata, TerrainSourceDesc};
+use bevy_landscape::{
+    compute_clip_levels, compute_initial_clip_levels, TerrainCamera, TerrainClipmapState,
+    TerrainConfig, TerrainMetadata, TerrainSourceDesc, TerrainViewState,
+    MAX_SUPPORTED_CLIPMAP_LEVELS,
+};
 
 // ---------------------------------------------------------------------------
 // Components (previously from bevy_water)
@@ -76,6 +83,8 @@ pub struct WaterSettings {
     pub foam_color: Color,
     /// Maximum water depth (metres) that receives shoreline foam.
     pub shoreline_foam_depth: f32,
+    /// Water depth range over which wave displacement fades to flat near shore.
+    pub shore_wave_damp_width: f32,
 }
 
 impl Default for WaterSettings {
@@ -94,12 +103,13 @@ impl Default for WaterSettings {
             spawn_tiles: None,
             wave_direction: Vec2::new(1.0, 2.0),
             wave_direction_blend_duration: 2.0,
-            wave_speed: 1.8,
+            wave_speed: 2.35,
             refraction_strength: 15.0,
             // Normalised: fraction of max wave height above which foam appears.
             foam_threshold: 0.7,
             foam_color: Color::srgba(1.0, 1.0, 1.0, 0.9),
             shoreline_foam_depth: 2.0,
+            shore_wave_damp_width: 5.5,
         }
     }
 }
@@ -117,6 +127,11 @@ pub struct WaterEnabled(pub bool);
 
 #[derive(Resource, Clone, Copy)]
 struct InitialWaterLayout(WaterLayout);
+
+#[derive(Resource, Clone)]
+struct WaterTerrainFallback {
+    height_texture: Handle<Image>,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct WaterLayout {
@@ -176,12 +191,14 @@ impl Plugin for LandscapeWaterPlugin {
 
         app.insert_resource(WaterSettings {
             height: initial_layout.height,
-            amplitude: 8.0,
-            clarity: 0.9,
+            amplitude: 6.75,
+            clarity: 0.94,
+            wave_speed: 2.35,
             // Normalised [0..1]: fraction of max wave height above which foam appears.
             // 0.7 = only the top 30% of wave heights get foam (genuine crests only).
             foam_threshold: 0.7,
             shoreline_foam_depth: 1.5,
+            shore_wave_damp_width: 5.5,
             spawn_tiles: None,
             ..WaterSettings::default()
         });
@@ -189,17 +206,20 @@ impl Plugin for LandscapeWaterPlugin {
         app.insert_resource(InitialWaterLayout(initial_layout));
         app.init_resource::<WaterPatchEntities>();
         app.add_plugins(WaterMaterialPlugin);
-        app.add_systems(Startup, spawn_initial_water_tiles);
+        app.add_systems(
+            Startup,
+            (setup_water_terrain_fallback, spawn_initial_water_tiles).chain(),
+        );
         app.add_systems(
             Update,
             (
                 (sync_water_to_terrain, update_water_patch_transforms).chain(),
                 sync_water_height,
-                sync_water_materials,
                 toggle_water,
                 apply_water_enabled.after(toggle_water),
             ),
         );
+        app.add_systems(PostUpdate, sync_water_materials);
     }
 }
 
@@ -242,6 +262,51 @@ fn water_layout(world_min: Vec2, world_max: Vec2, water_height: Option<f32>) -> 
 
 fn effective_water_level(level: Option<f32>) -> Option<f32> {
     level.filter(|l| *l > 0.0)
+}
+
+fn build_water_terrain_fallback_texture() -> Image {
+    let layers = MAX_SUPPORTED_CLIPMAP_LEVELS as u32;
+    let mut image = Image::new(
+        Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: layers,
+        },
+        TextureDimension::D2,
+        vec![0u8; layers as usize * 2],
+        TextureFormat::R16Unorm,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    );
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::ClampToEdge,
+        address_mode_v: ImageAddressMode::ClampToEdge,
+        address_mode_w: ImageAddressMode::ClampToEdge,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        ..default()
+    });
+    image
+}
+
+fn terrain_world_bounds(desc: &TerrainSourceDesc) -> Vec4 {
+    Vec4::new(
+        desc.world_min.x,
+        desc.world_min.y,
+        desc.world_max.x,
+        desc.world_max.y,
+    )
+}
+
+fn water_terrain_clip_levels(
+    config: &TerrainConfig,
+    view: Option<&TerrainViewState>,
+) -> [Vec4; MAX_SUPPORTED_CLIPMAP_LEVELS] {
+    match view {
+        Some(view) if !view.clip_centers.is_empty() => {
+            compute_clip_levels(config, &view.clip_centers, &view.level_scales)
+        }
+        _ => compute_initial_clip_levels(config),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -426,6 +491,7 @@ fn rebuild_water_tiles(
     commands: &mut Commands,
     settings: &WaterSettings,
     layout: WaterLayout,
+    terrain_fallback: &WaterTerrainFallback,
     camera_xz: Vec2,
     patches: &mut WaterPatchEntities,
     existing_roots: &[Entity],
@@ -499,6 +565,13 @@ fn rebuild_water_tiles(
             foam_color: settings.foam_color,
             shoreline_foam_depth: settings.shoreline_foam_depth,
             wave_direction: settings.wave_direction.normalize_or_zero(),
+            water_height,
+            shore_wave_damp_width: settings.shore_wave_damp_width,
+            terrain_height_texture: terrain_fallback.height_texture.clone(),
+            terrain_world_bounds: Vec4::ZERO,
+            terrain_height_scale: 0.0,
+            terrain_num_levels: 0,
+            terrain_clip_levels: [Vec4::ZERO; MAX_SUPPORTED_CLIPMAP_LEVELS],
         },
     }));
 
@@ -662,6 +735,7 @@ fn apply_water_layout(
     settings: &mut WaterSettings,
     enabled: &mut WaterEnabled,
     layout: WaterLayout,
+    terrain_fallback: &WaterTerrainFallback,
     camera_xz: Vec2,
     patches: &mut WaterPatchEntities,
     water_roots: &Query<Entity, With<WaterTiles>>,
@@ -678,6 +752,7 @@ fn apply_water_layout(
         commands,
         settings,
         layout,
+        terrain_fallback,
         camera_xz,
         patches,
         &roots,
@@ -691,8 +766,15 @@ fn apply_water_layout(
 // Systems
 // ---------------------------------------------------------------------------
 
+fn setup_water_terrain_fallback(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
+    commands.insert_resource(WaterTerrainFallback {
+        height_texture: images.add(build_water_terrain_fallback_texture()),
+    });
+}
+
 fn spawn_initial_water_tiles(
     initial: Res<InitialWaterLayout>,
+    terrain_fallback: Res<WaterTerrainFallback>,
     mut settings: ResMut<WaterSettings>,
     mut enabled: ResMut<WaterEnabled>,
     mut patches: ResMut<WaterPatchEntities>,
@@ -708,6 +790,7 @@ fn spawn_initial_water_tiles(
         &mut settings,
         &mut enabled,
         initial.0,
+        &terrain_fallback,
         current_water_camera_xz(&camera_q, initial.0.center),
         &mut patches,
         &water_roots,
@@ -720,6 +803,7 @@ fn spawn_initial_water_tiles(
 fn sync_water_to_terrain(
     source_desc: Res<TerrainSourceDesc>,
     config: Res<TerrainConfig>,
+    terrain_fallback: Res<WaterTerrainFallback>,
     mut settings: ResMut<WaterSettings>,
     mut enabled: ResMut<WaterEnabled>,
     mut patches: ResMut<WaterPatchEntities>,
@@ -748,6 +832,7 @@ fn sync_water_to_terrain(
         &mut settings,
         &mut enabled,
         layout,
+        &terrain_fallback,
         current_water_camera_xz(&camera_q, layout.center),
         &mut patches,
         &water_roots,
@@ -787,16 +872,48 @@ fn sync_water_height(
 
 fn sync_water_materials(
     settings: Res<WaterSettings>,
+    terrain_fallback: Res<WaterTerrainFallback>,
+    source_desc: Res<TerrainSourceDesc>,
+    config: Res<TerrainConfig>,
+    terrain_view: Option<Res<TerrainViewState>>,
+    terrain_clipmap: Option<Res<TerrainClipmapState>>,
     tiles: Query<&MeshMaterial3d<StandardWaterMaterial>, With<WaterTile>>,
     mut mats: ResMut<Assets<StandardWaterMaterial>>,
 ) {
-    if !settings.is_changed() || !settings.update_materials {
+    let terrain_changed = source_desc.is_changed()
+        || config.is_changed()
+        || terrain_view.as_ref().is_some_and(|view| view.is_changed())
+        || terrain_clipmap
+            .as_ref()
+            .is_some_and(|clipmap| clipmap.is_changed());
+    let settings_changed = settings.is_changed();
+
+    if !settings_changed && !terrain_changed {
         return;
     }
 
+    let Some(handle) = tiles.iter().next() else {
+        return;
+    };
+
+    let terrain_height_texture = terrain_clipmap
+        .as_ref()
+        .map(|clipmap| clipmap.height_texture_handle.clone())
+        .unwrap_or_else(|| terrain_fallback.height_texture.clone());
+    let terrain_num_levels = if terrain_clipmap.is_some() {
+        config.active_clipmap_levels()
+    } else {
+        0
+    };
+    let terrain_clip_levels = if terrain_num_levels > 0 {
+        water_terrain_clip_levels(&config, terrain_view.as_deref())
+    } else {
+        [Vec4::ZERO; MAX_SUPPORTED_CLIPMAP_LEVELS]
+    };
     let wave_direction = settings.wave_direction.normalize_or_zero();
-    for handle in &tiles {
-        if let Some(mat) = mats.get_mut(&handle.0) {
+
+    if let Some(mat) = mats.get_mut(&handle.0) {
+        if settings_changed && settings.update_materials {
             mat.base.base_color = settings.base_color;
             mat.base.alpha_mode = AlphaMode::Opaque;
             mat.base.perceptual_roughness = 0.05;
@@ -819,6 +936,19 @@ fn sync_water_materials(
             mat.extension.foam_color = settings.foam_color;
             mat.extension.shoreline_foam_depth = settings.shoreline_foam_depth;
             mat.extension.wave_direction = wave_direction;
+        }
+
+        if settings_changed {
+            mat.extension.water_height = settings.height;
+            mat.extension.shore_wave_damp_width = settings.shore_wave_damp_width;
+        }
+
+        if terrain_changed {
+            mat.extension.terrain_height_texture = terrain_height_texture;
+            mat.extension.terrain_world_bounds = terrain_world_bounds(&source_desc);
+            mat.extension.terrain_height_scale = config.height_scale;
+            mat.extension.terrain_num_levels = terrain_num_levels;
+            mat.extension.terrain_clip_levels = terrain_clip_levels;
         }
     }
 }

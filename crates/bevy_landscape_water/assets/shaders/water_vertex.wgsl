@@ -50,8 +50,11 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let cam_dist      = distance(orig_world_xz, vec2<f32>(view.world_position.x, view.world_position.z));
     let vertex_size   = clamp(cam_dist / 128.0, 4.0, 64.0);
     let wave = water_fn::get_wave_result(orig_world_xz, vertex_size);
+    let shore_wave_attn = water_fn::shoreline_wave_attenuation(orig_world_xz);
+    let damped_xz_disp = wave.xz_disp * shore_wave_attn;
+    let damped_height = wave.height * shore_wave_attn;
 
-    out.world_position = world_position + vec4<f32>(wave.xz_disp.x, wave.height, wave.xz_disp.y, 0.0);
+    out.world_position = world_position + vec4<f32>(damped_xz_disp.x, damped_height, damped_xz_disp.y, 0.0);
     out.position       = position_world_to_clip(out.world_position.xyz);
 
 #ifdef VERTEX_UVS

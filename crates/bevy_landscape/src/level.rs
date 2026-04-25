@@ -51,9 +51,13 @@ pub struct LevelDesc {
     pub max_mip_level: u8,
     /// Mip level used to build the global collision heightfield.
     pub collision_mip_level: u8,
-    /// Uniform world scale applied to both horizontal (X/Z) and vertical (Y)
-    /// extents.  World bounds are derived from the tile grid at load time.
+    /// Physical scale of the source tiles: world-space metres per tile texel.
+    /// Used to compute source_spacing = world_scale × 2^max_mip_level.
     pub world_scale: f32,
+    /// Finest clipmap mesh vertex spacing in world-space metres.
+    /// Defaults to `world_scale` when absent (backward-compatible).
+    #[serde(default, skip_serializing_if = "is_zero_f32")]
+    pub lod0_mesh_spacing: f32,
     /// Base height range before `world_scale` is applied: a fully-white height
     /// texel (R16Unorm = 1.0) maps to this many world units on the Y axis.
     pub height_scale: f32,
@@ -80,6 +84,10 @@ fn is_default_metadata(m: &TerrainMetadata) -> bool {
     m.water_level.is_none()
 }
 
+fn is_zero_f32(v: &f32) -> bool {
+    *v == 0.0
+}
+
 impl Default for LevelDesc {
     fn default() -> Self {
         let default_config = TerrainConfig::default();
@@ -90,6 +98,7 @@ impl Default for LevelDesc {
             max_mip_level: 5,
             collision_mip_level: 2,
             world_scale: 1.0,
+            lod0_mesh_spacing: 0.0, // 0 = use world_scale (backward-compat sentinel)
             height_scale: default_config.height_scale,
             clipmap_levels: default_config.clipmap_levels,
             material_library: MaterialLibrary::default(),
@@ -124,6 +133,7 @@ impl LevelDesc {
             max_mip_level: source.max_mip_level,
             collision_mip_level: source.collision_mip_level,
             world_scale: config.world_scale,
+            lod0_mesh_spacing: config.lod0_mesh_spacing,
             height_scale: base_height_scale,
             clipmap_levels: config.clipmap_levels,
             material_library: library.clone(),
@@ -151,6 +161,12 @@ impl LevelDesc {
 
         let mut config = TerrainConfig::default();
         config.world_scale = self.world_scale;
+        // 0.0 is the sentinel meaning "not set" — fall back to world_scale.
+        config.lod0_mesh_spacing = if self.lod0_mesh_spacing > 0.0 {
+            self.lod0_mesh_spacing
+        } else {
+            self.world_scale
+        };
         config.height_scale = self.height_scale * self.world_scale;
 
         let tile_root = self.tile_root.as_deref().map(PathBuf::from);
@@ -165,7 +181,7 @@ impl LevelDesc {
         // Derive clipmap_levels from world extent so every ring has real tile
         // data and no flat height-0 rings appear beyond the terrain boundary.
         //
-        // Ring L half-width = block_size × 2 × (world_scale × 2^L).
+        // Ring L half-width = block_size × 2 × (lod0_mesh_spacing × 2^L).
         // We find the largest L where this fits within the world half-extent,
         // then set clipmap_levels = L + 1.
         {
@@ -175,7 +191,7 @@ impl LevelDesc {
                 let dz = (world_max.y - world_min.y) * 0.5;
                 dx.min(dz).max(1.0)
             };
-            let min_ring_half = block_size * 2.0 * config.world_scale;
+            let min_ring_half = block_size * 2.0 * config.lod0_mesh_spacing;
             let max_level = if min_ring_half > 0.0 {
                 (world_half / min_ring_half).log2().floor() as u32
             } else {

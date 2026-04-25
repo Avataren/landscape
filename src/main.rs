@@ -1,6 +1,7 @@
 mod player;
 
 use bevy::{
+    anti_alias::taa::TemporalAntiAliasing,
     camera::{Exposure, ScreenSpaceTransmissionQuality},
     core_pipeline::{prepass::DepthPrepass, tonemapping::Tonemapping},
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
@@ -156,7 +157,8 @@ fn setup_scene(
             ..default()
         },
         DepthPrepass,
-        Msaa::Sample4,
+        TemporalAntiAliasing::default(),
+        Msaa::Off,
         Projection::Perspective(PerspectiveProjection {
             near: 0.1,
             // Terrain world is ~4 096 m across; 100 km gives comfortable margin

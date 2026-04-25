@@ -10,6 +10,7 @@ use bevy::{
     render::{render_asset::*, render_resource::*, texture::GpuImage},
     shader::*,
 };
+use bevy_landscape::MAX_SUPPORTED_CLIPMAP_LEVELS;
 
 pub type StandardWaterMaterial = ExtendedMaterial<StandardMaterial, WaterMaterial>;
 
@@ -45,6 +46,27 @@ pub struct WaterMaterial {
     pub shoreline_foam_depth: f32,
     /// Dominant wave / wind direction in world XZ.
     pub wave_direction: Vec2,
+    /// Undisplaced water surface height in world Y.
+    pub water_height: f32,
+    /// Water depth range over which shore displacement fades out.
+    pub shore_wave_damp_width: f32,
+    /// Terrain height clipmap bound for shoreline damping.
+    #[texture(101, visibility(vertex, fragment), dimension = "2d_array")]
+    #[sampler(102, visibility(vertex, fragment))]
+    #[reflect(ignore)]
+    pub terrain_height_texture: Handle<Image>,
+    /// Terrain world bounds: (min_x, min_z, max_x, max_z).
+    #[reflect(ignore)]
+    pub terrain_world_bounds: Vec4,
+    /// Terrain height scale in world-space metres.
+    #[reflect(ignore)]
+    pub terrain_height_scale: f32,
+    /// Number of active terrain clipmap levels.
+    #[reflect(ignore)]
+    pub terrain_num_levels: u32,
+    /// Per-level terrain clipmap data mirrored from the terrain material.
+    #[reflect(ignore)]
+    pub terrain_clip_levels: [Vec4; MAX_SUPPORTED_CLIPMAP_LEVELS],
 }
 
 impl Default for WaterMaterial {
@@ -63,6 +85,13 @@ impl Default for WaterMaterial {
             foam_color: Color::srgba(1.0, 1.0, 1.0, 0.9),
             shoreline_foam_depth: 2.0,
             wave_direction: Vec2::X,
+            water_height: 0.0,
+            shore_wave_damp_width: 5.5,
+            terrain_height_texture: Handle::default(),
+            terrain_world_bounds: Vec4::ZERO,
+            terrain_height_scale: 0.0,
+            terrain_num_levels: 0,
+            terrain_clip_levels: [Vec4::ZERO; MAX_SUPPORTED_CLIPMAP_LEVELS],
         }
     }
 }
@@ -79,9 +108,6 @@ impl From<&WaterMaterial> for WaterMaterialKey {
 }
 
 // Field order MUST match the WGSL WaterMaterial struct in water_bindings.wgsl.
-// Layout (encase):
-//   vec4 × 5   offsets   0–79
-//   f32  × 7   offsets  80–107  (4-byte implicit end-padding → 112 bytes)
 #[derive(Clone, Default, ShaderType)]
 pub struct WaterMaterialUniform {
     pub deep_color: Vec4,
@@ -89,13 +115,11 @@ pub struct WaterMaterialUniform {
     pub edge_color: Vec4,
     pub foam_color: Vec4,
     pub wave_direction: Vec4,
-    pub amplitude: f32,
-    pub clarity: f32,
-    pub edge_scale: f32,
-    pub wave_speed: f32,
-    pub refraction_strength: f32,
-    pub foam_threshold: f32,
-    pub shoreline_foam_depth: f32,
+    pub terrain_world_bounds: Vec4,
+    pub wave_params: Vec4,
+    pub optical_params: Vec4,
+    pub terrain_params: Vec4,
+    pub terrain_clip_levels: [Vec4; MAX_SUPPORTED_CLIPMAP_LEVELS],
 }
 
 impl AsBindGroupShaderType<WaterMaterialUniform> for WaterMaterial {
@@ -106,13 +130,26 @@ impl AsBindGroupShaderType<WaterMaterialUniform> for WaterMaterial {
             edge_color: self.edge_color.to_linear().to_vec4(),
             foam_color: self.foam_color.to_linear().to_vec4(),
             wave_direction: self.wave_direction.extend(0.0).extend(0.0),
-            amplitude: self.amplitude,
-            clarity: self.clarity,
-            edge_scale: self.edge_scale,
-            wave_speed: self.wave_speed,
-            refraction_strength: self.refraction_strength,
-            foam_threshold: self.foam_threshold,
-            shoreline_foam_depth: self.shoreline_foam_depth,
+            terrain_world_bounds: self.terrain_world_bounds,
+            wave_params: Vec4::new(
+                self.amplitude,
+                self.clarity,
+                self.edge_scale,
+                self.wave_speed,
+            ),
+            optical_params: Vec4::new(
+                self.refraction_strength,
+                self.foam_threshold,
+                self.shoreline_foam_depth,
+                self.shore_wave_damp_width,
+            ),
+            terrain_params: Vec4::new(
+                self.water_height,
+                self.terrain_height_scale,
+                self.terrain_num_levels as f32,
+                0.0,
+            ),
+            terrain_clip_levels: self.terrain_clip_levels,
         }
     }
 }

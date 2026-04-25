@@ -2,7 +2,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 use bevy_landscape::{
-    MaterialLibrary, ReloadTerrainRequest, TerrainConfig, TerrainSourceDesc,
+    DetailSynthesisConfig, MaterialLibrary, ReloadTerrainRequest, TerrainConfig, TerrainSourceDesc,
     MAX_SUPPORTED_CLIPMAP_LEVELS,
 };
 use bevy_landscape_water::{WaterEnabled, WaterSettings};
@@ -21,6 +21,15 @@ use crate::sky_panel::SkyPanelState;
 pub(crate) struct WaterParams<'w> {
     settings: Option<ResMut<'w, WaterSettings>>,
     enabled: Option<Res<'w, WaterEnabled>>,
+}
+
+/// Bundled read-only terrain resources + optional synthesis config.
+#[derive(SystemParam)]
+pub(crate) struct TerrainParams<'w> {
+    config: Res<'w, TerrainConfig>,
+    desc: Res<'w, TerrainSourceDesc>,
+    library: Res<'w, MaterialLibrary>,
+    synthesis: Option<ResMut<'w, DetailSynthesisConfig>>,
 }
 
 /// Bundled preferences params — counts as a single system parameter.
@@ -68,28 +77,27 @@ pub(crate) fn toolbar_system(
     mut cloud_panel: ResMut<CloudPanelState>,
     mut fog_panel: ResMut<FogPanelState>,
     mut generator_panel: ResMut<GeneratorPanelState>,
-    config: Res<TerrainConfig>,
-    desc: Res<TerrainSourceDesc>,
-    library: Res<MaterialLibrary>,
     mut reload_tx: MessageWriter<ReloadTerrainRequest>,
     mut water: WaterParams<'_>,
+    mut terrain: TerrainParams<'_>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
 
-    if toolbar.pending_view_distance == Some(config.clipmap_levels) {
+    if toolbar.pending_view_distance == Some(terrain.config.clipmap_levels) {
         toolbar.pending_view_distance = None;
     }
     if toolbar.pending_view_distance.is_none()
         && !toolbar.dragging_view_distance
-        && toolbar.view_distance_rings != config.clipmap_levels
+        && toolbar.view_distance_rings != terrain.config.clipmap_levels
     {
-        toolbar.view_distance_rings = config.clipmap_levels;
+        toolbar.view_distance_rings = terrain.config.clipmap_levels;
     }
 
     // Sync water height slider from resource.
-    // On first access (or after a hot-reload that changed the base height):
-    // capture the level's height as the base and reset the user offset to 0.
-    if let Some(ref ws) = water.settings {
+    // On first access, capture the current runtime height as the base.
+    // If the level reloads and changes the base height externally, preserve
+    // the user's offset and reapply it on top of the new base.
+    if let Some(ref mut ws) = water.settings {
         if !toolbar.water_height_initialized {
             toolbar.water_base_height = ws.height;
             toolbar.water_height_offset = 0.0;
@@ -97,9 +105,12 @@ pub(crate) fn toolbar_system(
         } else if !ws.is_changed() {
             let expected = toolbar.water_base_height + toolbar.water_height_offset;
             if (ws.height - expected).abs() > 0.01 {
-                // External change (e.g. hot-reload) — re-anchor the base.
+                // External change (e.g. clipmap/view-distance reload) —
+                // re-anchor the base while preserving the user offset.
                 toolbar.water_base_height = ws.height;
-                toolbar.water_height_offset = 0.0;
+                if toolbar.water_height_offset.abs() > 0.01 {
+                    ws.height = toolbar.water_base_height + toolbar.water_height_offset;
+                }
             }
         }
     }
@@ -173,21 +184,21 @@ pub(crate) fn toolbar_system(
 
             let should_apply = (response.drag_stopped()
                 || (response.changed() && !toolbar.dragging_view_distance))
-                && toolbar.view_distance_rings != config.clipmap_levels;
+                && toolbar.view_distance_rings != terrain.config.clipmap_levels;
 
             if response.drag_stopped() {
                 toolbar.dragging_view_distance = false;
             }
 
             if should_apply {
-                let mut new_config = config.clone();
+                let mut new_config = terrain.config.clone();
                 new_config.clipmap_levels = toolbar.view_distance_rings;
                 toolbar.pending_view_distance = Some(toolbar.view_distance_rings);
                 toolbar.dragging_view_distance = false;
                 reload_tx.write(ReloadTerrainRequest {
                     config: new_config,
-                    source: desc.clone(),
-                    material_library: library.clone(),
+                    source: terrain.desc.clone(),
+                    material_library: terrain.library.clone(),
                 });
             }
 
@@ -208,6 +219,40 @@ pub(crate) fn toolbar_system(
                     if let Some(ref mut ws) = water.settings {
                         ws.height = toolbar.water_base_height + toolbar.water_height_offset;
                     }
+                }
+            }
+
+            if let Some(ref mut syn) = terrain.synthesis {
+                ui.separator();
+                ui.checkbox(&mut syn.enabled, "Detail Synthesis")
+                    .on_hover_text("Enable/disable GPU fBM detail synthesis for fine clipmap LODs.");
+                if syn.enabled {
+                    ui.add_sized(
+                        [160.0, 0.0],
+                        egui::Slider::new(&mut syn.max_amplitude, 0.0_f32..=500.0)
+                            .suffix(" m")
+                            .text("Amplitude"),
+                    )
+                    .on_hover_text("Maximum fBM height residual in world-space metres.");
+                    ui.add_sized(
+                        [160.0, 0.0],
+                        egui::Slider::new(&mut syn.erosion_strength, 0.0_f32..=1.0)
+                            .text("Erosion"),
+                    )
+                    .on_hover_text("0 = plain fBM, 1 = gradient-attenuated erosion shaping.");
+                    ui.add_sized(
+                        [160.0, 0.0],
+                        egui::Slider::new(&mut syn.gain, 0.1_f32..=0.9)
+                            .text("Gain"),
+                    )
+                    .on_hover_text("fBM amplitude multiplier per octave (persistence).");
+                    ui.add_sized(
+                        [160.0, 0.0],
+                        egui::Slider::new(&mut syn.slope_mask_threshold_deg, 0.0_f32..=80.0)
+                            .suffix("°")
+                            .text("Slope cutoff"),
+                    )
+                    .on_hover_text("Slope angle above which fBM is suppressed (cliff faces).");
                 }
             }
         });

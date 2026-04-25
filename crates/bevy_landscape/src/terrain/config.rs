@@ -1,6 +1,6 @@
 use bevy::prelude::*;
 
-pub const MAX_SUPPORTED_CLIPMAP_LEVELS: usize = 16;
+pub const MAX_SUPPORTED_CLIPMAP_LEVELS: usize = 32;
 
 /// Central configuration for the terrain renderer.
 /// Tweak these values to scale world size and quality.
@@ -21,14 +21,24 @@ pub struct TerrainConfig {
     pub clipmap_n: u32,
     /// Height/material tile texel resolution (square).
     pub tile_size: u32,
-    /// Uniform terrain scale multiplier at LOD 0, expressed as world-space
-    /// units per height texel in X/Z.
+    /// Physical scale of the source heightmap tiles: world-space metres per
+    /// tile texel at mip-level 0.  Used to interpret source data dimensions
+    /// and compute `source_spacing = world_scale × 2^max_mip_level`.
     ///
-    /// This is the runtime value used by terrain rendering, streaming, and
-    /// collision. In the app binary it is normally loaded from
-    /// `landscape.toml` `[terrain_config] world_scale`; the `1.0` default
-    /// below is only a fallback when no external config overrides it.
+    /// Loaded from `landscape.toml` `[terrain_config] world_scale`.
     pub world_scale: f32,
+
+    /// Finest vertex/texel spacing of the runtime clipmap mesh, in world-space
+    /// metres.  Each successive LOD doubles this value.
+    ///
+    /// Decoupled from `world_scale` so the mesh resolution can be set
+    /// independently of the source tile pixel size.  For example, with a 30 m
+    /// source and `lod0_mesh_spacing = 2.0`, LOD 0 has 2 m vertices even
+    /// though the source only has data every 30 m — the synthesis pass fills
+    /// the gap.
+    ///
+    /// Defaults to `world_scale` if not set (backward-compatible).
+    pub lod0_mesh_spacing: f32,
     /// Effective runtime world-space Y range: a fully-white height texel
     /// (R16Unorm = 1.0) maps to this many world units after the app folds in
     /// the uniform `world_scale` multiplier. The compile-time default below is
@@ -47,10 +57,6 @@ pub struct TerrainConfig {
     /// Maximum view distance for terrain (used for LOD scale computation).
     #[allow(dead_code)]
     pub max_view_distance: f32,
-    /// Fill clipmap layers and missing tiles with procedural sine-wave heights.
-    /// Disabled by default — leave false when real tile data is available so
-    /// unloaded regions show as flat (height 0) rather than mismatched bumps.
-    pub procedural_fallback: bool,
     /// When true, sample the world-aligned diffuse EXR as terrain albedo.
     /// Disable to fall back to the procedural slope/altitude shading.
     pub use_macro_color_map: bool,
@@ -72,11 +78,11 @@ impl Default for TerrainConfig {
             clipmap_n: 511,
             tile_size: 256,
             world_scale: 1.0,
+            lod0_mesh_spacing: 1.0,
             height_scale: 1024.0,
             morph_start_ratio: 0.6,
             max_resident_tiles: 256,
             max_view_distance: 65536.0,
-            procedural_fallback: false,
             use_macro_color_map: true,
             macro_color_resolution: 16384,
             macro_color_flip_v: false,

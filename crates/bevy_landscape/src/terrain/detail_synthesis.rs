@@ -1,15 +1,13 @@
 //! Real-time procedural detail synthesis for fine clipmap LOD levels.
 //!
-//! A compute pass runs each frame writing a height residual (world-space metres)
-//! into a per-layer R32Float texture array.  The terrain vertex shader adds the
-//! residual on top of the coarse source heightmap, producing sub-metre detail
-//! without pre-baked tiles.
+//! A compute pass runs each frame writing full height (bilinear source +
+//! fBM detail) into the fine layers of the R32Float clipmap height array.
+//! The vertex shader reads height directly — no separate detail texture.
 //!
 //! Architecture
 //! ─────────────
 //! Main world:
 //!   `DetailSynthesisConfig`  – tweakable noise parameters
-//!   `DetailTexture`          – R32Float handle shared with TerrainMaterial
 //!   `DetailSynthesisState`   – per-frame per-LOD params (extracted to render world)
 //!
 //! Render world:
@@ -20,9 +18,7 @@
 use std::num::NonZeroU64;
 
 use bevy::{
-    asset::RenderAssetUsages,
     core_pipeline::core_3d::graph::{Core3d, Node3d},
-    image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     prelude::*,
     render::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
@@ -34,9 +30,9 @@ use bevy::{
             BindGroup, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
             BindingResource, BindingType, Buffer, BufferBinding, BufferBindingType,
             BufferInitDescriptor, BufferUsages, CachedComputePipelineId, CachedPipelineState,
-            ComputePassDescriptor, ComputePipelineDescriptor, Extent3d, PipelineCache,
-            ShaderStages, StorageTextureAccess, TextureAspect, TextureDimension, TextureFormat,
-            TextureUsages, TextureViewDescriptor, TextureViewDimension,
+            ComputePassDescriptor, ComputePipelineDescriptor, PipelineCache,
+            SamplerBindingType, ShaderStages, StorageTextureAccess, TextureAspect,
+            TextureFormat, TextureSampleType, TextureViewDescriptor, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         texture::GpuImage,
@@ -69,28 +65,26 @@ pub struct DetailSynthesisConfig {
     pub seed: Vec2,
     /// Disable synthesis without removing the plugin.
     pub enabled: bool,
+    /// Slope angle (degrees) at which the detail amplitude starts fading.
+    /// Suppresses fBM on cliff faces where fractal noise looks unrealistic.
+    pub slope_mask_threshold_deg: f32,
+    /// Angular width (degrees) of the fade band above the threshold.
+    pub slope_mask_falloff_deg: f32,
 }
 
 impl Default for DetailSynthesisConfig {
     fn default() -> Self {
         Self {
-            max_amplitude: 6.0,
+            max_amplitude: 50.0,
             lacunarity: 2.1,
             gain: 0.45,
             erosion_strength: 0.55,
             seed: Vec2::ZERO,
             enabled: true,
+            slope_mask_threshold_deg: 40.0,
+            slope_mask_falloff_deg: 20.0,
         }
     }
-}
-
-/// Handle to the R32Float detail residual texture array (one layer per LOD).
-/// Inserted by `setup_terrain`; passed to `TerrainMaterial` for vertex reads.
-#[derive(Resource, Clone)]
-pub struct DetailTexture {
-    pub handle: Handle<Image>,
-    pub resolution: u32,
-    pub levels: u32,
 }
 
 // ── Extracted state (main → render world each frame) ─────────────────────────
@@ -98,6 +92,8 @@ pub struct DetailTexture {
 /// Per-LOD compute dispatch parameters.
 #[derive(Clone, Debug)]
 pub struct PerLodSynthParams {
+    /// Actual clipmap LOD level (used to index the height texture array layer).
+    pub lod_level: u32,
     pub clip_center_x: f32,
     pub clip_center_z: f32,
     pub texel_world_size: f32,
@@ -109,34 +105,50 @@ pub struct PerLodSynthParams {
 pub struct DetailSynthesisState {
     /// One entry per LOD level that actually needs synthesis.
     pub lod_params: Vec<PerLodSynthParams>,
-    /// Handle to the R32Float detail array (for per-layer view creation).
-    pub detail_texture: Option<Handle<Image>>,
+    /// Handle to the R32Float clipmap height array (compute writes here).
+    pub clipmap_height_handle: Option<Handle<Image>>,
+    /// Handle to the R16Unorm source heightmap (compute reads for base height).
+    pub source_heightmap_handle: Option<Handle<Image>>,
+    /// World-space XZ of texel (0, 0) in the source heightmap.
+    pub source_origin: Vec2,
+    /// World-space XZ size of the source heightmap.
+    pub source_extent: Vec2,
+    /// [0,1] → world-space metres multiplier.
+    pub height_scale: f32,
     /// World-space texel size of the source heightmap (~30 m).
     pub source_spacing: f32,
     /// Snapshot of the current config.
     pub config: DetailSynthesisConfig,
-    /// Texture resolution (number of texels per edge, e.g. 512).
+    /// Texture resolution (texels per edge, e.g. 512).
     pub resolution: u32,
 }
 
 // ── GPU uniform struct (must match SynthesisParams in detail_synthesis.wgsl) ──
 
-/// WGSL std140-compatible layout: 12 scalars × 4 bytes = 48 bytes, 16-aligned.
+/// WGSL std140-compatible layout: 20 scalars × 4 bytes = 80 bytes, 16-aligned.
 #[repr(C)]
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 struct SynthesisParamsGpu {
-    clip_center_x: f32,      //  0
-    clip_center_z: f32,      //  4
-    texel_world_size: f32,   //  8
-    clipmap_res: f32,        // 12
-    octave_count: u32,       // 16
-    source_lod_spacing: f32, // 20
-    max_amplitude: f32,      // 24
-    lacunarity: f32,         // 28
-    gain: f32,               // 32
-    erosion_strength: f32,   // 36
-    seed_x: f32,             // 40
-    seed_z: f32,             // 44
+    clip_center_x: f32,           //  0
+    clip_center_z: f32,           //  4
+    texel_world_size: f32,        //  8
+    clipmap_res: f32,             // 12
+    octave_count: u32,            // 16
+    source_lod_spacing: f32,      // 20
+    max_amplitude: f32,           // 24
+    lacunarity: f32,              // 28
+    gain: f32,                    // 32
+    erosion_strength: f32,        // 36
+    seed_x: f32,                  // 40
+    seed_z: f32,                  // 44
+    source_origin_x: f32,        // 48
+    source_origin_z: f32,        // 52
+    source_extent_x: f32,        // 56
+    source_extent_z: f32,        // 60
+    height_scale: f32,            // 64
+    slope_mask_threshold: f32,   // 68 (degrees)
+    slope_mask_falloff: f32,     // 72 (degrees)
+    _pad: f32,                   // 76
 }
 
 const PARAMS_SIZE: u64 = std::mem::size_of::<SynthesisParamsGpu>() as u64;
@@ -145,7 +157,6 @@ const PARAMS_SIZE: u64 = std::mem::size_of::<SynthesisParamsGpu>() as u64;
 
 #[derive(Resource)]
 struct DetailSynthesisPipeline {
-    /// Stored so `prepare` can retrieve the BindGroupLayout from PipelineCache.
     layout_desc: BindGroupLayoutDescriptor,
     pipeline_id: CachedComputePipelineId,
 }
@@ -165,7 +176,7 @@ fn make_layout_desc() -> BindGroupLayoutDescriptor {
                 },
                 count: None,
             },
-            // binding 1: per-layer D2 storage write
+            // binding 1: per-layer D2 storage write to clipmap height array
             BindGroupLayoutEntry {
                 binding: 1,
                 visibility: ShaderStages::COMPUTE,
@@ -174,6 +185,24 @@ fn make_layout_desc() -> BindGroupLayoutDescriptor {
                     format: TextureFormat::R32Float,
                     view_dimension: TextureViewDimension::D2,
                 },
+                count: None,
+            },
+            // binding 2: source heightmap (R16Unorm, sampled)
+            BindGroupLayoutEntry {
+                binding: 2,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Texture {
+                    sample_type: TextureSampleType::Float { filterable: true },
+                    view_dimension: TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // binding 3: source heightmap sampler
+            BindGroupLayoutEntry {
+                binding: 3,
+                visibility: ShaderStages::COMPUTE,
+                ty: BindingType::Sampler(SamplerBindingType::Filtering),
                 count: None,
             },
         ],
@@ -208,7 +237,6 @@ impl FromWorld for DetailSynthesisPipeline {
 #[derive(Resource, Default)]
 struct DetailSynthesisBindGroups {
     groups: Vec<BindGroup>,
-    // Uniform buffers kept alive until the next prepare run.
     _bufs: Vec<Buffer>,
 }
 
@@ -227,14 +255,18 @@ fn prepare_detail_synthesis_bind_groups(
         commands.insert_resource(DetailSynthesisBindGroups::default());
         return;
     }
-    let Some(handle) = &state.detail_texture else { return };
-    let Some(gpu_image) = gpu_images.get(handle) else { return };
+
+    let Some(clipmap_handle) = &state.clipmap_height_handle else { return };
+    let Some(clipmap_gpu) = gpu_images.get(clipmap_handle) else { return };
+
+    let Some(source_handle) = &state.source_heightmap_handle else { return };
+    let Some(source_gpu) = gpu_images.get(source_handle) else { return };
 
     let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout_desc);
     let mut groups: Vec<BindGroup> = Vec::with_capacity(state.lod_params.len());
     let mut bufs: Vec<Buffer> = Vec::with_capacity(state.lod_params.len());
 
-    for (lod_idx, lp) in state.lod_params.iter().enumerate() {
+    for lp in &state.lod_params {
         let gpu_params = SynthesisParamsGpu {
             clip_center_x: lp.clip_center_x,
             clip_center_z: lp.clip_center_z,
@@ -248,6 +280,14 @@ fn prepare_detail_synthesis_bind_groups(
             erosion_strength: state.config.erosion_strength,
             seed_x: state.config.seed.x,
             seed_z: state.config.seed.y,
+            source_origin_x: state.source_origin.x,
+            source_origin_z: state.source_origin.y,
+            source_extent_x: state.source_extent.x,
+            source_extent_z: state.source_extent.y,
+            height_scale: state.height_scale,
+            slope_mask_threshold: state.config.slope_mask_threshold_deg,
+            slope_mask_falloff: state.config.slope_mask_falloff_deg,
+            _pad: 0.0,
         };
 
         let uniform_buf = render_device.create_buffer_with_data(&BufferInitDescriptor {
@@ -256,15 +296,15 @@ fn prepare_detail_synthesis_bind_groups(
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         });
 
-        // Create a D2 view targeting exactly this LOD layer of the D2Array.
-        let layer_view = gpu_image.texture.create_view(&TextureViewDescriptor {
+        // D2 view targeting the specific clipmap layer for this LOD.
+        let layer_view = clipmap_gpu.texture.create_view(&TextureViewDescriptor {
             label: Some("detail_synthesis_layer_view"),
             format: Some(TextureFormat::R32Float),
             dimension: Some(TextureViewDimension::D2),
             aspect: TextureAspect::All,
             base_mip_level: 0,
             mip_level_count: Some(1),
-            base_array_layer: lod_idx as u32,
+            base_array_layer: lp.lod_level,
             array_layer_count: Some(1),
             usage: None,
         });
@@ -284,6 +324,14 @@ fn prepare_detail_synthesis_bind_groups(
                 BindGroupEntry {
                     binding: 1,
                     resource: BindingResource::TextureView(&layer_view),
+                },
+                BindGroupEntry {
+                    binding: 2,
+                    resource: BindingResource::TextureView(&source_gpu.texture_view),
+                },
+                BindGroupEntry {
+                    binding: 3,
+                    resource: BindingResource::Sampler(&source_gpu.sampler),
                 },
             ],
         );
@@ -348,52 +396,21 @@ impl Node for DetailSynthesisNode {
     }
 }
 
-// ── Main-world helper functions ───────────────────────────────────────────────
+// ── Main-world: update system ─────────────────────────────────────────────────
 
-/// Creates the R32Float detail texture array. Called once from `setup_terrain`.
-pub fn create_detail_texture(config: &TerrainConfig, images: &mut Assets<Image>) -> DetailTexture {
-    let res = config.clipmap_resolution();
-    let levels = config.active_clipmap_levels();
-
-    // 4 bytes per texel (R32Float); zero-initialised → no residual until compute runs.
-    let mut image = Image::new(
-        Extent3d { width: res, height: res, depth_or_array_layers: levels },
-        TextureDimension::D2,
-        vec![0u8; (res * res * levels * 4) as usize],
-        TextureFormat::R32Float,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    image.texture_descriptor.usage =
-        TextureUsages::TEXTURE_BINDING | TextureUsages::STORAGE_BINDING | TextureUsages::COPY_DST;
-    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-        address_mode_u: ImageAddressMode::Repeat,
-        address_mode_v: ImageAddressMode::Repeat,
-        address_mode_w: ImageAddressMode::Repeat,
-        mag_filter: ImageFilterMode::Linear,
-        min_filter: ImageFilterMode::Linear,
-        ..default()
-    });
-
-    let handle = images.add(image);
-    DetailTexture { handle, resolution: res, levels }
-}
-
-/// Updates `DetailSynthesisState` from the current clipmap material uniforms.
+/// Updates `DetailSynthesisState` from the current clipmap + source heightmap state.
 /// Runs in `Update`, after `update_terrain_view_state`.
 pub fn update_synthesis_state(
     clipmap_state: Res<TerrainClipmapState>,
     materials: Res<Assets<TerrainMaterial>>,
     source_state: Option<Res<SourceHeightmapState>>,
-    detail_texture: Option<Res<DetailTexture>>,
-    config: Res<DetailSynthesisConfig>,
+    terrain_config: Res<TerrainConfig>,
+    detail_config: Res<DetailSynthesisConfig>,
+    existing: Option<Res<DetailSynthesisState>>,
     mut commands: Commands,
 ) {
-    let (Some(source), Some(detail_tex)) = (source_state, detail_texture) else {
-        return;
-    };
-    let Some(mat) = materials.get(&clipmap_state.material_handle) else {
-        return;
-    };
+    let Some(source) = source_state else { return };
+    let Some(mat) = materials.get(&clipmap_state.material_handle) else { return };
 
     let source_spacing = source.texel_size;
     let active_levels = mat.params.num_lod_levels as usize;
@@ -403,22 +420,19 @@ pub fn update_synthesis_state(
         let clip = mat.params.clip_levels[lod];
         let texel_ws = clip.w;
 
-        // Skip LODs whose texel spacing is already at or coarser than the source —
-        // the source heightmap already contains those frequencies.
-        if texel_ws >= source_spacing {
-            continue;
-        }
-
-        // Octave count: span from source half-Nyquist down to 2 × texel_ws.
-        //   base_wavelength   = source_spacing / 2
-        //   finest_wavelength = 2 * texel_ws
-        //   octaves ≈ log2(base / finest)
-        let base_wl = source_spacing * 0.5;
-        let fine_wl = (texel_ws * 2.0).max(0.01);
-        let octave_count = (base_wl / fine_wl).log2().floor() as u32;
-        let octave_count = octave_count.clamp(1, 6);
+        // Coarse LODs (texel spacing ≥ source) get 0 octaves: pure source
+        // sampling, no fBM detail.  Fine LODs add octaves of fBM up to 6.
+        let octave_count = if texel_ws >= source_spacing {
+            0
+        } else {
+            let base_wl = source_spacing * 0.5;
+            let fine_wl = (texel_ws * 2.0).max(0.01);
+            let raw = (base_wl / fine_wl).log2().floor() as i32;
+            raw.clamp(1, 6) as u32
+        };
 
         lod_params.push(PerLodSynthParams {
+            lod_level: lod as u32,
             clip_center_x: clip.x,
             clip_center_z: clip.y,
             texel_world_size: texel_ws,
@@ -426,12 +440,34 @@ pub fn update_synthesis_state(
         });
     }
 
+    // Only log when the synthesis configuration changes, not every frame.
+    let prev_count = existing.as_ref().map(|s| s.lod_params.len());
+    let prev_spacing = existing.as_ref().map(|s| s.source_spacing);
+    if Some(lod_params.len()) != prev_count || Some(source_spacing) != prev_spacing {
+        if lod_params.is_empty() {
+            warn!(
+                "[DetailSynthesis] No LODs qualify for synthesis \
+                 (source_spacing={source_spacing:.1}m, active_levels={active_levels}). \
+                 Check max_mip_level in landscape.toml."
+            );
+        } else {
+            info!(
+                "[DetailSynthesis] Synthesizing {} LOD(s), source_spacing={source_spacing:.1}m",
+                lod_params.len()
+            );
+        }
+    }
+
     commands.insert_resource(DetailSynthesisState {
         lod_params,
-        detail_texture: Some(detail_tex.handle.clone()),
+        clipmap_height_handle: Some(clipmap_state.height_texture_handle.clone()),
+        source_heightmap_handle: Some(source.handle.clone()),
+        source_origin: source.world_origin,
+        source_extent: source.world_extent,
+        height_scale: terrain_config.height_scale,
         source_spacing,
-        config: config.clone(),
-        resolution: detail_tex.resolution,
+        config: detail_config.clone(),
+        resolution: terrain_config.clipmap_resolution(),
     });
 }
 
@@ -450,8 +486,6 @@ impl Plugin for DetailSynthesisPlugin {
             return;
         };
 
-        // Pipeline init deferred to `finish` — PipelineCache is not yet present
-        // during `build`. Only set up the systems and render graph here.
         render_app
             .init_resource::<DetailSynthesisBindGroups>()
             .add_systems(
@@ -466,7 +500,6 @@ impl Plugin for DetailSynthesisPlugin {
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             return;
         };
-        // PipelineCache (and RenderDevice / AssetServer) are now available.
         render_app.init_resource::<DetailSynthesisPipeline>();
     }
 }

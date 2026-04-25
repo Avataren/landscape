@@ -49,7 +49,7 @@ pub fn build_patch_instances_for_view(
     for level in 0..config.active_clipmap_levels() {
         let lvl_scale = match view.level_scales.get(level as usize) {
             Some(&s) => s,
-            None => level_scale(config.world_scale, level),
+            None => level_scale(config.lod0_mesh_spacing, level),
         };
         let center = match view.clip_centers.get(level as usize) {
             Some(&c) => c,
@@ -254,7 +254,7 @@ mod tests {
         let mut view = TerrainViewState::default();
         view.camera_pos_ws = cam;
         for level in 0..config.active_clipmap_levels() {
-            let scale = level_scale(config.world_scale, level);
+            let scale = level_scale(config.lod0_mesh_spacing, level);
             view.level_scales.push(scale);
             view.clip_centers
                 .push(snap_camera_to_level_grid(cam.xz(), scale));

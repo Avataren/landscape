@@ -11,6 +11,25 @@ pub fn level_scale(base_sample_spacing: f32, level: u32) -> f32 {
     base_sample_spacing * (1u32 << level) as f32
 }
 
+/// Maps a clipmap ring's world-space scale to the appropriate tile mip level.
+///
+/// When `lod0_mesh_spacing != world_scale` the clipmap ring index no longer
+/// equals the tile mip level.  This function picks the finest available mip
+/// whose source texel spacing (`world_scale × 2^mip`) does not exceed the
+/// ring's own spacing, clamped to `[0, max_mip_level]`.
+pub fn clipmap_to_tile_mip(level_scale_ws: f32, world_scale: f32, max_mip_level: u8) -> u8 {
+    if world_scale <= 0.0 || level_scale_ws <= 0.0 {
+        return 0;
+    }
+    let ratio = level_scale_ws / world_scale;
+    let mip = if ratio >= 1.0 {
+        ratio.log2().floor() as u8
+    } else {
+        0
+    };
+    mip.min(max_mip_level)
+}
+
 /// Snap a camera XZ position to the integer grid for a given level scale.
 /// Returns grid-space integer coordinates (multiply by scale to get world).
 pub fn snap_camera_to_level_grid(camera_xz: Vec2, level_scale: f32) -> IVec2 {
@@ -86,26 +105,37 @@ pub fn build_block_origins(center: IVec2, scale: f32, m: u32, has_inner_hole: bo
 ///
 /// The ring spans `±2 * block_size` grid units from `center` in each axis
 /// (the full outer boundary of the 4 × 4 canonical-block arrangement).
+///
+/// `mesh_level_scale` is the world-space size per grid unit at this LOD
+/// (`lod0_mesh_spacing × 2^level`).  `source_world_scale` is the world-space
+/// size per source-tile texel at mip level 0 (i.e. `TerrainConfig::world_scale`).
+/// These may differ when `lod0_mesh_spacing ≠ world_scale`.
 pub fn compute_needed_tiles_for_level(
     center: IVec2,
-    level_scale: f32,
+    mesh_level_scale: f32,
     block_size: u32,
     tile_size: u32,
     level: u8,
+    source_world_scale: f32,
 ) -> Vec<TileKey> {
-    let half_extent = (block_size * 2) as i32; // = 2m
-    let tile_grid = tile_size as i32;
+    let half_extent = (block_size * 2) as i32;
+    let tile_size_f = tile_size as f32;
 
-    // Ring outer boundary: center ± 2m in grid space.
+    // Convert grid coords to world space, then to source-tile indices.
+    // Source tile index = floor(world_pos / (tile_size * source_world_scale * 2^level)).
+    // world_pos = grid * mesh_level_scale, so:
+    //   tile_idx = floor(grid * mesh_level_scale / (tile_size * source_world_scale * 2^level))
+    // The 2^level factor is already embedded in mesh_level_scale and the tile mip scale.
+    // Tile at mip `level` covers tile_size texels each at source_world_scale * 2^level m/texel.
+    let tile_world_size = tile_size_f * source_world_scale * (1u32 << level) as f32;
+
     let min_grid = center + IVec2::splat(-half_extent);
     let max_grid = center + IVec2::splat(half_extent);
 
-    let tx_min =
-        (min_grid.x as f32 * level_scale / (tile_grid as f32 * level_scale)).floor() as i32;
-    let ty_min =
-        (min_grid.y as f32 * level_scale / (tile_grid as f32 * level_scale)).floor() as i32;
-    let tx_max = (max_grid.x as f32 * level_scale / (tile_grid as f32 * level_scale)).ceil() as i32;
-    let ty_max = (max_grid.y as f32 * level_scale / (tile_grid as f32 * level_scale)).ceil() as i32;
+    let tx_min = (min_grid.x as f32 * mesh_level_scale / tile_world_size).floor() as i32;
+    let ty_min = (min_grid.y as f32 * mesh_level_scale / tile_world_size).floor() as i32;
+    let tx_max = (max_grid.x as f32 * mesh_level_scale / tile_world_size).ceil() as i32;
+    let ty_max = (max_grid.y as f32 * mesh_level_scale / tile_world_size).ceil() as i32;
 
     let mut keys = Vec::new();
     for ty in ty_min..ty_max {
