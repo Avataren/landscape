@@ -23,16 +23,14 @@ use bevy::{
     render::{
         extract_resource::{ExtractResource, ExtractResourcePlugin},
         render_asset::RenderAssets,
-        render_graph::{
-            Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel,
-        },
+        render_graph::{Node, NodeRunError, RenderGraphContext, RenderGraphExt, RenderLabel},
         render_resource::{
             BindGroup, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
             BindingResource, BindingType, Buffer, BufferBinding, BufferBindingType,
             BufferInitDescriptor, BufferUsages, CachedComputePipelineId, CachedPipelineState,
-            ComputePassDescriptor, ComputePipelineDescriptor, PipelineCache,
-            SamplerBindingType, ShaderStages, StorageTextureAccess, TextureAspect,
-            TextureFormat, TextureSampleType, TextureViewDescriptor, TextureViewDimension,
+            ComputePassDescriptor, ComputePipelineDescriptor, PipelineCache, SamplerBindingType,
+            ShaderStages, StorageTextureAccess, TextureAspect, TextureFormat, TextureSampleType,
+            TextureViewDescriptor, TextureViewDimension,
         },
         renderer::{RenderContext, RenderDevice},
         texture::GpuImage,
@@ -41,16 +39,14 @@ use bevy::{
 };
 
 use crate::terrain::{
-    clipmap_texture::TerrainClipmapState,
-    config::TerrainConfig,
-    material::TerrainMaterial,
+    clipmap_texture::TerrainClipmapState, config::TerrainConfig, material::TerrainMaterial,
     source_heightmap::SourceHeightmapState,
 };
 
 // ── Main-world types ──────────────────────────────────────────────────────────
 
 /// Tweakable procedural noise parameters, live-reloaded each frame.
-#[derive(Resource, Clone, Reflect)]
+#[derive(Resource, Clone, Reflect, PartialEq)]
 #[reflect(Resource)]
 pub struct DetailSynthesisConfig {
     /// Maximum height residual in world-space metres.
@@ -97,7 +93,7 @@ impl Default for DetailSynthesisConfig {
 // ── Extracted state (main → render world each frame) ─────────────────────────
 
 /// Per-LOD compute dispatch parameters.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PerLodSynthParams {
     /// Actual clipmap LOD level (used to index the height texture array layer).
     pub lod_level: u32,
@@ -130,32 +126,44 @@ pub struct DetailSynthesisState {
     pub resolution: u32,
 }
 
+#[derive(Default)]
+pub(crate) struct DetailSynthesisCache {
+    initialized: bool,
+    lod_params: Vec<PerLodSynthParams>,
+    source_origin: Vec2,
+    source_extent: Vec2,
+    height_scale: f32,
+    source_spacing: f32,
+    config: DetailSynthesisConfig,
+    resolution: u32,
+}
+
 // ── GPU uniform struct (must match SynthesisParams in detail_synthesis.wgsl) ──
 
 /// WGSL std140-compatible layout: 20 scalars × 4 bytes = 80 bytes, 16-aligned.
 #[repr(C)]
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 struct SynthesisParamsGpu {
-    clip_center_x: f32,           //  0
-    clip_center_z: f32,           //  4
-    texel_world_size: f32,        //  8
-    clipmap_res: f32,             // 12
-    octave_count: u32,            // 16
-    source_lod_spacing: f32,      // 20
-    max_amplitude: f32,           // 24
-    lacunarity: f32,              // 28
-    gain: f32,                    // 32
-    erosion_strength: f32,        // 36
-    seed_x: f32,                  // 40
-    seed_z: f32,                  // 44
-    source_origin_x: f32,        // 48
-    source_origin_z: f32,        // 52
-    source_extent_x: f32,        // 56
-    source_extent_z: f32,        // 60
-    height_scale: f32,            // 64
-    slope_mask_threshold: f32,   // 68 (degrees)
-    slope_mask_falloff: f32,     // 72 (degrees)
-    _pad: f32,                   // 76
+    clip_center_x: f32,        //  0
+    clip_center_z: f32,        //  4
+    texel_world_size: f32,     //  8
+    clipmap_res: f32,          // 12
+    octave_count: u32,         // 16
+    source_lod_spacing: f32,   // 20
+    max_amplitude: f32,        // 24
+    lacunarity: f32,           // 28
+    gain: f32,                 // 32
+    erosion_strength: f32,     // 36
+    seed_x: f32,               // 40
+    seed_z: f32,               // 44
+    source_origin_x: f32,      // 48
+    source_origin_z: f32,      // 52
+    source_extent_x: f32,      // 56
+    source_extent_z: f32,      // 60
+    height_scale: f32,         // 64
+    slope_mask_threshold: f32, // 68 (degrees)
+    slope_mask_falloff: f32,   // 72 (degrees)
+    _pad: f32,                 // 76
 }
 
 const PARAMS_SIZE: u64 = std::mem::size_of::<SynthesisParamsGpu>() as u64;
@@ -223,19 +231,23 @@ impl FromWorld for DetailSynthesisPipeline {
             .resource::<AssetServer>()
             .load("shaders/detail_synthesis.wgsl");
 
-        let pipeline_id = world
-            .resource::<PipelineCache>()
-            .queue_compute_pipeline(ComputePipelineDescriptor {
-                label: Some("detail_synthesis_pipeline".into()),
-                layout: vec![layout_desc.clone()],
-                push_constant_ranges: vec![],
-                shader,
-                shader_defs: vec![],
-                entry_point: Some("synthesize".into()),
-                zero_initialize_workgroup_memory: false,
-            });
+        let pipeline_id =
+            world
+                .resource::<PipelineCache>()
+                .queue_compute_pipeline(ComputePipelineDescriptor {
+                    label: Some("detail_synthesis_pipeline".into()),
+                    layout: vec![layout_desc.clone()],
+                    push_constant_ranges: vec![],
+                    shader,
+                    shader_defs: vec![],
+                    entry_point: Some("synthesize".into()),
+                    zero_initialize_workgroup_memory: false,
+                });
 
-        DetailSynthesisPipeline { layout_desc, pipeline_id }
+        DetailSynthesisPipeline {
+            layout_desc,
+            pipeline_id,
+        }
     }
 }
 
@@ -258,16 +270,24 @@ fn prepare_detail_synthesis_bind_groups(
     render_device: Res<RenderDevice>,
 ) {
     let Some(state) = state else { return };
-    if !state.config.enabled || state.lod_params.is_empty() {
+    if state.lod_params.is_empty() {
         commands.insert_resource(DetailSynthesisBindGroups::default());
         return;
     }
 
-    let Some(clipmap_handle) = &state.clipmap_height_handle else { return };
-    let Some(clipmap_gpu) = gpu_images.get(clipmap_handle) else { return };
+    let Some(clipmap_handle) = &state.clipmap_height_handle else {
+        return;
+    };
+    let Some(clipmap_gpu) = gpu_images.get(clipmap_handle) else {
+        return;
+    };
 
-    let Some(source_handle) = &state.source_heightmap_handle else { return };
-    let Some(source_gpu) = gpu_images.get(source_handle) else { return };
+    let Some(source_handle) = &state.source_heightmap_handle else {
+        return;
+    };
+    let Some(source_gpu) = gpu_images.get(source_handle) else {
+        return;
+    };
 
     let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout_desc);
     let mut groups: Vec<BindGroup> = Vec::with_capacity(state.lod_params.len());
@@ -347,7 +367,10 @@ fn prepare_detail_synthesis_bind_groups(
         bufs.push(uniform_buf);
     }
 
-    commands.insert_resource(DetailSynthesisBindGroups { groups, _bufs: bufs });
+    commands.insert_resource(DetailSynthesisBindGroups {
+        groups,
+        _bufs: bufs,
+    });
 }
 
 // ── Render graph node ─────────────────────────────────────────────────────────
@@ -378,8 +401,7 @@ impl Node for DetailSynthesisNode {
             CachedPipelineState::Ok(_) => {}
             _ => return Ok(()),
         }
-        let Some(compute_pipeline) =
-            pipeline_cache.get_compute_pipeline(pipeline.pipeline_id)
+        let Some(compute_pipeline) = pipeline_cache.get_compute_pipeline(pipeline.pipeline_id)
         else {
             return Ok(());
         };
@@ -411,12 +433,16 @@ pub fn update_synthesis_state(
     clipmap_state: Res<TerrainClipmapState>,
     mut materials: ResMut<Assets<TerrainMaterial>>,
     source_state: Option<Res<SourceHeightmapState>>,
+    view: Res<crate::terrain::resources::TerrainViewState>,
     terrain_config: Res<TerrainConfig>,
     detail_config: Res<DetailSynthesisConfig>,
-    existing: Option<Res<DetailSynthesisState>>,
+    mut cache: Local<DetailSynthesisCache>,
     mut commands: Commands,
 ) {
     let Some(source) = source_state else { return };
+    if view.clip_centers.is_empty() {
+        return;
+    }
     let Some(mat) = materials.get_mut(&clipmap_state.material_handle) else {
         return;
     };
@@ -449,17 +475,20 @@ pub fn update_synthesis_state(
         source.world_extent.x,
         source.world_extent.y,
     );
-    let mat = &*mat;
-    let active_levels = mat.params.num_lod_levels as usize;
-    let mut lod_params: Vec<PerLodSynthParams> = Vec::new();
+    let active_levels = terrain_config.active_clipmap_levels() as usize;
+    let clip_levels = crate::terrain::clipmap_texture::compute_clip_levels(
+        &terrain_config,
+        &view.clip_centers,
+        &view.level_scales,
+    );
+    let mut all_lod_params: Vec<PerLodSynthParams> = Vec::with_capacity(active_levels);
 
-    for lod in 0..active_levels {
-        let clip = mat.params.clip_levels[lod];
+    for (lod, clip) in clip_levels.iter().copied().enumerate().take(active_levels) {
         let texel_ws = clip.w;
 
         // Coarse LODs (texel spacing ≥ source) get 0 octaves: pure source
         // sampling, no fBM detail.  Fine LODs add octaves of fBM up to 6.
-        let octave_count = if texel_ws >= source_spacing {
+        let octave_count = if !detail_config.enabled || texel_ws >= source_spacing {
             0
         } else {
             let base_wl = source_spacing * 0.5;
@@ -468,7 +497,7 @@ pub fn update_synthesis_state(
             raw.clamp(1, 6) as u32
         };
 
-        lod_params.push(PerLodSynthParams {
+        all_lod_params.push(PerLodSynthParams {
             lod_level: lod as u32,
             clip_center_x: clip.x,
             clip_center_z: clip.y,
@@ -478,10 +507,11 @@ pub fn update_synthesis_state(
     }
 
     // Only log when the synthesis configuration changes, not every frame.
-    let prev_count = existing.as_ref().map(|s| s.lod_params.len());
-    let prev_spacing = existing.as_ref().map(|s| s.source_spacing);
-    if Some(lod_params.len()) != prev_count || Some(source_spacing) != prev_spacing {
-        if lod_params.is_empty() {
+    if !cache.initialized
+        || cache.lod_params.len() != all_lod_params.len()
+        || cache.source_spacing != source_spacing
+    {
+        if all_lod_params.is_empty() {
             warn!(
                 "[DetailSynthesis] No LODs qualify for synthesis \
                  (source_spacing={source_spacing:.1}m, active_levels={active_levels}). \
@@ -490,10 +520,38 @@ pub fn update_synthesis_state(
         } else {
             info!(
                 "[DetailSynthesis] Synthesizing {} LOD(s), source_spacing={source_spacing:.1}m",
-                lod_params.len()
+                all_lod_params.len()
             );
         }
     }
+
+    let global_dirty = !cache.initialized
+        || cache.source_origin != source.world_origin
+        || cache.source_extent != source.world_extent
+        || cache.height_scale != terrain_config.height_scale
+        || cache.source_spacing != source_spacing
+        || cache.config != *detail_config
+        || cache.resolution != terrain_config.clipmap_resolution()
+        || cache.lod_params.len() != all_lod_params.len();
+
+    let lod_params = if global_dirty {
+        all_lod_params.clone()
+    } else {
+        all_lod_params
+            .iter()
+            .zip(cache.lod_params.iter())
+            .filter_map(|(new, old)| (new != old).then_some(new.clone()))
+            .collect()
+    };
+
+    cache.initialized = true;
+    cache.lod_params = all_lod_params;
+    cache.source_origin = source.world_origin;
+    cache.source_extent = source.world_extent;
+    cache.height_scale = terrain_config.height_scale;
+    cache.source_spacing = source_spacing;
+    cache.config = detail_config.clone();
+    cache.resolution = terrain_config.clipmap_resolution();
 
     commands.insert_resource(DetailSynthesisState {
         lod_params,

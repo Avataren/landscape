@@ -36,14 +36,13 @@ use clipmap_texture::{
     apply_tiles_to_clipmap, begin_terrain_upload_frame, compute_clip_levels,
     compute_initial_clip_levels, create_initial_clipmap_texture,
     create_initial_normal_clipmap_texture, update_clipmap_textures, TerrainClipmapState,
-    TerrainClipmapUploads,
+    TerrainClipmapUploads, HEIGHT_BYTES_PER_TEXEL,
 };
 use collision::{update_collision_tiles, TerrainCollisionCache};
 use components::TerrainCamera;
 use config::TerrainConfig;
 use detail_synthesis::{update_synthesis_state, DetailSynthesisPlugin};
 use macro_color::load_macro_color_texture;
-use source_heightmap::{load_source_heightmap, SourceHeightmapState};
 use material::{TerrainMaterial, TerrainMaterialUniforms};
 use material_slots::{sync_material_library_to_terrain_material, MaterialLibrary};
 use math::{level_scale, snap_camera_to_nested_clipmap_grid};
@@ -56,9 +55,8 @@ use physics_colliders::{
 };
 use render::TerrainRenderPlugin;
 use residency::update_required_tiles;
-use resources::{
-    TerrainResidency, TerrainStreamQueue, TerrainViewState,
-};
+use resources::{TerrainResidency, TerrainStreamQueue, TerrainViewState};
+use source_heightmap::{load_source_heightmap, SourceHeightmapState};
 use streamer::{poll_tile_stream_jobs, request_tile_loads, setup_tile_channel};
 
 // ---------------------------------------------------------------------------
@@ -99,6 +97,8 @@ pub struct PatchEntities {
     pub trim_v_mesh_handle: Handle<Mesh>,
     /// Trim mesh: 2m quads wide × 1 quad tall (bottom / horizontal strip).
     pub trim_h_mesh_handle: Handle<Mesh>,
+    /// Orientation signature for the currently spawned trim entities.
+    pub trim_layout: Vec<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -150,7 +150,7 @@ impl Plugin for TerrainPlugin {
             // because it needs config/desc to load tile data.
             .add_systems(Startup, (setup_tile_channel, setup_terrain).chain())
             .add_systems(PostStartup, preload_terrain_startup)
-            // Update: ordered as per handoff spec
+            // Update: camera view -> geometry/uniforms -> synthesis state.
             .add_systems(First, begin_terrain_upload_frame)
             .add_systems(Update, update_terrain_view_state)
             .add_systems(
@@ -162,7 +162,9 @@ impl Plugin for TerrainPlugin {
                     update_collision_tiles,
                     update_patch_transforms,
                     update_clipmap_textures,
+                    update_synthesis_state,
                 )
+                    .chain()
                     .after(update_terrain_view_state),
             )
             .add_systems(
@@ -177,7 +179,7 @@ impl Plugin for TerrainPlugin {
             )
             .add_systems(
                 Update,
-                apply_tiles_to_clipmap // Phase 5: tile-based GPU upload
+                apply_tiles_to_clipmap
                     .after(poll_tile_stream_jobs)
                     .after(update_clipmap_textures)
                     .after(update_terrain_view_state),
@@ -192,13 +194,8 @@ impl Plugin for TerrainPlugin {
             .add_systems(Update, rebuild_pbr_textures_system)
             .add_systems(
                 Update,
-                update_synthesis_state.after(update_terrain_view_state),
-            )
-            .add_systems(
-                Update,
                 reload_terrain_system.before(update_terrain_view_state),
             )
-            // Render sub-plugins
             .add_plugins(TerrainRenderPlugin)
             .add_plugins(DetailSynthesisPlugin);
     }
@@ -225,17 +222,6 @@ fn compute_bounds_fade_dist(
     // test can extend at most one patch_size_ws past the terrain boundary.
     // tile_size * 4 covers even coarse rings comfortably.
     tile_size as f32 * world_scale * 4.0
-}
-
-fn has_baked_normal_tiles(desc: &TerrainSourceDesc) -> bool {
-    if let Some(root) = desc.normal_root.as_deref() {
-        return std::path::Path::new(root).exists();
-    }
-
-    desc.tile_root
-        .as_deref()
-        .map(|root| root.join("normal").exists())
-        .unwrap_or(false)
 }
 
 /// Synchronously pre-loads all terrain tiles visible from the starting camera
@@ -362,8 +348,8 @@ fn setup_terrain(
     let levels = config.active_clipmap_levels();
 
     // --- Clipmap texture array (Phase 5) ---
-    // One R8Unorm layer per LOD level, each 512×512 texels.
-    // Layers are regenerated live by `update_clipmap_textures` as the camera moves.
+    // One R32Float layer per LOD level, each clipmap_resolution² texels.
+    // The render-world detail synthesis pass fills active layers before drawing.
     let height_image = create_initial_clipmap_texture(&config);
     let height_cpu_data = height_image.data.clone().unwrap_or_default();
     let height_handle = images.add(height_image);
@@ -400,10 +386,11 @@ fn setup_terrain(
 
     // --- Trim strip meshes (shared across all trim strip instances) ---
     // The long side spans 2m quads at the coarse scale, matching the inner-hole
-    // edge length of each ring level.
+    // edge length of each ring level. The short side is half a coarse cell:
+    // exactly the one-fine-texel parity gap between a parent and an odd child.
     let trim_quads = 2 * config.block_size();
-    let trim_v_mesh = patch_mesh::build_rect_mesh(1, trim_quads); // left/vertical strip
-    let trim_h_mesh = patch_mesh::build_rect_mesh(trim_quads, 1); // bottom/horizontal strip
+    let trim_v_mesh = patch_mesh::build_scaled_rect_mesh(1, trim_quads, 0.5, trim_quads as f32);
+    let trim_h_mesh = patch_mesh::build_scaled_rect_mesh(trim_quads, 1, trim_quads as f32, 0.5);
     let trim_v_mesh_handle = meshes.add(trim_v_mesh);
     let trim_h_mesh_handle = meshes.add(trim_h_mesh);
 
@@ -462,20 +449,7 @@ fn setup_terrain(
                 if config.macro_color_flip_v { 1.0 } else { 0.0 },
                 0.0,
             ),
-            // debug_flags.y = 1.0 → fragment shader samples baked normals.
-            // Enabled whenever explicit normal tiles are configured or an
-            // implicit `tile_root/normal` hierarchy exists; falls back to
-            // finite-difference normals on the height clipmap otherwise.
-            debug_flags: Vec4::new(
-                0.0,
-                if has_baked_normal_tiles(&desc) {
-                    1.0
-                } else {
-                    0.0
-                },
-                0.0,
-                0.0,
-            ),
+            debug_flags: Vec4::ZERO,
             clip_levels: compute_initial_clip_levels(&config),
             // Slot data is filled in on the first Update tick by
             // sync_material_library_to_terrain_material.  Until then, the
@@ -517,7 +491,7 @@ fn setup_terrain(
 
     info!(
         "[Terrain] Setup complete: {} blocks across {} LOD levels (GPU Gems 2 layout, m={}). \
-         Clipmap {}×{}×{} (R16Unorm array).",
+         Clipmap {}×{}×{} (R32Float array).",
         patches.len(),
         levels,
         config.block_size(),
@@ -631,7 +605,11 @@ fn update_patch_transforms(
     let total = patches.len() + trims.len();
 
     let mut respawned = false;
-    if patches.len() != patch_entities.block_count || total != patch_entities.entities.len() {
+    let trim_layout: Vec<bool> = trims.iter().map(|trim| trim.is_horizontal).collect();
+    if patches.len() != patch_entities.block_count
+        || total != patch_entities.entities.len()
+        || trim_layout != patch_entities.trim_layout
+    {
         respawn_patch_entities(
             &mut commands,
             &mut patch_entities,
@@ -771,11 +749,7 @@ fn reload_terrain_system(
             } else {
                 0.0
             };
-            mat.params.debug_flags.y = if has_baked_normal_tiles(&new_desc) {
-                1.0
-            } else {
-                0.0
-            };
+            mat.params.debug_flags.y = 0.0;
 
             let new_macro = load_macro_color_texture(&new_config, &new_desc);
             material_library.macro_color_loaded = new_macro.enabled;
@@ -895,19 +869,16 @@ fn respawn_patch_entities(
 
     patch_entities.block_count = patch_entities.entities.len();
 
-    let m = block_size as f32;
     for trim in trims {
-        // Conservative AABB in local mesh space: mesh quads go from 0 to nx/nz.
-        // V strip: nx=1, nz=2m  |  H strip: nx=2m, nz=1  (coarse-scale quads)
+        // Conservative AABB in local mesh space.
         // Pad by 1 unit on each geomorphed edge.
-        let (nx, nz) = if trim.is_horizontal {
-            (2.0 * m, 1.0)
-        } else {
-            (1.0, 2.0 * m)
-        };
         let trim_aabb = Aabb::from_min_max(
             Vec3::new(-1.0, 0.0, -1.0),
-            Vec3::new(nx + 1.0, height_scale.max(1.0), nz + 1.0),
+            Vec3::new(
+                trim.extent_grid.x + 1.0,
+                height_scale.max(1.0),
+                trim.extent_grid.y + 1.0,
+            ),
         );
         let mesh = if trim.is_horizontal {
             patch_entities.trim_h_mesh_handle.clone()
@@ -938,6 +909,7 @@ fn respawn_patch_entities(
 
         patch_entities.entities.push(entity);
     }
+    patch_entities.trim_layout = trims.iter().map(|trim| trim.is_horizontal).collect();
 }
 
 fn terrain_block_local_aabb(height_scale: f32, block_size: u32) -> Aabb {
@@ -952,7 +924,7 @@ fn terrain_block_local_aabb(height_scale: f32, block_size: u32) -> Aabb {
 }
 
 /// Samples the toroidal height CPU buffer for a block's footprint and returns
-/// the normalized [0,1] min/max heights (multiply by height_scale for world Y).
+/// the min/max world-space heights in metres.
 ///
 /// Important: the rendered seam geometry is morphed against the next coarser
 /// clipmap level, so a fine-only scan can under-bound the outer edge and let
@@ -968,7 +940,7 @@ fn compute_block_height_range(
     res: u32,
 ) -> (f32, f32) {
     let res = res as usize;
-    let bpl = res * res * 2; // R16Unorm: 2 bytes per texel
+    let bpl = res * res * HEIGHT_BYTES_PER_TEXEL; // R32Float metres
     let fine_layer_base = lod as usize * bpl;
     let coarse_layer_base = coarse_lod as usize * bpl;
 
@@ -978,13 +950,12 @@ fn compute_block_height_range(
 
     let m = block_size as i32;
     let mut h_min = f32::MAX;
-    let mut h_max = 0.0_f32;
+    let mut h_max = f32::MIN;
     let coarse_factor = 1i32 << coarse_lod.saturating_sub(lod);
     let has_distinct_coarse =
         coarse_lod != lod && coarse_layer_base + bpl <= height_data.len() && coarse_factor > 1;
 
-    let mut update_range = |raw: u16| {
-        let h = raw as f32 * (1.0 / 65535.0);
+    let mut update_range = |h: f32| {
         if h < h_min {
             h_min = h;
         }
@@ -995,30 +966,39 @@ fn compute_block_height_range(
 
     for gz in (gz_start - 1)..=(gz_start + m + 1) {
         let tz = gz.rem_euclid(res as i32) as usize;
-        let fine_row_base = fine_layer_base + tz * res * 2;
+        let fine_row_base = fine_layer_base + tz * res * HEIGHT_BYTES_PER_TEXEL;
 
         let coarse_row_base = if has_distinct_coarse {
             let coarse_tz = gz.div_euclid(coarse_factor).rem_euclid(res as i32) as usize;
-            Some(coarse_layer_base + coarse_tz * res * 2)
+            Some(coarse_layer_base + coarse_tz * res * HEIGHT_BYTES_PER_TEXEL)
         } else {
             None
         };
 
         for gx in (gx_start - 1)..=(gx_start + m + 1) {
             let tx = gx.rem_euclid(res as i32) as usize;
-            let fine_off = fine_row_base + tx * 2;
-            if fine_off + 2 <= height_data.len() {
-                let raw = u16::from_le_bytes([height_data[fine_off], height_data[fine_off + 1]]);
-                update_range(raw);
+            let fine_off = fine_row_base + tx * HEIGHT_BYTES_PER_TEXEL;
+            if fine_off + HEIGHT_BYTES_PER_TEXEL <= height_data.len() {
+                let h = f32::from_le_bytes([
+                    height_data[fine_off],
+                    height_data[fine_off + 1],
+                    height_data[fine_off + 2],
+                    height_data[fine_off + 3],
+                ]);
+                update_range(h);
             }
 
             if let Some(coarse_row_base) = coarse_row_base {
                 let coarse_tx = gx.div_euclid(coarse_factor).rem_euclid(res as i32) as usize;
-                let coarse_off = coarse_row_base + coarse_tx * 2;
-                if coarse_off + 2 <= height_data.len() {
-                    let raw =
-                        u16::from_le_bytes([height_data[coarse_off], height_data[coarse_off + 1]]);
-                    update_range(raw);
+                let coarse_off = coarse_row_base + coarse_tx * HEIGHT_BYTES_PER_TEXEL;
+                if coarse_off + HEIGHT_BYTES_PER_TEXEL <= height_data.len() {
+                    let h = f32::from_le_bytes([
+                        height_data[coarse_off],
+                        height_data[coarse_off + 1],
+                        height_data[coarse_off + 2],
+                        height_data[coarse_off + 3],
+                    ]);
+                    update_range(h);
                 }
             }
         }
@@ -1082,10 +1062,10 @@ fn update_patch_aabbs(
             // Use conservative full-height AABB for blocks with no loaded data
             // (all zeros → h_max = 0) to avoid culling blocks whose tiles haven't
             // arrived yet.
-            let (y_min, y_max) = if h_max < 1e-6 {
+            let (y_min, y_max) = if h_min.abs() < 1e-6 && h_max.abs() < 1e-6 {
                 (0.0_f32, height_scale)
             } else {
-                (h_min * height_scale, (h_max * height_scale).max(1.0))
+                (h_min, h_max.max(h_min + 1.0))
             };
 
             let new_aabb = Aabb::from_min_max(
@@ -1104,20 +1084,20 @@ fn update_patch_aabbs(
 
 #[cfg(test)]
 mod tests {
-    use super::compute_block_height_range;
+    use super::{compute_block_height_range, HEIGHT_BYTES_PER_TEXEL};
 
     fn make_height_data(layers: usize, res: u32) -> Vec<u8> {
-        vec![0u8; layers * (res * res * 2) as usize]
+        vec![0u8; layers * (res * res * HEIGHT_BYTES_PER_TEXEL as u32) as usize]
     }
 
-    fn write_height(data: &mut [u8], res: u32, lod: u32, gx: i32, gz: i32, value: u16) {
+    fn write_height(data: &mut [u8], res: u32, lod: u32, gx: i32, gz: i32, value: f32) {
         let res = res as usize;
-        let layer_bytes = res * res * 2;
+        let layer_bytes = res * res * HEIGHT_BYTES_PER_TEXEL;
         let layer_base = lod as usize * layer_bytes;
         let tx = gx.rem_euclid(res as i32) as usize;
         let tz = gz.rem_euclid(res as i32) as usize;
-        let off = layer_base + (tz * res + tx) * 2;
-        data[off..off + 2].copy_from_slice(&value.to_le_bytes());
+        let off = layer_base + (tz * res + tx) * HEIGHT_BYTES_PER_TEXEL;
+        data[off..off + HEIGHT_BYTES_PER_TEXEL].copy_from_slice(&value.to_le_bytes());
     }
 
     #[test]
@@ -1126,10 +1106,13 @@ mod tests {
         let mut height_data = make_height_data(1, res);
 
         // The old stride-4 scan visited gx,gz = -1,3,7,... and would miss this.
-        write_height(&mut height_data, res, 0, 2, 2, u16::MAX);
+        write_height(&mut height_data, res, 0, 2, 2, 123.0);
 
         let (_, h_max) = compute_block_height_range(&height_data, 0, 0, 0, 0, 4, res);
-        assert!(h_max > 0.99, "exact AABB scan must include unsampled peaks");
+        assert!(
+            h_max > 122.99,
+            "exact AABB scan must include unsampled peaks"
+        );
     }
 
     #[test]
@@ -1139,9 +1122,9 @@ mod tests {
 
         // Fine LOD is flat, but the seam morph can fully snap to the next
         // coarser level on the outer edge. The AABB must include that height.
-        write_height(&mut height_data, res, 1, 1, 1, u16::MAX);
+        write_height(&mut height_data, res, 1, 1, 1, 456.0);
 
         let (_, h_max) = compute_block_height_range(&height_data, 0, 1, 0, 0, 4, res);
-        assert!(h_max > 0.99, "AABB must include coarse seam heights");
+        assert!(h_max > 455.99, "AABB must include coarse seam heights");
     }
 }

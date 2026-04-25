@@ -129,13 +129,11 @@ pub struct TerrainMaterial {
     #[sampler(4, visibility(fragment))]
     pub macro_color_texture: Handle<Image>,
 
-    /// RG8Snorm texture array containing baked XZ normals per LOD level.
+    /// RGBA8Snorm texture array reserved for coarse vertex/shadow-bias normals.
     ///
-    /// Visible to both stages: the vertex stage used to derive geometry
-    /// normals from finite differences (kept as a fallback), and the fragment
-    /// stage samples this directly when `debug_flags.y = 1.0` so shading is
-    /// driven by the high-precision f32 normals produced at bake time instead
-    /// of the R16Unorm-quantized height clipmap.
+    /// Fragment shading now derives its macro normal from the source heightmap
+    /// and PBR/detail normal layers; this texture remains bound for the vertex
+    /// path and for compatibility with the legacy tile-upload path.
     #[texture(5, visibility(vertex, fragment), dimension = "2d_array")]
     #[sampler(6, visibility(vertex, fragment))]
     pub normal_texture: Handle<Image>,
@@ -165,7 +163,6 @@ pub struct TerrainMaterial {
     #[texture(13, visibility(vertex, fragment), dimension = "2d")]
     #[sampler(14, visibility(vertex, fragment))]
     pub source_heightmap: Handle<Image>,
-
 }
 
 impl Material for TerrainMaterial {

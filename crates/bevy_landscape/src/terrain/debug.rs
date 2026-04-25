@@ -21,7 +21,8 @@ pub struct TerrainDebugConfig {
     pub show_stats: bool,
     pub show_wireframe: bool,
     /// Cycles through fragment debug modes (debug_flags.x):
-    ///   0 = normal shading, 1 = normals as colour, 2 = height as greyscale
+    ///   0 = normal shading, 1 = normals as colour, 2 = height as greyscale,
+    ///   3 = LOD colour with morph alpha highlight
     pub fragment_debug_mode: u8,
     pub show_ruler: bool,
     pub show_pbr_debug: u8,
@@ -88,8 +89,9 @@ pub fn toggle_terrain_debug_hotkeys(
     }
 
     if keys.just_pressed(KeyCode::F8) {
-        debug_cfg.fragment_debug_mode = (debug_cfg.fragment_debug_mode + 1) % 3;
-        let label = ["off", "normals", "detail height"][debug_cfg.fragment_debug_mode as usize];
+        debug_cfg.fragment_debug_mode = (debug_cfg.fragment_debug_mode + 1) % 4;
+        let label = ["off", "normals", "detail height", "LOD/morph"]
+            [debug_cfg.fragment_debug_mode as usize];
         info!("[Terrain] Fragment debug: {label} (F8)");
     }
 

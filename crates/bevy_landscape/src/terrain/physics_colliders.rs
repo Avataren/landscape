@@ -133,7 +133,9 @@ pub fn start_terrain_collider_build(
     if task.receiver.is_some() || cache.tile_size == 0 {
         return;
     }
-    let Some(source_state) = source_state else { return };
+    let Some(source_state) = source_state else {
+        return;
+    };
     let Some(source_image) = images.get(&source_state.handle) else {
         return;
     };
@@ -383,24 +385,6 @@ fn build_mesh_data(input: BuildInput) -> ColliderBuildResult {
         indices,
         fallback_tile_count,
     }
-}
-
-fn bilinear_sample(data: &[f32], size: u32, uv: Vec2) -> f32 {
-    let u = uv.x.clamp(0.0, 1.0) * size as f32;
-    let v = uv.y.clamp(0.0, 1.0) * size as f32;
-    let x0 = (u.floor() as usize).min(size as usize - 1);
-    let y0 = (v.floor() as usize).min(size as usize - 1);
-    let x1 = (x0 + 1).min(size as usize - 1);
-    let y1 = (y0 + 1).min(size as usize - 1);
-    let fx = u.fract();
-    let fy = v.fract();
-    let h00 = data[y0 * size as usize + x0];
-    let h10 = data[y0 * size as usize + x1];
-    let h01 = data[y1 * size as usize + x0];
-    let h11 = data[y1 * size as usize + x1];
-    let top = h00 * (1.0 - fx) + h10 * fx;
-    let bot = h01 * (1.0 - fx) + h11 * fx;
-    top * (1.0 - fy) + bot * fy
 }
 
 // ---------------------------------------------------------------------------

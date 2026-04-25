@@ -47,12 +47,34 @@ fn height_at(lod: u32, xz: vec2<f32>) -> f32 {
     if !in_world_bounds(xz) {
         return 0.0;
     }
-    let lvl = terrain.clip_levels[lod];
+    let lvl       = terrain.clip_levels[lod];
     let world_min = terrain.world_bounds.xy;
     let world_max = terrain.world_bounds.zw - vec2<f32>(lvl.w, lvl.w);
     let sample_xz = clamp(xz, world_min, world_max);
-    let uv = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
-    return textureSampleLevel(height_tex, height_samp, uv, i32(lod), 0.0).r;
+
+    let dims_u = textureDimensions(height_tex, 0);
+    let dims_i = vec2<i32>(dims_u);
+    let dims_f = vec2<f32>(dims_u);
+
+    let uv    = fract((sample_xz + 0.5 * lvl.w) * lvl.z);
+    let coord = uv * dims_f - vec2<f32>(0.5);
+    let i0_f  = floor(coord);
+    let f     = coord - i0_f;
+
+    let i0 = vec2<i32>(i0_f);
+    let x0 = ((i0.x % dims_i.x) + dims_i.x) % dims_i.x;
+    let y0 = ((i0.y % dims_i.y) + dims_i.y) % dims_i.y;
+    let x1 = (x0 + 1) % dims_i.x;
+    let y1 = (y0 + 1) % dims_i.y;
+
+    let h00 = textureLoad(height_tex, vec2<i32>(x0, y0), i32(lod), 0).r;
+    let h10 = textureLoad(height_tex, vec2<i32>(x1, y0), i32(lod), 0).r;
+    let h01 = textureLoad(height_tex, vec2<i32>(x0, y1), i32(lod), 0).r;
+    let h11 = textureLoad(height_tex, vec2<i32>(x1, y1), i32(lod), 0).r;
+
+    let top = mix(h00, h10, f.x);
+    let bot = mix(h01, h11, f.x);
+    return mix(top, bot, f.y);
 }
 
 @vertex

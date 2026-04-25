@@ -1254,14 +1254,14 @@ mod tests {
         assert_eq!(layout.center, Vec2::ZERO);
         assert_eq!(
             layout.clipmap,
-            Some(super::WaterClipmapLayout { levels: 7 })
+            Some(super::WaterClipmapLayout { levels: 8 })
         );
         assert_eq!(layout.height, 120.0);
     }
 
     #[test]
     fn clipmap_layout_keeps_minimum_levels() {
-        assert_eq!(water_clipmap_layout(Vec2::splat(2_048.0)).levels, 6);
+        assert_eq!(water_clipmap_layout(Vec2::splat(2_048.0)).levels, 7);
     }
 
     #[test]

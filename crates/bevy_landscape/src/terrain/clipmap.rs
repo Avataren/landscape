@@ -133,20 +133,17 @@ pub struct TrimInstanceCpu {
     /// `false` = vertical strip (LEFT or RIGHT inner boundary edge).
     /// `true`  = horizontal strip (BOTTOM or TOP inner boundary edge).
     pub is_horizontal: bool,
+    /// Local-space XZ extent in coarse grid units.
+    pub extent_grid: Vec2,
 }
 
-/// Builds the four (2m+1)×2 interior trim strips that border every ring-level
-/// inner hole (GPU Gems 2 Figure 2-5, blue pieces).
+/// Builds parity-dependent interior trim strips for every ring-level inner hole.
 ///
-/// Four strips — LEFT, RIGHT, BOTTOM, TOP — are emitted unconditionally for
-/// every coarse ring level L ≥ 1, each placed 1 coarse quad inward from the
-/// respective inner-hole edge.  Because they are at **coarse** scale the two
-/// columns of each strip map to *different* coarse grid positions and are never
-/// collapsed by the morph snap.
-///
-/// The strips fill both the steady-state seam and the 1-fine-texel parity gap
-/// that appears when the fine ring's clip center is odd (the gap that would
-/// otherwise show as an L-shaped crack when the camera crosses a fine-grid line).
+/// A child level whose snapped centre is odd is shifted by one fine texel
+/// relative to its parent.  That creates a half-coarse-cell gap on the parent's
+/// negative X and/or Z inner-hole edge.  Emitting a full four-sided trim frame
+/// covers the gap, but it also overlaps the fine level on the other sides and
+/// can z-fight.  These trims only cover the actual negative-side gaps.
 pub fn build_trim_instances_for_view(
     config: &TerrainConfig,
     view: &TerrainViewState,
@@ -162,41 +159,32 @@ pub fn build_trim_instances_for_view(
 
         let s = view.level_scales[l]; // one coarse grid unit
         let c = view.clip_centers[l];
+        let child = view.clip_centers[l - 1];
+        let child_offset = IVec2::new(child.x - 2 * c.x, child.y - 2 * c.y);
+        let half_coarse = 0.5_f32;
 
         // Inner-hole boundary corners in world space.
         let min_x = (c.x - m) as f32 * s;
         let min_z = (c.y - m) as f32 * s;
-        let max_x = (c.x + m) as f32 * s;
-        let max_z = (c.y + m) as f32 * s;
 
-        // LEFT: x ∈ [min_x, min_x+s], z ∈ [min_z, max_z]
-        instances.push(TrimInstanceCpu {
-            lod_level: level,
-            origin_ws: Vec2::new(min_x, min_z),
-            level_scale_ws: s,
-            is_horizontal: false,
-        });
-        // RIGHT: x ∈ [max_x-s, max_x], z ∈ [min_z, max_z]
-        instances.push(TrimInstanceCpu {
-            lod_level: level,
-            origin_ws: Vec2::new(max_x - s, min_z),
-            level_scale_ws: s,
-            is_horizontal: false,
-        });
-        // BOTTOM: x ∈ [min_x, max_x], z ∈ [min_z, min_z+s]
-        instances.push(TrimInstanceCpu {
-            lod_level: level,
-            origin_ws: Vec2::new(min_x, min_z),
-            level_scale_ws: s,
-            is_horizontal: true,
-        });
-        // TOP: x ∈ [min_x, max_x], z ∈ [max_z-s, max_z]
-        instances.push(TrimInstanceCpu {
-            lod_level: level,
-            origin_ws: Vec2::new(min_x, max_z - s),
-            level_scale_ws: s,
-            is_horizontal: true,
-        });
+        if child_offset.x != 0 {
+            instances.push(TrimInstanceCpu {
+                lod_level: level,
+                origin_ws: Vec2::new(min_x, min_z),
+                level_scale_ws: s,
+                is_horizontal: false,
+                extent_grid: Vec2::new(half_coarse, 2.0 * m as f32),
+            });
+        }
+        if child_offset.y != 0 {
+            instances.push(TrimInstanceCpu {
+                lod_level: level,
+                origin_ws: Vec2::new(min_x, min_z),
+                level_scale_ws: s,
+                is_horizontal: true,
+                extent_grid: Vec2::new(2.0 * m as f32, half_coarse),
+            });
+        }
     }
 
     instances
@@ -223,16 +211,12 @@ pub fn build_trim_instances_for_view_in_bounds(
 
 fn trim_intersects_world_bounds(
     trim: &TrimInstanceCpu,
-    block_size: f32,
+    _block_size: f32,
     world_min: Vec2,
     world_max: Vec2,
 ) -> bool {
     let trim_min = trim.origin_ws;
-    let trim_extent = if trim.is_horizontal {
-        Vec2::new(2.0 * block_size * trim.level_scale_ws, trim.level_scale_ws)
-    } else {
-        Vec2::new(trim.level_scale_ws, 2.0 * block_size * trim.level_scale_ws)
-    };
+    let trim_extent = trim.extent_grid * trim.level_scale_ws;
     let trim_max = trim_min + trim_extent;
 
     trim_max.x > world_min.x
@@ -356,7 +340,7 @@ mod tests {
     #[test]
     fn trim_bounds_filter_keeps_partial_overlap() {
         let config = TerrainConfig::default();
-        let view = make_view(&config, Vec3::ZERO);
+        let view = make_view(&config, Vec3::new(1.1, 0.0, 0.0));
 
         let trims = build_trim_instances_for_view_in_bounds(
             &config,
@@ -368,5 +352,15 @@ mod tests {
         assert_eq!(trims.len(), 1);
         assert!(!trims[0].is_horizontal, "expected left vertical trim");
         assert_eq!(trims[0].lod_level, 1);
+    }
+
+    #[test]
+    fn aligned_child_center_needs_no_trim() {
+        let config = TerrainConfig::default();
+        let view = make_view(&config, Vec3::ZERO);
+
+        let trims = build_trim_instances_for_view(&config, &view);
+
+        assert!(trims.is_empty());
     }
 }

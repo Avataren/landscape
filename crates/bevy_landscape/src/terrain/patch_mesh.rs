@@ -24,6 +24,11 @@ pub fn build_block_mesh(m: u32) -> Mesh {
 /// `x ∈ [0, nx]` and `z ∈ [0, nz]`.  Used for the L-shaped GPU Gems 2
 /// trim strips that fill the 1-fine-texel gap at LOD ring inner boundaries.
 pub fn build_rect_mesh(nx: u32, nz: u32) -> Mesh {
+    build_scaled_rect_mesh(nx, nz, nx as f32, nz as f32)
+}
+
+/// Builds a rectangular mesh whose local extents can be fractional grid units.
+pub fn build_scaled_rect_mesh(nx: u32, nz: u32, extent_x: f32, extent_z: f32) -> Mesh {
     let verts_per_x = nx + 1;
     let verts_per_z = nz + 1;
     let total_verts = (verts_per_x * verts_per_z) as usize;
@@ -36,7 +41,11 @@ pub fn build_rect_mesh(nx: u32, nz: u32) -> Mesh {
 
     for z in 0..verts_per_z {
         for x in 0..verts_per_x {
-            positions.push([x as f32, 0.0, z as f32]);
+            positions.push([
+                x as f32 * inv_nx * extent_x,
+                0.0,
+                z as f32 * inv_nz * extent_z,
+            ]);
             normals.push([0.0, 1.0, 0.0]);
             uvs.push([x as f32 * inv_nx, z as f32 * inv_nz]);
         }

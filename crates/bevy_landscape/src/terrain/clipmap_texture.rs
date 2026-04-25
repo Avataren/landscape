@@ -22,7 +22,6 @@ use bevy::{
 pub const HEIGHT_BYTES_PER_TEXEL: usize = 4; // R32Float
 pub const NORMAL_BYTES_PER_TEXEL: usize = 4; // RGBA8Snorm: RG=fine XZ, BA=coarse XZ
 
-
 // ---------------------------------------------------------------------------
 // Texture array creation
 // ---------------------------------------------------------------------------
@@ -206,7 +205,8 @@ impl TerrainClipmapState {
             if (world_xz.x - cx).abs() > ring_half || (world_xz.y - cz).abs() > ring_half {
                 continue;
             }
-            let byte_idx = layer_offset + (ty as usize * res as usize + tx as usize) * HEIGHT_BYTES_PER_TEXEL;
+            let byte_idx =
+                layer_offset + (ty as usize * res as usize + tx as usize) * HEIGHT_BYTES_PER_TEXEL;
             if byte_idx + HEIGHT_BYTES_PER_TEXEL > self.height_cpu_data.len() {
                 break;
             }
@@ -476,169 +476,6 @@ fn clip_window_touches_world_bounds(
         || max_sample.y >= world_max.y
 }
 
-// ---------------------------------------------------------------------------
-// Strip-only incremental update helpers
-// ---------------------------------------------------------------------------
-
-/// Fills the newly-exposed height strip from the next-coarser LOD's CPU data.
-///
-/// When tile streaming hasn't provided data for a new strip yet, keeping the
-/// stale toroidal data shows heights from a completely different world position
-/// (one ring-span away), which appears as ridges.  Using the coarser LOD as a
-/// fallback gives the correct world-position height at lower resolution — no
-/// chasms (zeros) and no ridges (wrong-position stale data).
-fn fill_height_strip_from_coarser_lod(
-    data: &mut Vec<u8>,
-    fine_layer_base: usize,
-    coarse_layer_base: usize,
-    res: u32,
-    new_center: IVec2,
-    old_center: IVec2,
-) {
-    let n = res as i32;
-    let half = (res / 2) as i32;
-    let delta = new_center - old_center;
-    if delta == IVec2::ZERO {
-        return;
-    }
-    if delta.x.abs() >= n || delta.y.abs() >= n {
-        return; // full-reset path handles this
-    }
-
-    // Build the list of (gx, gz, height) from the coarse region first (immutable borrow),
-    // then write into the fine region (mutable borrow). The two regions never overlap.
-    let layer_bytes = res as usize * res as usize * HEIGHT_BYTES_PER_TEXEL;
-
-    let new_heights: Vec<(i32, i32, f32)> = {
-        let coarse = &data[coarse_layer_base..coarse_layer_base + layer_bytes];
-
-        let read_h = |gx: i32, gz: i32| -> f32 {
-            let tx = (gx >> 1).rem_euclid(n) as usize;
-            let tz = (gz >> 1).rem_euclid(n) as usize;
-            let off = (tz * res as usize + tx) * HEIGHT_BYTES_PER_TEXEL;
-            if off + HEIGHT_BYTES_PER_TEXEL <= coarse.len() {
-                f32::from_le_bytes([coarse[off], coarse[off + 1], coarse[off + 2], coarse[off + 3]])
-            } else {
-                0.0
-            }
-        };
-
-        let mut out = Vec::new();
-        if delta.x != 0 {
-            let (x_lo, x_hi) = if delta.x > 0 {
-                (old_center.x + half, new_center.x + half - 1)
-            } else {
-                (new_center.x - half, old_center.x - half - 1)
-            };
-            for gz in (new_center.y - half)..=(new_center.y + half - 1) {
-                for gx in x_lo..=x_hi {
-                    out.push((gx, gz, read_h(gx, gz)));
-                }
-            }
-        }
-        if delta.y != 0 {
-            let (z_lo, z_hi) = if delta.y > 0 {
-                (old_center.y + half, new_center.y + half - 1)
-            } else {
-                (new_center.y - half, old_center.y - half - 1)
-            };
-            let (ex_lo, ex_hi) = if delta.x > 0 {
-                (old_center.x + half, new_center.x + half - 1)
-            } else if delta.x < 0 {
-                (new_center.x - half, old_center.x - half - 1)
-            } else {
-                (i32::MAX, i32::MIN)
-            };
-            for gz in z_lo..=z_hi {
-                for gx in (new_center.x - half)..=(new_center.x + half - 1) {
-                    if gx >= ex_lo && gx <= ex_hi {
-                        continue;
-                    }
-                    out.push((gx, gz, read_h(gx, gz)));
-                }
-            }
-        }
-        out
-    };
-
-    let fine = &mut data[fine_layer_base..fine_layer_base + layer_bytes];
-    for (gx, gz, h) in new_heights {
-        let tx = gx.rem_euclid(n) as usize;
-        let tz = gz.rem_euclid(n) as usize;
-        let off = (tz * res as usize + tx) * HEIGHT_BYTES_PER_TEXEL;
-        if off + HEIGHT_BYTES_PER_TEXEL <= fine.len() {
-            fine[off..off + HEIGHT_BYTES_PER_TEXEL].copy_from_slice(&h.to_le_bytes());
-        }
-    }
-}
-
-/// Zeroes the newly-exposed normal strip so new texels show flat up-normals
-/// until tile data arrives and overwrites them.
-fn zero_new_normal_strip(
-    data: &mut Vec<u8>,
-    layer_offset: usize,
-    res: u32,
-    new_center: IVec2,
-    old_center: IVec2,
-) {
-    let n = res as i32;
-    let half = (res / 2) as i32;
-    let delta = new_center - old_center;
-    let layer_bytes = res as usize * res as usize * NORMAL_BYTES_PER_TEXEL;
-
-    if delta.x.abs() >= n || delta.y.abs() >= n {
-        if let Some(slice) = data.get_mut(layer_offset..layer_offset + layer_bytes) {
-            slice.fill(0);
-        }
-        return;
-    }
-
-    let mut zero_texel = |gx: i32, gz: i32| {
-        let tx = gx.rem_euclid(n) as usize;
-        let tz = gz.rem_euclid(n) as usize;
-        let off = layer_offset + (tz * n as usize + tx) * NORMAL_BYTES_PER_TEXEL;
-        if off + NORMAL_BYTES_PER_TEXEL <= data.len() {
-            data[off..off + NORMAL_BYTES_PER_TEXEL].fill(0);
-        }
-    };
-
-    if delta.x != 0 {
-        let (x_lo, x_hi) = if delta.x > 0 {
-            (old_center.x + half, new_center.x + half - 1)
-        } else {
-            (new_center.x - half, old_center.x - half - 1)
-        };
-        for gz in (new_center.y - half)..=(new_center.y + half - 1) {
-            for gx in x_lo..=x_hi {
-                zero_texel(gx, gz);
-            }
-        }
-    }
-
-    if delta.y != 0 {
-        let (z_lo, z_hi) = if delta.y > 0 {
-            (old_center.y + half, new_center.y + half - 1)
-        } else {
-            (new_center.y - half, old_center.y - half - 1)
-        };
-        let (ex_lo, ex_hi) = if delta.x > 0 {
-            (old_center.x + half, new_center.x + half - 1)
-        } else if delta.x < 0 {
-            (new_center.x - half, old_center.x - half - 1)
-        } else {
-            (i32::MAX, i32::MIN)
-        };
-        for gz in z_lo..=z_hi {
-            for gx in (new_center.x - half)..=(new_center.x + half - 1) {
-                if gx >= ex_lo && gx <= ex_hi {
-                    continue;
-                }
-                zero_texel(gx, gz);
-            }
-        }
-    }
-}
-
 fn write_height_tile_rect(
     img_data: &mut [u8],
     layer_base: usize,
@@ -877,7 +714,6 @@ pub fn update_clipmap_textures(
     config: Res<TerrainConfig>,
     view: Res<TerrainViewState>,
     state: Option<ResMut<TerrainClipmapState>>,
-    mut uploads: ResMut<TerrainClipmapUploads>,
     mut materials: ResMut<Assets<TerrainMaterial>>,
 ) {
     let Some(mut state) = state else { return };
@@ -885,9 +721,6 @@ pub fn update_clipmap_textures(
         return;
     }
 
-    let res = config.clipmap_resolution();
-    let height_bpl = bytes_per_layer(res, HEIGHT_BYTES_PER_TEXEL);
-    let normal_bpl = bytes_per_layer(res, NORMAL_BYTES_PER_TEXEL);
     let levels = config.active_clipmap_levels() as usize;
 
     // Pad the cached list so index comparisons don't go out of bounds.
@@ -903,90 +736,12 @@ pub fn update_clipmap_textures(
         return;
     }
 
-    for lod in 0..levels {
-        let new_center = view.clip_centers.get(lod).copied().unwrap_or(IVec2::ZERO);
-        let old_center = state.last_clip_centers[lod];
-        if new_center == old_center {
-            continue;
-        }
-
-        let is_full_reset = old_center.x == i32::MAX;
-
-        let height_layer_offset = lod * height_bpl;
-        if is_full_reset {
-            if let Some(slice) = state
-                .height_cpu_data
-                .get_mut(height_layer_offset..height_layer_offset + height_bpl)
-            {
-                slice.fill(0);
-            }
-        } else {
-            // Fill the new strip from the next-coarser LOD's CPU data rather than
-            // keeping stale toroidal data (wrong world position → ridges) or writing
-            // zeros (height-0 chasms). The coarser LOD has the correct world-space
-            // heights at lower resolution, and resident tiles will overwrite this
-            // fallback once `apply_tiles_to_clipmap` runs in the same frame.
-            let coarse_lod = (lod + 1).min(levels - 1);
-            if coarse_lod > lod {
-                fill_height_strip_from_coarser_lod(
-                    &mut state.height_cpu_data,
-                    height_layer_offset,
-                    coarse_lod * height_bpl,
-                    res,
-                    new_center,
-                    old_center,
-                );
-            }
-        }
-        // Always upload: coarse fallback or full-reset data must reach the GPU.
-        queue_new_strip_uploads(
-            &mut uploads,
-            &state.height_texture_handle,
-            lod as u32,
-            &state.height_cpu_data[height_layer_offset..height_layer_offset + height_bpl],
-            res,
-            HEIGHT_BYTES_PER_TEXEL,
-            new_center,
-            old_center,
-        );
-
-        let normal_layer_offset = lod * normal_bpl;
-        if is_full_reset {
-            if let Some(slice) = state
-                .normal_cpu_data
-                .get_mut(normal_layer_offset..normal_layer_offset + normal_bpl)
-            {
-                slice.fill(0);
-            }
-        } else {
-            // Zero new strip texels → flat up-normal until tile data arrives.
-            zero_new_normal_strip(
-                &mut state.normal_cpu_data,
-                normal_layer_offset,
-                res,
-                new_center,
-                old_center,
-            );
-        }
-        queue_new_strip_uploads(
-            &mut uploads,
-            &state.normal_texture_handle,
-            lod as u32,
-            &state.normal_cpu_data[normal_layer_offset..normal_layer_offset + normal_bpl],
-            res,
-            NORMAL_BYTES_PER_TEXEL,
-            new_center,
-            old_center,
-        );
-    }
-
     // Refresh the per-level origin uniforms.
     if let Some(mat) = materials.get_mut(&state.material_handle) {
         mat.params.clip_levels =
             compute_clip_levels(&config, &view.clip_centers, &view.level_scales);
     }
 
-    state.height_generation += 1;
     state.last_clip_centers = view.clip_centers.clone();
 }
 
@@ -994,12 +749,11 @@ pub fn update_clipmap_textures(
 // Tile upload system
 // ---------------------------------------------------------------------------
 
-/// Applies pre-baked height and normal tiles to the live clipmap texture arrays.
+/// Legacy CPU tile upload path for pre-baked height and normal tiles.
 ///
-/// **Why re-apply on every clip-center shift**: `update_clipmap_textures` runs
-/// first and regenerates entire layers from the procedural fallback whenever the
-/// clip center moves.  Without re-applying tile data afterwards the real EXR
-/// heights would be invisible — the procedural data would win every frame.
+/// The normal runtime path is synthesis-only: `update_required_tiles` leaves
+/// `required_now` empty, so this system usually just drains no pending work.
+/// The code remains available for compatibility with tile-backed experiments.
 ///
 /// Strategy:
 ///   1. Move any new tiles from `pending_upload` into `resident_cpu` (persistent

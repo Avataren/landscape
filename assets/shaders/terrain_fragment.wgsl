@@ -817,6 +817,19 @@ fn patch_grid_wireframe(patch_uv: vec2<f32>) -> f32 {
     return max(quad_line * 0.75, patch_line);
 }
 
+fn lod_debug_color(lod: u32) -> vec3<f32> {
+    switch (lod % 8u) {
+        case 0u: { return vec3<f32>(0.0, 1.0, 0.0); }
+        case 1u: { return vec3<f32>(0.0, 0.8, 1.0); }
+        case 2u: { return vec3<f32>(1.0, 1.0, 0.0); }
+        case 3u: { return vec3<f32>(1.0, 0.5, 0.0); }
+        case 4u: { return vec3<f32>(1.0, 0.0, 0.0); }
+        case 5u: { return vec3<f32>(0.8, 0.0, 1.0); }
+        case 6u: { return vec3<f32>(0.4, 0.4, 1.0); }
+        default: { return vec3<f32>(1.0, 1.0, 1.0); }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Fragment
 // ---------------------------------------------------------------------------
@@ -865,9 +878,6 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     let n_macro = fbm_perturb_normal(n_macro_raw, frag_xz, slope_deg);
 
     // Apply per-slot PBR normal maps on top of the macro normal.
-    // Detail geometry is already captured in height_at_frag (the clipmap stores
-    // full height including fBM detail), so pixel_normal / shading_normal_blended
-    // naturally includes it when debug_flags.y is set.
     let n = apply_normal_detail(n_macro, in.world_pos.xz, in.world_pos.y, slope_deg);
 
     // --- PBR texture debug (debug_flags.z) ---
@@ -892,6 +902,10 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
 
     // --- Debug: render normals as colour and skip lighting/material ---
     if terrain.debug_flags.x > 1.5 {
+        if terrain.debug_flags.x > 2.5 {
+            let base = lod_debug_color(in.lod_level);
+            return vec4<f32>(mix(base, vec3<f32>(1.0), in.morph_alpha * 0.65), 1.0);
+        }
         // debug_flags.x == 2: show height normalised by height_scale as greyscale.
         let h = height_at_frag(in.lod_level, frag_xz);
         let scaled = clamp(h / max(terrain.height_scale, 1.0), 0.0, 1.0);
