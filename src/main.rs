@@ -163,10 +163,10 @@ fn setup_scene(
         Msaa::Sample4,
         Projection::Perspective(PerspectiveProjection {
             near: 0.1,
-            // Terrain world is ~4 096 m across; 100 km gives comfortable margin
-            // without the 100 000 000:1 depth range that caused Z-fighting at
-            // any non-trivial distance.
-            far: 100_000.0,
+            // 2 000 km covers a 700 km terrain fully regardless of camera
+            // position.  Bevy uses reverse-Z by default which keeps depth
+            // precision acceptable even at this range.
+            far: 2_000_000.0,
             ..default()
         }),
         Atmosphere::earthlike(scattering_mediums.add(ScatteringMedium::default())),

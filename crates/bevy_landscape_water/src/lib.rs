@@ -255,8 +255,11 @@ const WATER_CLIPMAP_BLOCK_SIZE: u32 = 64;
 // gets ~10 verts/wavelength instead of ~5).  Doubles fine-ring vertex count.
 const WATER_CLIPMAP_BASE_SCALE: f32 = 2.0;
 const WATER_CLIPMAP_MIN_LEVELS: u32 = 6;
-const WATER_CLIPMAP_MAX_LEVELS: u32 = 8;
-const WATER_CLIPMAP_MIN_OUTER_HALF_EXTENT: f32 = 16_384.0;
+const WATER_CLIPMAP_MAX_LEVELS: u32 = 16;
+// Minimum outer half-extent of the clipmap in metres.  Set to match the
+// camera far plane so the last ring always extends beyond the visible horizon,
+// preventing the ring boundary from appearing as a coloured arc in the sky.
+const WATER_CLIPMAP_MIN_OUTER_HALF_EXTENT: f32 = 2_000_000.0;
 
 fn water_level_scale(level: u32) -> f32 {
     WATER_CLIPMAP_BASE_SCALE * (1u32 << level) as f32
@@ -1267,14 +1270,14 @@ mod tests {
         assert_eq!(layout.center, Vec2::ZERO);
         assert_eq!(
             layout.clipmap,
-            Some(super::WaterClipmapLayout { levels: 8 })
+            Some(super::WaterClipmapLayout { levels: 14 })
         );
         assert_eq!(layout.height, 120.0);
     }
 
     #[test]
     fn clipmap_layout_keeps_minimum_levels() {
-        assert_eq!(water_clipmap_layout(Vec2::splat(2_048.0)).levels, 7);
+        assert_eq!(water_clipmap_layout(Vec2::splat(2_048.0)).levels, 14);
     }
 
     #[test]

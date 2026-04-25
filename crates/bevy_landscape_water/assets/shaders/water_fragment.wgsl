@@ -349,10 +349,27 @@ fn fragment(
         0.0, 0.98
     );
     pbr_input.material.diffuse_transmission = 0.07 * clarity * (1.0 - foam_weight) * fresnel * 0.1;
-    pbr_input.material.thickness = clamp(
-        beer_depth * mix(0.22, 1.35, clamp(refraction_strength / 24.0, 0.0, 1.0)),
-        0.25, 48.0
+    // Distance-calibrated thickness keeps the refracted UV offset at roughly
+    // `refraction_strength` pixels regardless of how close the water is to the
+    // camera.  The PBR SST offset scales as thickness / view_distance, so:
+    //   target_thick = refraction_strength × view_dist / focal_px
+    // For IOR 1.333 and a 60° FOV at 1080 p, the bend factor × focal ≈ 600.
+    //
+    // With a fixed large thickness (old approach), close-up water could produce
+    // pixel offsets of hundreds of pixels, shooting the sample UV far off screen
+    // and producing clamped-edge repeating stripes.  Setting thickness = 0 when
+    // refraction_strength = 0 eliminates all artifacts at that setting.
+    //
+    // A 3 % screen-edge fade collapses the offset to zero at screen boundaries;
+    // 3 % (≈ 30 px at 1080 p) is imperceptible.
+    let view_dist     = max(length(in.world_position.xyz - view.world_position.xyz), 0.1);
+    let target_thick  = clamp(refraction_strength * view_dist / 600.0, 0.0, 16.0);
+    let screen_uv     = in.position.xy / view.viewport.zw;
+    let screen_edge_t = min(
+        min(screen_uv.x, 1.0 - screen_uv.x),
+        min(screen_uv.y, 1.0 - screen_uv.y),
     );
+    pbr_input.material.thickness = target_thick * smoothstep(0.0, 0.03, screen_edge_t);
     pbr_input.material.attenuation_distance = mix(16.0, 180.0, clarity_sq);
     pbr_input.material.attenuation_color    = vec4<f32>(
         mix(deep_color.rgb, shallow_color.rgb, 0.55 + shoreline_edge * 0.2),
