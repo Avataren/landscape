@@ -19,4 +19,6 @@ pub use terrain::pbr_textures::{PbrRebuildProgress, PbrTexturesDirty};
 pub use terrain::physics_colliders::{LocalColliderState, ShowTerrainCollision};
 pub use terrain::resources::TerrainViewState;
 pub use terrain::source_heightmap::SourceHeightmapState;
-pub use terrain::{ReloadTerrainRequest, TerrainDebugPlugin, TerrainPlugin, TerrainSourceDesc};
+pub use terrain::{
+    ReloadTerrainRequest, TerrainDebugPlugin, TerrainPlugin, TerrainSourceDesc, TerrainSystemSet,
+};

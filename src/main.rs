@@ -21,13 +21,13 @@ use bevy::{
 };
 use bevy_landscape::{
     level::load_level, TerrainCamera, TerrainConfig, TerrainDebugPlugin, TerrainPlugin,
-    TerrainSourceDesc,
+    TerrainSourceDesc, TerrainSystemSet,
 };
 use bevy_landscape_clouds::{CloudsConfig, VolumetricCloudsPlugin};
 use bevy_landscape_editor::{AppPreferences, LandscapeEditorPlugin};
 use bevy_landscape_generator::LandscapeGeneratorPlugin;
 use bevy_landscape_water::LandscapeWaterPlugin;
-use player::{CameraMode, PlayerPlugin};
+use player::{CameraMode, PlayerPlugin, PlayerSystemSet};
 
 const WINDOW_TITLE: &str = "Landscape Renderer";
 
@@ -136,7 +136,14 @@ fn main() {
         .add_plugins(LandscapeEditorPlugin)
         .add_plugins(PlayerPlugin)
         .add_systems(Startup, setup_scene)
-        .add_systems(Update, (camera_move, camera_look).chain())
+        .add_systems(
+            Update,
+            (camera_move, camera_look)
+                .chain()
+                .after(PlayerSystemSet::Movement)
+                .before(PlayerSystemSet::CameraSync)
+                .before(TerrainSystemSet::View),
+        )
         .add_systems(Update, toggle_shadows)
         .add_systems(Update, update_window_title)
         .run();

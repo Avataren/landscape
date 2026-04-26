@@ -101,6 +101,16 @@ pub struct PatchEntities {
     pub trim_layout: Vec<bool>,
 }
 
+/// Main-world terrain update phases.
+///
+/// Camera controllers should run before `View` so clipmap placement,
+/// synthesis state, collision, and rendered camera all use the same pose.
+#[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
+pub enum TerrainSystemSet {
+    View,
+    Update,
+}
+
 // ---------------------------------------------------------------------------
 // Main terrain plugin
 // ---------------------------------------------------------------------------
@@ -145,6 +155,10 @@ impl Plugin for TerrainPlugin {
             .init_resource::<PbrTexturesDirty>()
             .init_resource::<PbrRebuildProgress>()
             .init_resource::<PbrRebuildState>()
+            .configure_sets(
+                Update,
+                (TerrainSystemSet::View, TerrainSystemSet::Update).chain(),
+            )
             // Startup
             // Note: SourceHeightmapState is inserted by setup_terrain, not init'd here,
             // because it needs config/desc to load tile data.
@@ -152,7 +166,10 @@ impl Plugin for TerrainPlugin {
             .add_systems(PostStartup, preload_terrain_startup)
             // Update: camera view -> geometry/uniforms -> synthesis state.
             .add_systems(First, begin_terrain_upload_frame)
-            .add_systems(Update, update_terrain_view_state)
+            .add_systems(
+                Update,
+                update_terrain_view_state.in_set(TerrainSystemSet::View),
+            )
             .add_systems(
                 Update,
                 (
@@ -165,6 +182,7 @@ impl Plugin for TerrainPlugin {
                     update_synthesis_state,
                 )
                     .chain()
+                    .in_set(TerrainSystemSet::Update)
                     .after(update_terrain_view_state),
             )
             .add_systems(
@@ -175,11 +193,13 @@ impl Plugin for TerrainPlugin {
                         .after(update_terrain_view_state),
                     apply_terrain_collider_result,
                     cancel_collider_task_on_reload,
-                ),
+                )
+                    .in_set(TerrainSystemSet::Update),
             )
             .add_systems(
                 Update,
                 apply_tiles_to_clipmap
+                    .in_set(TerrainSystemSet::Update)
                     .after(poll_tile_stream_jobs)
                     .after(update_clipmap_textures)
                     .after(update_terrain_view_state),
@@ -187,15 +207,13 @@ impl Plugin for TerrainPlugin {
             .add_systems(
                 Update,
                 update_patch_aabbs
+                    .in_set(TerrainSystemSet::Update)
                     .after(apply_tiles_to_clipmap)
                     .after(update_clipmap_textures),
             )
             .add_systems(Update, sync_material_library_to_terrain_material)
             .add_systems(Update, rebuild_pbr_textures_system)
-            .add_systems(
-                Update,
-                reload_terrain_system.before(update_terrain_view_state),
-            )
+            .add_systems(Update, reload_terrain_system.before(TerrainSystemSet::View))
             .add_plugins(TerrainRenderPlugin)
             .add_plugins(DetailSynthesisPlugin);
     }

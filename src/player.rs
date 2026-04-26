@@ -9,7 +9,8 @@
 //   WASD sets horizontal velocity each frame; Space jumps.
 //   Mouse always rotates view (cursor is locked).
 //   The scene Camera3d (TerrainCamera) is driven from the body position + eye
-//   height in PostUpdate — no parent-child needed so terrain queries stay clean.
+//   height in Update after fixed physics — no parent-child needed so terrain
+//   queries stay clean.
 //
 // Freecam
 // -------
@@ -18,8 +19,8 @@
 //   (existing behaviour from main.rs camera_move / camera_look, gated on mode).
 //
 // Switching Walking → Freecam: cursor unlocked; body frozen in place.
-// Switching Freecam → Walking: cursor locked; body teleported to camera XZ;
-//   yaw/pitch synced from camera rotation so the view is continuous.
+// Switching Freecam → Walking: cursor locked; body teleported under the camera
+//   eye; yaw/pitch synced from camera rotation so the view is continuous.
 
 use avian3d::prelude::*;
 use bevy::{
@@ -30,6 +31,7 @@ use bevy::{
 use bevy_egui::EguiContexts;
 use bevy_landscape::{
     LocalColliderState, ShowTerrainCollision, TerrainCamera, TerrainCollisionCache, TerrainConfig,
+    TerrainSystemSet,
 };
 
 // ---------------------------------------------------------------------------
@@ -39,6 +41,7 @@ use bevy_landscape::{
 const CAPSULE_RADIUS: f32 = 0.3;
 /// Cylinder section length.  Total height = 2 × RADIUS + LENGTH = 1.8 m.
 const CAPSULE_LENGTH: f32 = 1.2;
+const BODY_HALF_HEIGHT: f32 = CAPSULE_RADIUS + CAPSULE_LENGTH * 0.5;
 const CUBE_SHOOT_SPEED: f32 = 40.0;
 const CUBE_HALF_EXTENT: f32 = 0.4;
 /// Distance from body centre up to the camera (eye height from centre).
@@ -58,6 +61,14 @@ pub enum CameraMode {
     Walking,
     #[default]
     Freecam,
+}
+
+/// Player update phases that other camera users can order against.
+#[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
+pub enum PlayerSystemSet {
+    Mode,
+    Movement,
+    CameraSync,
 }
 
 // ---------------------------------------------------------------------------
@@ -86,27 +97,40 @@ impl Plugin for PlayerPlugin {
         app.add_plugins(PhysicsPlugins::default())
             .insert_resource(CameraMode::default())
             .insert_resource(PlayerLook::default())
-            .add_systems(
+            .configure_sets(
                 Update,
                 (
-                    spawn_player_once,
-                    toggle_mode,
-                    toggle_collision_debug,
-                    player_look,
-                    player_move.after(player_look),
-                    shoot_cube,
-                ),
+                    PlayerSystemSet::Mode,
+                    PlayerSystemSet::Movement,
+                    PlayerSystemSet::CameraSync,
+                )
+                    .chain(),
+            )
+            .configure_sets(
+                Update,
+                PlayerSystemSet::CameraSync.before(TerrainSystemSet::View),
+            )
+            .add_systems(Update, spawn_player_once)
+            .add_systems(
+                Update,
+                (toggle_mode, toggle_collision_debug).in_set(PlayerSystemSet::Mode),
+            )
+            .add_systems(
+                Update,
+                (player_look, player_move.after(player_look)).in_set(PlayerSystemSet::Movement),
             )
             // Run the terrain clamp BEFORE every Avian physics step so the
             // bilinear-sampled surface (which matches the rendered terrain exactly)
             // is enforced even when multiple fixed steps fire in one render frame.
             .add_systems(FixedPreUpdate, clamp_player_to_terrain)
-            // PostUpdate runs after all FixedPostUpdate (Avian writeback).
-            // The clamp here catches any residual below-terrain drift, then
-            // sync_camera_to_body reads the corrected position.
+            // Update runs after the fixed-physics loop and before terrain reads
+            // the camera for clipmap placement, so the render camera and terrain
+            // view state stay coherent on the same frame.
             .add_systems(
-                PostUpdate,
-                (clamp_player_to_terrain, sync_camera_to_body).chain(),
+                Update,
+                (clamp_player_to_terrain, sync_camera_to_body, shoot_cube)
+                    .chain()
+                    .in_set(PlayerSystemSet::CameraSync),
             );
     }
 }
@@ -139,7 +163,7 @@ fn spawn_player_once(
         .sample_height(spawn_xz)
         .unwrap_or(config.height_scale * 0.5);
     // Place body centre just above the surface so the first physics step settles it.
-    let spawn_y = ground_y + CAPSULE_RADIUS + CAPSULE_LENGTH * 0.5 + 0.5;
+    let spawn_y = ground_y + BODY_HALF_HEIGHT + 0.5;
 
     commands.spawn((
         PlayerBody,
@@ -154,13 +178,14 @@ fn spawn_player_once(
 /// Handles F1 toggle between Walking and Freecam.
 ///
 /// Walking → Freecam: freeze body, unlock cursor.
-/// Freecam → Walking: teleport body to camera XZ, sync look angles, lock cursor.
+/// Freecam → Walking: teleport body under camera eye, sync look angles, lock cursor.
 fn toggle_mode(
     keys: Res<ButtonInput<KeyCode>>,
     mut mode: ResMut<CameraMode>,
     mut cursor_q: Query<&mut CursorOptions, With<PrimaryWindow>>,
-    mut body_q: Query<(&mut Position, &mut LinearVelocity), With<PlayerBody>>,
-    cam_q: Query<&Transform, (With<TerrainCamera>, Without<PlayerBody>)>,
+    mut body_q: Query<(&mut Position, &mut LinearVelocity, &mut Transform), With<PlayerBody>>,
+    mut cam_q: Query<&mut Transform, (With<TerrainCamera>, Without<PlayerBody>)>,
+    cache: Res<TerrainCollisionCache>,
     mut look: ResMut<PlayerLook>,
 ) {
     if !keys.just_pressed(KeyCode::F1) {
@@ -176,7 +201,7 @@ fn toggle_mode(
             cursor.grab_mode = CursorGrabMode::None;
             cursor.visible = true;
             // Freeze body in place so it doesn't fall while flying.
-            if let Ok((_, mut vel)) = body_q.single_mut() {
+            if let Ok((_, mut vel, _)) = body_q.single_mut() {
                 *vel = LinearVelocity::ZERO;
             }
         }
@@ -185,16 +210,25 @@ fn toggle_mode(
             cursor.grab_mode = CursorGrabMode::Locked;
             cursor.visible = false;
 
-            if let Ok(cam_t) = cam_q.single() {
+            if let Ok(mut cam_t) = cam_q.single_mut() {
                 // Sync yaw/pitch so the walking view is continuous with freecam.
                 let (yaw, pitch, _) = cam_t.rotation.to_euler(EulerRot::YXZ);
                 look.yaw = yaw;
                 look.pitch = pitch;
 
-                // Teleport body to camera position; gravity will settle the Y.
-                if let Ok((mut pos, mut vel)) = body_q.single_mut() {
-                    pos.0 = cam_t.translation;
+                let body_center = body_center_for_camera_eye(
+                    cam_t.translation,
+                    cache.sample_height(cam_t.translation.xz()),
+                );
+
+                // Keep Avian's authoritative Position and Bevy's Transform in
+                // sync immediately; the camera sync below reads the same pose
+                // that physics will use on the next fixed tick.
+                if let Ok((mut pos, mut vel, mut body_t)) = body_q.single_mut() {
+                    pos.0 = body_center;
+                    body_t.translation = body_center;
                     *vel = LinearVelocity::ZERO;
+                    cam_t.translation = body_center + Vec3::Y * EYE_OFFSET;
                 }
             }
         }
@@ -284,11 +318,11 @@ fn clamp_player_to_terrain(
     let Some(ground_y) = cache.sample_height(pos.0.xz()) else {
         return;
     };
-    let foot_y = pos.0.y - CAPSULE_RADIUS - CAPSULE_LENGTH * 0.5;
+    let foot_y = pos.0.y - BODY_HALF_HEIGHT;
     if foot_y < ground_y {
-        let corrected_y = ground_y + CAPSULE_RADIUS + CAPSULE_LENGTH * 0.5;
+        let corrected_y = ground_y + BODY_HALF_HEIGHT;
         pos.0.y = corrected_y;
-        transform.translation.y = corrected_y;
+        transform.translation = pos.0;
         if vel.y < 0.0 {
             vel.y = 0.0;
         }
@@ -296,22 +330,30 @@ fn clamp_player_to_terrain(
 }
 
 /// Drives the Camera3d Transform from the physics body (Walking mode only).
-/// Runs in PostUpdate, after FixedPostUpdate where Avian writeback completes.
+/// Runs in Update, after FixedPostUpdate where Avian writeback completes.
 fn sync_camera_to_body(
     mode: Res<CameraMode>,
-    body_q: Query<&Transform, With<PlayerBody>>,
+    body_q: Query<&Position, With<PlayerBody>>,
     mut cam_q: Query<&mut Transform, (With<TerrainCamera>, Without<PlayerBody>)>,
     look: Res<PlayerLook>,
 ) {
     if *mode != CameraMode::Walking {
         return;
     }
-    let (Ok(body_t), Ok(mut cam_t)) = (body_q.single(), cam_q.single_mut()) else {
+    let (Ok(body_pos), Ok(mut cam_t)) = (body_q.single(), cam_q.single_mut()) else {
         return;
     };
 
-    cam_t.translation = body_t.translation + Vec3::Y * EYE_OFFSET;
+    cam_t.translation = body_pos.0 + Vec3::Y * EYE_OFFSET;
     cam_t.rotation = Quat::from_rotation_y(look.yaw) * Quat::from_rotation_x(look.pitch);
+}
+
+fn body_center_for_camera_eye(camera_eye: Vec3, ground_y: Option<f32>) -> Vec3 {
+    let mut body_center = camera_eye - Vec3::Y * EYE_OFFSET;
+    if let Some(ground_y) = ground_y {
+        body_center.y = body_center.y.max(ground_y + BODY_HALF_HEIGHT);
+    }
+    body_center
 }
 
 /// F3 toggles the green wireframe overlay that mirrors the physics trimesh.
@@ -371,4 +413,29 @@ fn shoot_cube(
         ),
         LinearVelocity(velocity),
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{body_center_for_camera_eye, BODY_HALF_HEIGHT, EYE_OFFSET};
+    use bevy::prelude::*;
+
+    #[test]
+    fn body_center_preserves_camera_eye_when_above_ground() {
+        let eye = Vec3::new(10.0, 20.0, -5.0);
+        let body = body_center_for_camera_eye(eye, Some(0.0));
+
+        assert_eq!(body.x, eye.x);
+        assert_eq!(body.z, eye.z);
+        assert!((body.y - (eye.y - EYE_OFFSET)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn body_center_clamps_when_camera_eye_is_below_walk_height() {
+        let ground_y = 12.0;
+        let eye = Vec3::new(1.0, ground_y + 0.2, 2.0);
+        let body = body_center_for_camera_eye(eye, Some(ground_y));
+
+        assert!((body.y - (ground_y + BODY_HALF_HEIGHT)).abs() < 1e-5);
+    }
 }
