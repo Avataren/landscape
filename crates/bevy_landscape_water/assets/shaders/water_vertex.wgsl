@@ -59,8 +59,10 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let macro_v = water_fn::macro_noise_height_grad(orig_world_xz, vertex_size);
     let shore_wave_attn = water_fn::shoreline_wave_attenuation(orig_world_xz);
 
-    // Tessendorf FFT displacement (h, dx, dz, jacobian).
-    let fft = water_fn::sample_fft_displacement(orig_world_xz);
+    // Tessendorf FFT displacement (h, dx, dz, jacobian), low-passed to the
+    // current vertex footprint so coarse LOD rings do not keep sub-grid waves
+    // that their triangles cannot represent.
+    let fft = water_fn::sample_fft_displacement_lod(orig_world_xz, vertex_size);
     let fft_s = water_fn::fft_strength();
     let gerstner_w = 1.0 - fft_s;
 
