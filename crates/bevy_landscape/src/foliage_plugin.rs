@@ -7,6 +7,10 @@
 
 use crate::{
     foliage::{FoliageInstance, FoliageLodTier},
+    foliage_backend::{
+        load_existing_foliage_tiles, poll_foliage_generation, start_foliage_generation,
+        FoliageGenerateRequest, FoliageGenerationState,
+    },
     foliage_entities::FoliageVariantComponent,
     foliage_gpu::{FoliageGpuState, FoliageGpuSyncRequest, FoliageStagingQueue},
     foliage_reload::{reload_foliage_system, FoliageConfigResource, FoliageLoadState},
@@ -112,13 +116,21 @@ impl Plugin for FoliagePlugin {
             .init_resource::<FoliageViewState>()
             .init_resource::<FoliageLoadState>()
             .init_resource::<FoliageConfigResource>()
+            .init_resource::<FoliageGenerationState>()
             .init_resource::<crate::foliage::FoliageSourceDesc>()
-            .add_systems(Startup, setup_foliage_rendering)
+            .add_message::<FoliageGenerateRequest>()
+            .add_systems(
+                Startup,
+                (setup_foliage_rendering, load_existing_foliage_tiles).chain(),
+            )
             .add_systems(
                 Update,
                 (
                     reload_foliage_system,
+                    start_foliage_generation,
+                    poll_foliage_generation,
                     update_foliage_view_state,
+                    update_foliage_lod_visibility,
                     update_foliage_meshes,
                 )
                     .chain(),
@@ -296,6 +308,45 @@ pub fn update_foliage_meshes(
         };
 
         build_instanced_mesh(mesh, blade_data, &instances);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// LOD visibility
+// ---------------------------------------------------------------------------
+
+/// Show only the LOD tier appropriate for the current camera distance.
+///
+/// LOD0: camera within lod0_distance
+/// LOD1: lod0_distance – lod1_distance
+/// LOD2: beyond lod1_distance
+pub fn update_foliage_lod_visibility(
+    foliage_config: Res<FoliageConfigResource>,
+    view_state: Res<FoliageViewState>,
+    mut query: Query<(&FoliageVariantComponent, &mut Visibility)>,
+) {
+    let (lod0_dist, lod1_dist) = match &foliage_config.0 {
+        Some(c) => (c.lod0_distance, c.lod1_distance),
+        None => (50.0f32, 200.0f32),
+    };
+
+    let cam = view_state.camera_pos_ws;
+    let dist_xz = Vec2::new(cam.x, cam.z).length();
+
+    let active_lod = if dist_xz < lod0_dist {
+        FoliageLodTier::Lod0
+    } else if dist_xz < lod1_dist {
+        FoliageLodTier::Lod1
+    } else {
+        FoliageLodTier::Lod2
+    };
+
+    for (comp, mut vis) in &mut query {
+        *vis = if comp.lod == active_lod {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
     }
 }
 

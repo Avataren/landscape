@@ -8,7 +8,9 @@
 
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
-use bevy_landscape::{FoliageSourceDesc, FoliageConfigResource, FoliageConfig};
+use bevy::prelude::MessageWriter;
+use bevy_landscape::{FoliageSourceDesc, FoliageConfigResource, FoliageConfig, FoliageGenerateRequest};
+use bevy_landscape::foliage_backend::FoliageGenerationState;
 use crate::toolbar::ToolbarState;
 
 /// Editor-local UI state for the foliage panel (preview settings only).
@@ -33,6 +35,8 @@ fn foliage_panel_system(
     mut toolbar: ResMut<ToolbarState>,
     foliage_config: Option<Res<FoliageConfigResource>>,
     foliage_source: Option<Res<FoliageSourceDesc>>,
+    mut generate_events: MessageWriter<FoliageGenerateRequest>,
+    gen_state: Option<Res<FoliageGenerationState>>,
 ) -> Result {
     if !toolbar.foliage_open {
         return Ok(());
@@ -52,6 +56,8 @@ fn foliage_panel_system(
                 &mut panel,
                 foliage_config.as_deref().and_then(|fc| fc.0.as_ref()),
                 foliage_source.as_deref(),
+                gen_state.as_deref(),
+                &mut generate_events,
             );
         });
 
@@ -64,6 +70,8 @@ fn draw_foliage_panel(
     panel: &mut FoliagePanelState,
     config: Option<&FoliageConfig>,
     source: Option<&FoliageSourceDesc>,
+    gen_state: Option<&FoliageGenerationState>,
+    generate_events: &mut MessageWriter<FoliageGenerateRequest>,
 ) {
     if config.is_none() || source.is_none() {
         ui.label("ℹ Foliage not loaded.");
@@ -96,17 +104,30 @@ fn draw_foliage_panel(
         ui.separator();
 
         // Generation button
-        if ui
-            .button("🔄 Generate / Regenerate Foliage")
-            .clicked()
-        {
-            panel.generation_in_progress = true;
-            // TODO: Trigger instance generation pipeline in Phase 9
-        }
-        ui.label("").on_hover_text("Bake instance buffers from procedural rules and painted splatmap");
+        let is_running = gen_state.map(|s| s.is_running).unwrap_or(false);
+        ui.add_enabled_ui(!is_running, |ui| {
+            if ui
+                .button("🔄 Generate / Regenerate Foliage")
+                .on_hover_text("Bake instance buffers from procedural rules and painted splatmap")
+                .clicked()
+            {
+                generate_events.write(FoliageGenerateRequest);
+            }
+        });
 
-        if panel.generation_in_progress {
-            ui.label("⏳ Generation in progress...");
+        if let Some(state) = gen_state {
+            if state.is_running {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    if state.tiles_total > 0 {
+                        ui.label(format!("⏳ {}/{} tiles...", state.tiles_done, state.tiles_total));
+                    } else {
+                        ui.label("⏳ Starting...");
+                    }
+                });
+            } else if !state.progress_message.is_empty() {
+                ui.label(&state.progress_message);
+            }
         }
     });
 

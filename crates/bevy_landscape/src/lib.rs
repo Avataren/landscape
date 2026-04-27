@@ -1,5 +1,6 @@
 pub mod bake;
 pub mod foliage;
+pub mod foliage_backend;
 pub mod foliage_entities;
 pub mod foliage_generation;
 pub mod foliage_gpu;
@@ -20,6 +21,7 @@ pub use foliage::{
     foliage_tile_path, painted_splatmap_path, procedural_mask_path, FoliageConfig, FoliageInstance,
     FoliageLodTier, FoliageSourceDesc,
 };
+pub use foliage_backend::FoliageGenerateRequest;
 pub use foliage_plugin::FoliagePlugin;
 pub use foliage_reload::FoliageConfigResource;
 pub use level::{load_level, save_level, LevelDesc};
