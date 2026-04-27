@@ -5,6 +5,7 @@ pub mod foliage_generation;
 pub mod foliage_gpu;
 pub mod foliage_instance_gen;
 pub mod foliage_reload;
+pub mod foliage_render;
 pub mod foliage_stream_queue;
 pub mod foliage_tiles;
 pub mod grass_material;
