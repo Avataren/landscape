@@ -33,12 +33,8 @@ pub fn reload_foliage_system(
     mut events: MessageReader<ReloadTerrainRequest>,
     mut foliage_config: ResMut<FoliageConfigResource>,
     mut foliage_source: ResMut<FoliageSourceDesc>,
-    mut lod0_stream_queue: ResMut<FoliageStreamQueue>,
-    mut lod1_stream_queue: ResMut<FoliageStreamQueue>,
-    mut lod2_stream_queue: ResMut<FoliageStreamQueue>,
-    mut lod0_residency: ResMut<FoliageResidency>,
-    mut lod1_residency: ResMut<FoliageResidency>,
-    mut lod2_residency: ResMut<FoliageResidency>,
+    mut stream_queue: ResMut<FoliageStreamQueue>,
+    mut residency: ResMut<FoliageResidency>,
     mut gpu_state: ResMut<FoliageGpuState>,
     mut gpu_sync: ResMut<FoliageGpuSyncRequest>,
     mut load_state: ResMut<FoliageLoadState>,
@@ -57,33 +53,19 @@ pub fn reload_foliage_system(
             .as_ref()
             .map(|s| std::path::PathBuf::from(s));
 
-        // Bump generation counter on all LOD tiers (invalidates in-flight tiles)
-        lod0_stream_queue.reload_generation += 1;
-        lod1_stream_queue.reload_generation += 1;
-        lod2_stream_queue.reload_generation += 1;
+        // Bump generation counter (invalidates all in-flight tiles)
+        stream_queue.reload_generation += 1;
 
         // Set GPU sync request (signals render graph to insert barrier)
         gpu_sync.needs_sync = true;
-        gpu_sync.requested_frame = 0; // Will be set by render-app
+        gpu_sync.requested_frame = 0;
 
         // Clear residency (old tiles are no longer valid)
-        lod0_residency.tiles.clear();
-        lod0_residency.lru.clear();
-        lod0_residency.required_now.clear();
-        lod0_residency.resident_cpu.clear();
-        lod0_residency.resident_memory_bytes = 0;
-
-        lod1_residency.tiles.clear();
-        lod1_residency.lru.clear();
-        lod1_residency.required_now.clear();
-        lod1_residency.resident_cpu.clear();
-        lod1_residency.resident_memory_bytes = 0;
-
-        lod2_residency.tiles.clear();
-        lod2_residency.lru.clear();
-        lod2_residency.required_now.clear();
-        lod2_residency.resident_cpu.clear();
-        lod2_residency.resident_memory_bytes = 0;
+        residency.tiles.clear();
+        residency.lru.clear();
+        residency.required_now.clear();
+        residency.resident_cpu.clear();
+        residency.resident_memory_bytes = 0;
 
         // Clear GPU state (buffers will be rebuilt as tiles load)
         gpu_state.clear_all();

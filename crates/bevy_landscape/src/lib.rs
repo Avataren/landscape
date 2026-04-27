@@ -4,6 +4,7 @@ pub mod foliage_entities;
 pub mod foliage_generation;
 pub mod foliage_gpu;
 pub mod foliage_instance_gen;
+pub mod foliage_plugin;
 pub mod foliage_reload;
 pub mod foliage_render;
 pub mod foliage_stream_queue;
@@ -19,6 +20,7 @@ pub use foliage::{
     foliage_tile_path, painted_splatmap_path, procedural_mask_path, FoliageConfig, FoliageInstance,
     FoliageLodTier, FoliageSourceDesc,
 };
+pub use foliage_plugin::FoliagePlugin;
 pub use foliage_reload::FoliageConfigResource;
 pub use level::{load_level, save_level, LevelDesc};
 pub use metadata::TerrainMetadata;

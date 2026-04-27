@@ -1,8 +1,8 @@
 # Landscape Editor: Foliage Implementation Roadmap
 
 **Last updated:** 2026-04-27  
-**Current phase:** 8a Complete (Editor UI) → 8b Planning  
-**Progress:** Phases 1-7 ✅, Phase 8a ✅, Phases 8b-11 ⏳
+**Current phase:** 8b In Progress (GPU Rendering)  
+**Progress:** Phases 1-7 ✅, Phase 8a ✅, Phase 8b 🔄 (baked-instance rendering working), Phases 8c-11 ⏳
 
 ---
 
@@ -15,7 +15,7 @@ The foliage system is a **GPU-instanced grass/foliage renderer** for the Bevy la
 - **Hot-reload support** (changes to foliage parameters update in real-time)
 - **Tile-based streaming** (efficient memory management via LRU eviction)
 
-**Completed work (Phases 1-8a):**
+**Completed work (Phases 1-8a, 8b partial):**
 - ✅ Data structures and binary serialization
 - ✅ Procedural density mask generation
 - ✅ Instance generation pipeline
@@ -24,11 +24,17 @@ The foliage system is a **GPU-instanced grass/foliage renderer** for the Bevy la
 - ✅ Runtime GPU infrastructure (FoliageStreamQueue, buffers, LOD culling)
 - ✅ Editor UI panel with parameter inspection
 - ✅ landscape.toml integration
+- ✅ **FoliagePlugin** wiring all resources/systems into Bevy schedule
+- ✅ **24 foliage entities** (8 variants × 3 LODs) spawned at startup with Mesh3d + StandardMaterial
+- ✅ **Baked-instance mesh building** — `build_instanced_mesh` bakes N blade copies into one world-space mesh
+- ✅ **Test instances seeded at startup** — 40×40 grid visible immediately (Phase 8b demo)
+- ✅ Fixed `reload_foliage_system` (was using 3× same resource type — design bug)
 
 **Current state:**
-- 139 tests passing (all core infrastructure validated)
-- Ready for Phase 8b (GPU rendering) and Phase 9 (generation backend)
-- **No production rendering yet** — infrastructure complete but draw calls not implemented
+- 110+ tests passing (all core infrastructure validated)
+- Grass renders at origin using CPU-baked instancing (StandardMaterial, Bevy standard pipeline)
+- FoliageStagingQueue pipeline: seed → `update_foliage_meshes` → Mesh asset updated → Bevy renders
+- **Next**: Phase 9 (generation backend) to populate staging queue from real disk tiles
 
 ---
 
