@@ -1,6 +1,8 @@
 pub mod bake;
 pub mod foliage;
 pub mod foliage_generation;
+pub mod foliage_tiles;
+pub mod grass_mesh;
 pub mod level;
 pub mod metadata;
 mod terrain;
