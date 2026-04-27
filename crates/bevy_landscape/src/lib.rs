@@ -19,6 +19,7 @@ pub use foliage::{
     foliage_tile_path, painted_splatmap_path, procedural_mask_path, FoliageConfig, FoliageInstance,
     FoliageLodTier, FoliageSourceDesc,
 };
+pub use foliage_reload::FoliageConfigResource;
 pub use level::{load_level, save_level, LevelDesc};
 pub use metadata::TerrainMetadata;
 pub use terrain::clipmap_texture::{
