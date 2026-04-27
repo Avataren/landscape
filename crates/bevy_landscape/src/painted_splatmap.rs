@@ -9,10 +9,7 @@ use std::path::Path;
 ///
 /// Returns a Vec of 256×256 = 65,536 u8 values, row-major order.
 /// Returns zeros if the file doesn't exist (treated as "no painting").
-pub fn read_painted_splatmap(
-    path: &Path,
-    tile_size: u32,
-) -> std::io::Result<Vec<u8>> {
+pub fn read_painted_splatmap(path: &Path, tile_size: u32) -> std::io::Result<Vec<u8>> {
     let expected_size = (tile_size * tile_size) as usize;
 
     // If file doesn't exist, return zeros (equivalent to "unpainted")
@@ -85,12 +82,7 @@ impl PaintedSplatmapManager {
     }
 
     /// Clear painted splatmap for a specific tile (delete the file).
-    pub fn clear_tile(
-        &self,
-        mip_level: u8,
-        tx: i32,
-        ty: i32,
-    ) -> std::io::Result<()> {
+    pub fn clear_tile(&self, mip_level: u8, tx: i32, ty: i32) -> std::io::Result<()> {
         let path = crate::foliage::painted_splatmap_path(&self.foliage_root, mip_level, tx, ty);
         if path.exists() {
             std::fs::remove_file(path)?;

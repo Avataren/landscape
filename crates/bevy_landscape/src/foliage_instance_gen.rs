@@ -9,8 +9,8 @@
 //! 6. Write to tile files
 
 use crate::foliage::{FoliageConfig, FoliageInstance, FoliageLodTier};
-use crate::foliage_generation::{blend_density_masks, read_mask_tile, write_mask_tile};
-use crate::foliage_tiles::{write_foliage_tile, FoliageTileWriter};
+use crate::foliage_generation::{blend_density_masks, write_mask_tile};
+use crate::foliage_tiles::FoliageTileWriter;
 use crate::painted_splatmap::PaintedSplatmapManager;
 use std::path::Path;
 
@@ -151,8 +151,19 @@ pub fn bake_and_write_foliage_instances(
     let (slope_mask, altitude_mask, water_mask) = {
         use crate::foliage_generation::*;
 
-        let slope = compute_slope_density(height_data, tile_size, world_scale, height_scale, config.slope_threshold);
-        let altitude = compute_altitude_density(height_data, height_scale, config.altitude_min, config.altitude_max);
+        let slope = compute_slope_density(
+            height_data,
+            tile_size,
+            world_scale,
+            height_scale,
+            config.slope_threshold,
+        );
+        let altitude = compute_altitude_density(
+            height_data,
+            height_scale,
+            config.altitude_min,
+            config.altitude_max,
+        );
 
         // Water mask: assume water_level from config (TODO: get from metadata)
         let water_level = -1000.0; // Placeholder: below most terrain
@@ -291,8 +302,8 @@ mod tests {
             ..Default::default()
         };
 
-        let mut painted = vec![255u8; 256 * 256]; // 100% painted everywhere
-        let mut procedural = vec![255u8; 256 * 256]; // 100% procedural everywhere
+        let painted = vec![255u8; 256 * 256]; // 100% painted everywhere
+        let procedural = vec![255u8; 256 * 256]; // 100% procedural everywhere
 
         let lod0_instances = generate_tile_instances(
             256,

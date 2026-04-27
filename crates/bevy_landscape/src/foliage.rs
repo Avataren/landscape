@@ -152,8 +152,7 @@ impl FoliageInstance {
             f32::from_le_bytes(*<&[u8; 4]>::try_from(&bytes[36..40]).unwrap()),
         );
 
-        let variant_id =
-            u32::from_le_bytes(*<&[u8; 4]>::try_from(&bytes[40..44]).unwrap()) % 8;
+        let variant_id = u32::from_le_bytes(*<&[u8; 4]>::try_from(&bytes[40..44]).unwrap()) % 8;
 
         Self {
             position,
@@ -165,9 +164,10 @@ impl FoliageInstance {
 }
 
 /// LOD tier for foliage instancing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum FoliageLodTier {
     /// LOD0: 0 metres to `FoliageConfig::lod0_distance`
+    #[default]
     Lod0 = 0,
     /// LOD1: `lod0_distance` to `lod1_distance`
     Lod1 = 1,
@@ -178,7 +178,11 @@ pub enum FoliageLodTier {
 impl FoliageLodTier {
     /// All LOD tiers.
     pub fn all() -> &'static [FoliageLodTier] {
-        &[FoliageLodTier::Lod0, FoliageLodTier::Lod1, FoliageLodTier::Lod2]
+        &[
+            FoliageLodTier::Lod0,
+            FoliageLodTier::Lod1,
+            FoliageLodTier::Lod2,
+        ]
     }
 
     /// Get the directory suffix for this LOD tier (e.g., "LOD0", "LOD1", "LOD2").

@@ -164,11 +164,7 @@ pub fn compute_water_proximity_density(
 /// `final = slope × altitude × water_proximity / 256²`
 ///
 /// All values are clamped to 0-255.
-pub fn blend_density_masks(
-    slope: &[u8],
-    altitude: &[u8],
-    water_proximity: &[u8],
-) -> Vec<u8> {
+pub fn blend_density_masks(slope: &[u8], altitude: &[u8], water_proximity: &[u8]) -> Vec<u8> {
     assert_eq!(slope.len(), altitude.len());
     assert_eq!(altitude.len(), water_proximity.len());
 

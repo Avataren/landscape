@@ -2,6 +2,7 @@ pub mod bake;
 pub mod foliage;
 pub mod foliage_generation;
 pub mod foliage_instance_gen;
+pub mod foliage_stream_queue;
 pub mod foliage_tiles;
 pub mod grass_material;
 pub mod grass_mesh;
@@ -11,8 +12,8 @@ pub mod painted_splatmap;
 mod terrain;
 
 pub use foliage::{
-    FoliageConfig, FoliageInstance, FoliageLodTier, FoliageSourceDesc, foliage_tile_path,
-    painted_splatmap_path, procedural_mask_path,
+    foliage_tile_path, painted_splatmap_path, procedural_mask_path, FoliageConfig, FoliageInstance,
+    FoliageLodTier, FoliageSourceDesc,
 };
 pub use level::{load_level, save_level, LevelDesc};
 pub use metadata::TerrainMetadata;

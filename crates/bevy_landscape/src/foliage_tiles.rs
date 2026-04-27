@@ -17,7 +17,8 @@ const FOLIAGE_INSTANCE_SIZE: usize = 48;
 /// - Bytes 0-3: u32 instance count (little-endian)
 /// - Bytes 4+: instance data (48 bytes per instance)
 pub fn serialize_foliage_tile(instances: &[FoliageInstance]) -> Vec<u8> {
-    let mut data = Vec::with_capacity(FOLIAGE_TILE_HEADER_SIZE + instances.len() * FOLIAGE_INSTANCE_SIZE);
+    let mut data =
+        Vec::with_capacity(FOLIAGE_TILE_HEADER_SIZE + instances.len() * FOLIAGE_INSTANCE_SIZE);
 
     // Write header
     let count = instances.len() as u32;
@@ -66,10 +67,11 @@ pub fn deserialize_foliage_tile(data: &[u8]) -> std::io::Result<Vec<FoliageInsta
     let mut instances = Vec::with_capacity(count);
     for i in 0..count {
         let offset = FOLIAGE_TILE_HEADER_SIZE + i * FOLIAGE_INSTANCE_SIZE;
-        let bytes = <&[u8; FOLIAGE_INSTANCE_SIZE]>::try_from(&data[offset..offset + FOLIAGE_INSTANCE_SIZE])
-            .map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "instance data too short")
-            })?;
+        let bytes =
+            <&[u8; FOLIAGE_INSTANCE_SIZE]>::try_from(&data[offset..offset + FOLIAGE_INSTANCE_SIZE])
+                .map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, "instance data too short")
+                })?;
         instances.push(FoliageInstance::from_bytes(bytes));
     }
 

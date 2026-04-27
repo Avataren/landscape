@@ -96,10 +96,7 @@ impl GrassBladVariant {
 /// Generate a grass blade mesh with the given variant parameters.
 ///
 /// Returns a Bevy Mesh suitable for rendering via instancing.
-pub fn generate_grass_blade(
-    config: &GrassBladeMeshConfig,
-    variant: GrassBladVariant,
-) -> Mesh {
+pub fn generate_grass_blade(config: &GrassBladeMeshConfig, variant: GrassBladVariant) -> Mesh {
     let segments = config.segments as usize;
     let height = config.blade_height;
     let width = config.blade_width;
