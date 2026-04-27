@@ -1,4 +1,5 @@
 mod player;
+mod app_config;
 
 use bevy::{
     camera::{Exposure, ScreenSpaceTransmissionQuality},
@@ -20,8 +21,8 @@ use bevy::{
     window::PrimaryWindow,
 };
 use bevy_landscape::{
-    level::load_level, TerrainCamera, TerrainConfig, TerrainDebugPlugin, TerrainPlugin,
-    TerrainSourceDesc, TerrainSystemSet,
+    level::load_level, FoliageSourceDesc, TerrainCamera, TerrainConfig, TerrainDebugPlugin,
+    TerrainPlugin, TerrainSourceDesc, TerrainSystemSet,
 };
 use bevy_landscape_clouds::{CloudsConfig, VolumetricCloudsPlugin};
 use bevy_landscape_editor::{AppPreferences, LandscapeEditorPlugin};
@@ -79,11 +80,16 @@ fn main() {
             }
         } else {
             // No level configured — start the editor with an empty flat terrain.
+            // Load foliage_root from landscape.toml if present.
             // Use File → Import Heightmap to load data, then Save Landscape and
             // set it as the default level in the preferences to auto-load on startup.
+            let mut source = TerrainSourceDesc::default();
+            // Try to load foliage_root from landscape.toml
+            let cfg = app_config::load();
+            source.foliage_root = cfg.source.foliage_root;
             (
                 TerrainConfig::default(),
-                TerrainSourceDesc::default(),
+                source,
                 None,
                 None,
                 LandscapeWaterPlugin::default(),
@@ -96,6 +102,12 @@ fn main() {
     }
     if let Some(lib) = loaded_library {
         app.insert_resource(lib);
+    }
+    // Create FoliageSourceDesc from terrain source if foliage_root is set
+    if let Some(foliage_root_str) = &terrain_source.foliage_root {
+        app.insert_resource(FoliageSourceDesc {
+            foliage_root: Some(std::path::PathBuf::from(foliage_root_str)),
+        });
     }
     app.insert_resource(ClearColor(Color::BLACK))
         // Terrain uses the atmosphere cubemap for ambient IBL; non-terrain PBR

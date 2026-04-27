@@ -4,6 +4,7 @@ use serde::Deserialize;
 struct ConfigFile {
     terrain: TerrainSourceToml,
     terrain_config: Option<TerrainConfigToml>,
+    foliage: Option<FoliageSourceToml>,
 }
 
 #[derive(Deserialize)]
@@ -14,6 +15,11 @@ struct TerrainSourceToml {
     max_mip_level: u8,
     /// Mip level for the collision heightfield (default 2 = 4 m/cell).
     collision_mip_level: Option<u8>,
+}
+
+#[derive(Deserialize)]
+struct FoliageSourceToml {
+    foliage_root: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -31,6 +37,7 @@ pub struct TerrainSourceCfg {
     pub tile_root: Option<std::path::PathBuf>,
     pub normal_root: Option<String>,
     pub macro_color_root: Option<String>,
+    pub foliage_root: Option<String>,
     pub world_min: bevy::math::Vec2,
     pub world_max: bevy::math::Vec2,
     pub max_mip_level: u8,
@@ -129,6 +136,9 @@ pub fn load() -> AppConfig {
         height_scale: None,
         macro_color_flip_v: None,
     });
+    let fc = cfg.foliage.unwrap_or(FoliageSourceToml {
+        foliage_root: None,
+    });
 
     let world_scale = rc.world_scale.unwrap_or(1.0);
     // tile_size matches TerrainConfig::default() — always 256 for this project.
@@ -146,6 +156,7 @@ pub fn load() -> AppConfig {
             tile_root: t.tile_root.map(std::path::PathBuf::from),
             normal_root: t.normal_root,
             macro_color_root: t.diffuse_exr,
+            foliage_root: fc.foliage_root,
             world_min,
             world_max,
             max_mip_level: t.max_mip_level,
