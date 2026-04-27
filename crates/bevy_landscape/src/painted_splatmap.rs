@@ -12,9 +12,10 @@ use std::path::Path;
 pub fn read_painted_splatmap(path: &Path, tile_size: u32) -> std::io::Result<Vec<u8>> {
     let expected_size = (tile_size * tile_size) as usize;
 
-    // If file doesn't exist, return zeros (equivalent to "unpainted")
+    // If file doesn't exist, return full coverage (equivalent to "paint everywhere").
+    // Users remove foliage by painting black, not by starting from nothing.
     if !path.exists() {
-        return Ok(vec![0u8; expected_size]);
+        return Ok(vec![255u8; expected_size]);
     }
 
     let data = std::fs::read(path)?;
@@ -97,13 +98,13 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_read_nonexistent_returns_zeros() {
+    fn test_read_nonexistent_returns_full_coverage() {
         let temp_dir = TempDir::new().unwrap();
         let nonexistent = temp_dir.path().join("nonexistent.bin");
 
         let data = read_painted_splatmap(&nonexistent, 256).unwrap();
         assert_eq!(data.len(), 256 * 256);
-        assert!(data.iter().all(|&b| b == 0));
+        assert!(data.iter().all(|&b| b == 255));
     }
 
     #[test]
@@ -177,8 +178,8 @@ mod tests {
         manager.clear_tile(2, 5, -3).unwrap();
         assert!(!path.exists());
 
-        // Reading cleared tile should return zeros
-        let zeros = manager.read_tile(2, 5, -3, tile_size).unwrap();
-        assert!(zeros.iter().all(|&b| b == 0));
+        // Reading cleared tile should return full coverage (default)
+        let full = manager.read_tile(2, 5, -3, tile_size).unwrap();
+        assert!(full.iter().all(|&b| b == 255));
     }
 }
