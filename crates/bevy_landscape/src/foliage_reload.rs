@@ -18,8 +18,14 @@ use bevy::prelude::*;
 // ---------------------------------------------------------------------------
 
 /// Wrapper for FoliageConfig as a Resource (since Option<T> isn't Resource by itself).
-#[derive(Resource, Clone, Debug, Default)]
+#[derive(Resource, Clone, Debug)]
 pub struct FoliageConfigResource(pub Option<FoliageConfig>);
+
+impl Default for FoliageConfigResource {
+    fn default() -> Self {
+        Self(Some(FoliageConfig::default()))
+    }
+}
 
 /// Marker resource to track whether foliage is currently loaded.
 #[derive(Resource, Default, Debug)]

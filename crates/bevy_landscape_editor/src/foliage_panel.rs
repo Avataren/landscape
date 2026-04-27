@@ -8,16 +8,14 @@
 
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
-use bevy::prelude::MessageWriter;
 use bevy_landscape::{FoliageSourceDesc, FoliageConfigResource, FoliageConfig, FoliageGenerateRequest};
 use bevy_landscape::foliage_backend::FoliageGenerationState;
 use crate::toolbar::ToolbarState;
 
-/// Editor-local UI state for the foliage panel (preview settings only).
+/// Editor-local UI state for the foliage panel.
 #[derive(Resource, Default)]
 pub struct FoliagePanelState {
     pub preview_enabled: bool,
-    pub generation_in_progress: bool,
 }
 
 pub struct FoliagePanelPlugin;
@@ -73,14 +71,9 @@ fn draw_foliage_panel(
     gen_state: Option<&FoliageGenerationState>,
     generate_events: &mut MessageWriter<FoliageGenerateRequest>,
 ) {
-    if config.is_none() || source.is_none() {
-        ui.label("ℹ Foliage not loaded.");
-        ui.label("Import a heightmap to enable foliage generation.");
-        return;
-    }
-
-    let config = config.unwrap();
-    let source = source.unwrap();
+    let default_config = FoliageConfig::default();
+    let config = config.unwrap_or(&default_config);
+    let foliage_root = source.and_then(|s| s.foliage_root.as_ref());
 
     ui.group(|ui| {
         ui.label("📦 Foliage Generation");
@@ -89,10 +82,10 @@ fn draw_foliage_panel(
         // Status
         ui.horizontal(|ui| {
             ui.label("Root:");
-            if let Some(root) = &source.foliage_root {
+            if let Some(root) = foliage_root {
                 ui.monospace(root.to_string_lossy().as_ref());
             } else {
-                ui.label("(none)");
+                ui.colored_label(egui::Color32::YELLOW, "Not set — load a level with foliage_root");
             }
         });
 
@@ -105,7 +98,8 @@ fn draw_foliage_panel(
 
         // Generation button
         let is_running = gen_state.map(|s| s.is_running).unwrap_or(false);
-        ui.add_enabled_ui(!is_running, |ui| {
+        let can_generate = foliage_root.is_some() && !is_running;
+        ui.add_enabled_ui(can_generate, |ui| {
             if ui
                 .button("🔄 Generate / Regenerate Foliage")
                 .on_hover_text("Bake instance buffers from procedural rules and painted splatmap")
