@@ -47,6 +47,9 @@ pub struct LevelDesc {
     pub normal_root: Option<String>,
     /// Path to the world-aligned macro/diffuse colour EXR.
     pub diffuse_path: Option<String>,
+    /// Root directory for foliage instance tiles and splatmaps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foliage_root: Option<String>,
     /// Highest LOD index that has baked tiles in the tile hierarchy.
     pub max_mip_level: u8,
     /// Mip level used to build the global collision heightfield.
@@ -68,6 +71,9 @@ pub struct LevelDesc {
     pub clipmap_levels: u32,
     /// Procedural material slot definitions.
     pub material_library: MaterialLibrary,
+    /// Foliage generation and rendering configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foliage_config: Option<crate::FoliageConfig>,
     /// Cloud renderer settings. Stored as a raw JSON value so `bevy_landscape`
     /// does not need to depend on `bevy_landscape_clouds`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -105,6 +111,7 @@ impl Default for LevelDesc {
             tile_root: None,
             normal_root: None,
             diffuse_path: None,
+            foliage_root: None,
             max_mip_level: 5,
             collision_mip_level: 2,
             world_scale: 1.0,
@@ -112,6 +119,7 @@ impl Default for LevelDesc {
             height_scale: default_config.height_scale,
             clipmap_levels: 0, // 0 = derive from world bounds at runtime
             material_library: MaterialLibrary::default(),
+            foliage_config: None,
             clouds: None,
             sky: None,
             water: None,
@@ -143,6 +151,7 @@ impl LevelDesc {
                 .map(String::from),
             normal_root: source.normal_root.clone(),
             diffuse_path: source.macro_color_root.clone(),
+            foliage_root: source.foliage_root.clone(),
             max_mip_level: source.max_mip_level,
             collision_mip_level: source.collision_mip_level,
             world_scale: config.world_scale,
@@ -150,6 +159,7 @@ impl LevelDesc {
             height_scale: base_height_scale,
             clipmap_levels: config.clipmap_levels,
             material_library: library.clone(),
+            foliage_config: None,
             clouds: None,
             sky: None,
             water: None,
@@ -234,6 +244,7 @@ impl LevelDesc {
             tile_root,
             normal_root: self.normal_root,
             macro_color_root: self.diffuse_path,
+            foliage_root: self.foliage_root.clone(),
             material_root: None,
             world_min,
             world_max,

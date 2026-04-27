@@ -211,6 +211,7 @@ pub(crate) fn toolbar_system(
                     config: new_config,
                     source: terrain.desc.clone(),
                     material_library: terrain.library.clone(),
+                    foliage_config: None,
                 });
             }
 

@@ -1,8 +1,14 @@
 pub mod bake;
+pub mod foliage;
+pub mod foliage_generation;
 pub mod level;
 pub mod metadata;
 mod terrain;
 
+pub use foliage::{
+    FoliageConfig, FoliageInstance, FoliageLodTier, FoliageSourceDesc, foliage_tile_path,
+    painted_splatmap_path, procedural_mask_path,
+};
 pub use level::{load_level, save_level, LevelDesc};
 pub use metadata::TerrainMetadata;
 pub use terrain::clipmap_texture::{

@@ -371,6 +371,7 @@ fn level_io_system(
                                 config: new_config,
                                 source: new_source,
                                 material_library: new_library,
+                                foliage_config: None,
                             });
                             state.status = Some((format!("✓ Loaded → {}", path.display()), false));
                         }

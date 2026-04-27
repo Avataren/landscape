@@ -66,12 +66,44 @@ use streamer::{poll_tile_stream_jobs, request_tile_loads, setup_tile_channel};
 /// Send this message to replace the active terrain at runtime.
 ///
 /// The `reload_terrain_system` will update all live resources on the next
-/// frame: streamer, clipmap textures, material uniforms, and macro color.
-#[derive(Message)]
+/// frame: streamer, clipmap textures, material uniforms, macro color, and foliage.
+#[derive(Message, Clone)]
 pub struct ReloadTerrainRequest {
     pub config: TerrainConfig,
     pub source: TerrainSourceDesc,
     pub material_library: MaterialLibrary,
+    pub foliage_config: Option<crate::FoliageConfig>,
+}
+
+impl ReloadTerrainRequest {
+    /// Create a new reload request without foliage changes.
+    pub fn new(
+        config: TerrainConfig,
+        source: TerrainSourceDesc,
+        material_library: MaterialLibrary,
+    ) -> Self {
+        Self {
+            config,
+            source,
+            material_library,
+            foliage_config: None,
+        }
+    }
+
+    /// Create a new reload request with foliage config.
+    pub fn with_foliage(
+        config: TerrainConfig,
+        source: TerrainSourceDesc,
+        material_library: MaterialLibrary,
+        foliage_config: crate::FoliageConfig,
+    ) -> Self {
+        Self {
+            config,
+            source,
+            material_library,
+            foliage_config: Some(foliage_config),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

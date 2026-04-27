@@ -9,6 +9,8 @@ pub struct TerrainSourceDesc {
     pub material_root: Option<String>,
     /// Optional path for a world-aligned macro/diffuse color map.
     pub macro_color_root: Option<String>,
+    /// Optional root path for foliage instance tiles and splatmaps.
+    pub foliage_root: Option<String>,
     /// World-space XZ minimum (2D footprint).
     pub world_min: Vec2,
     /// World-space XZ maximum (2D footprint).
@@ -32,6 +34,7 @@ impl Default for TerrainSourceDesc {
             normal_root: None,
             material_root: None,
             macro_color_root: None,
+            foliage_root: None,
             world_min: Vec2::ZERO,
             world_max: Vec2::ZERO,
             max_mip_level: 0,

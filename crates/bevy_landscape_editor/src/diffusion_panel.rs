@@ -2620,6 +2620,7 @@ fn trigger_reload(
         config: new_config,
         source: new_source,
         material_library: active_library.clone(),
+        foliage_config: None,
     });
 }
 
