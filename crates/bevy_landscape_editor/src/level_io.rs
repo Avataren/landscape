@@ -365,13 +365,14 @@ fn level_io_system(
                                     sd.apply_to(syn.as_mut());
                                 }
                             }
+                            let saved_foliage_config = level_desc.foliage_config.clone();
                             let (new_config, new_source, new_library, _, _, _meta) =
                                 level_desc.into_runtime();
                             reload_tx.write(ReloadTerrainRequest {
                                 config: new_config,
                                 source: new_source,
                                 material_library: new_library,
-                                foliage_config: None,
+                                foliage_config: saved_foliage_config,
                             });
                             state.status = Some((format!("✓ Loaded → {}", path.display()), false));
                         }

@@ -46,18 +46,17 @@ pub fn reload_foliage_system(
     mut load_state: ResMut<FoliageLoadState>,
 ) {
     for event in events.read() {
-        // Check if this reload includes foliage data
+        // Always sync foliage_root from the terrain source (present on every reload).
+        if let Some(root) = &event.source.foliage_root {
+            foliage_source.foliage_root = Some(std::path::PathBuf::from(root));
+        }
+
+        // Only do the heavy foliage reset when a new FoliageConfig is provided.
         let Some(new_config) = &event.foliage_config else {
             continue;
         };
 
-        // Update foliage configuration and source
         foliage_config.0 = Some(new_config.clone());
-        foliage_source.foliage_root = event
-            .source
-            .foliage_root
-            .as_ref()
-            .map(|s| std::path::PathBuf::from(s));
 
         // Bump generation counter (invalidates all in-flight tiles)
         stream_queue.reload_generation += 1;
