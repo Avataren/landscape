@@ -21,8 +21,8 @@ use bevy::{
     window::PrimaryWindow,
 };
 use bevy_landscape::{
-    level::load_level, FoliageSourceDesc, TerrainCamera, TerrainConfig, TerrainDebugPlugin,
-    TerrainPlugin, TerrainSourceDesc, TerrainSystemSet,
+    level::load_level, FoliageConfig, FoliageConfigResource, FoliageSourceDesc, TerrainCamera,
+    TerrainConfig, TerrainDebugPlugin, TerrainPlugin, TerrainSourceDesc, TerrainSystemSet,
 };
 use bevy_landscape_clouds::{CloudsConfig, VolumetricCloudsPlugin};
 use bevy_landscape_editor::{AppPreferences, LandscapeEditorPlugin};
@@ -103,11 +103,13 @@ fn main() {
     if let Some(lib) = loaded_library {
         app.insert_resource(lib);
     }
-    // Create FoliageSourceDesc from terrain source if foliage_root is set
+    // Create FoliageSourceDesc and FoliageConfig from terrain source if foliage_root is set
     if let Some(foliage_root_str) = &terrain_source.foliage_root {
         app.insert_resource(FoliageSourceDesc {
             foliage_root: Some(std::path::PathBuf::from(foliage_root_str)),
         });
+        // Also create a default FoliageConfig so the panel can display it
+        app.insert_resource(FoliageConfigResource(Some(FoliageConfig::default())));
     }
     app.insert_resource(ClearColor(Color::BLACK))
         // Terrain uses the atmosphere cubemap for ambient IBL; non-terrain PBR
