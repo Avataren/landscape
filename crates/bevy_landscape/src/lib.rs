@@ -1,5 +1,6 @@
 pub mod bake;
 pub mod foliage;
+pub mod foliage_entities;
 pub mod foliage_generation;
 pub mod foliage_gpu;
 pub mod foliage_instance_gen;
