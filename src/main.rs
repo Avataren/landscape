@@ -21,7 +21,7 @@ use bevy::{
     window::PrimaryWindow,
 };
 use bevy_landscape::{
-    level::load_level, FoliageSourceDesc, TerrainCamera,
+    level::load_level, FoliageSourceDesc, GpuGrassPlugin, TerrainCamera,
     TerrainConfig, TerrainDebugPlugin, TerrainPlugin, TerrainSourceDesc, TerrainSystemSet,
 };
 use bevy_landscape_clouds::{CloudsConfig, VolumetricCloudsPlugin};
@@ -149,6 +149,7 @@ fn main() {
         .add_plugins(VolumetricCloudsPlugin)
         .add_plugins(LandscapeGeneratorPlugin)
         .add_plugins(TerrainDebugPlugin)
+        .add_plugins(GpuGrassPlugin)
         .add_plugins(LandscapeEditorPlugin)
         .add_plugins(PlayerPlugin)
         .add_systems(Startup, setup_scene)

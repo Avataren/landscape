@@ -1,40 +1,33 @@
 # Landscape Editor: Foliage Implementation Roadmap
 
 **Last updated:** 2026-04-27  
-**Current phase:** 8b In Progress (GPU Rendering)  
-**Progress:** Phases 1-7 ✅, Phase 8a ✅, Phase 8b 🔄 (baked-instance rendering working), Phases 8c-11 ⏳
+**Current phase:** GPU Grass (instant rendering) ✅  
+**Progress:** Phases 1-8a ✅, GPU grass ✅, Pre-bake pipeline ⏳ (on hold)
 
 ---
 
 ## Executive Summary
 
-The foliage system is a **GPU-instanced grass/foliage renderer** for the Bevy landscape editor. The pipeline supports:
-- **Procedural density generation** (slope, altitude, water proximity)
-- **Painted splatmaps** for artist override (non-destructive: painted × procedural = final)
-- **LOD-based rendering** (3 tiers: 0-50m, 50-200m, 200m+)
-- **Hot-reload support** (changes to foliage parameters update in real-time)
-- **Tile-based streaming** (efficient memory management via LRU eviction)
+The foliage system provides **GPU-driven instant grass rendering** for the Bevy landscape editor — no pre-baking step, blades appear immediately when a level loads. The vertex shader places each blade on the terrain by sampling the heightmap directly on the GPU, with slope and altitude filtering.
 
-**Completed work (Phases 1-8a, 8b partial):**
-- ✅ Data structures and binary serialization
-- ✅ Procedural density mask generation
-- ✅ Instance generation pipeline
-- ✅ Grass blade mesh variants (8 procedural meshes)
-- ✅ Grass material shader
-- ✅ Runtime GPU infrastructure (FoliageStreamQueue, buffers, LOD culling)
-- ✅ Editor UI panel with parameter inspection
-- ✅ landscape.toml integration
-- ✅ **FoliagePlugin** wiring all resources/systems into Bevy schedule
-- ✅ **24 foliage entities** (8 variants × 3 LODs) spawned at startup with Mesh3d + StandardMaterial
-- ✅ **Baked-instance mesh building** — `build_instanced_mesh` bakes N blade copies into one world-space mesh
-- ✅ **Test instances seeded at startup** — 40×40 grid visible immediately (Phase 8b demo)
-- ✅ Fixed `reload_foliage_system` (was using 3× same resource type — design bug)
+**Architecture (active):**
+- `GpuGrassPlugin` — vertex-shader-driven grass, zero CPU placement cost per frame
+- `GpuGrassMaterial` — `AsBindGroup` material; binds heightmap + grass params
+- `grass_blade.wgsl` — 12-vert blade geometry generated from `@builtin(vertex_index)`
+- `update_grass_material` — pushes camera XZ + wind time each frame (small uniform update)
+- `GpuGrassConfig` — live-tweakable: grid size, spacing, blade dimensions, slope filter, color
+
+**Legacy pipeline (Phases 1-8a, kept for reference / future painter tool):**
+- Pre-bake pipeline: generate → disk tiles → stream → GPU
+- Editor UI panel with parameter inspection and "Generate" button
+- landscape.toml integration, hot-reload, LRU streaming infrastructure
 
 **Current state:**
-- 110+ tests passing (all core infrastructure validated)
-- Grass renders at origin using CPU-baked instancing (StandardMaterial, Bevy standard pipeline)
-- FoliageStagingQueue pipeline: seed → `update_foliage_meshes` → Mesh asset updated → Bevy renders
-- **Next**: Phase 9 (generation backend) to populate staging queue from real disk tiles
+- GPU grass renders instantly at startup — no generation step needed
+- 128×128 = 16,384 blades visible at once, centred on camera, follow-cam seamlessly
+- Blades placed by heightmap sample in vertex shader (slope + altitude filtering)
+- Two-axis wind animation, tapered blade shape, half-lambert lighting
+- All 110+ existing tests passing
 
 ---
 
@@ -277,9 +270,59 @@ subsequent frames:
 
 ---
 
-## Remaining Phases (8b - 11)
+## Active: GPU Grass System ✅
 
-### Phase 8b: Render-Graph GPU Integration 🔄 NEXT
+### GpuGrassPlugin (completed 2026-04-27)
+**Files:** `foliage_gpu_grass.rs`, `assets/shaders/grass_blade.wgsl`  
+**Approach:** Vertex-shader-driven placement, zero pre-baking.
+
+**How it works:**
+1. A single mesh with `grid_size² × 12` dummy vertices is spawned at startup
+2. `GpuGrassMaterial` binds the terrain heightmap + `GrassParamsGpu` uniform
+3. Vertex shader uses `@builtin(vertex_index)` to:
+   - Decode blade index and intra-blade vertex
+   - Snap camera position to grid, add per-blade jitter
+   - Sample heightmap at blade XZ with `textureSampleLevel`
+   - Reject blade if slope > max or altitude out of range
+   - Generate two crossed-quad geometry (12 verts per blade)
+   - Apply wind displacement at tip
+4. `update_grass_material` runs every frame to push camera XZ, wind_time, and heightmap handle
+
+**Configuration (GpuGrassConfig):**
+| Field | Default | Notes |
+|-------|---------|-------|
+| `grid_size` | 128 | N×N blades centred on camera |
+| `spacing` | 1.5 m | Cell size (jitter within ±0.65×spacing) |
+| `blade_height` | 0.7 m | World-space blade height |
+| `blade_width` | 0.12 m | Base width |
+| `slope_max` | 0.8 | Gradient magnitude cutoff |
+| `altitude_min/max` | −100/3000 m | Altitude band |
+| `wind_strength` | 0.15 m | Tip displacement amplitude |
+| `wind_scale` | 0.035 | Spatial frequency |
+| `base_color` | dark green | RGB in linear space |
+
+**Performance characteristics:**
+- GPU draw: 16,384 blades × 12 verts = 196,608 vertex shader invocations
+- CPU cost per frame: ~1 uniform write (80 bytes)
+- Degenerate triangles (blades outside filters) → zero rasterizer cost
+- Draw distance = grid_size × spacing / 2 = ~96 m radius at defaults
+
+**Tuning for larger draw distance:**
+- `grid_size = 256, spacing = 2.0` → 256m radius, 786K verts (~3ms GPU)
+- `grid_size = 512, spacing = 1.0` → 256m radius, 3.1M verts (dense close, sparse far)
+
+---
+
+## Remaining Phases
+
+### Pre-bake pipeline (Phases 8b-11) — On hold
+**Reason:** Superseded by `GpuGrassPlugin` for the primary grass use case.  
+The pre-bake infrastructure (Phases 1-7) remains in the codebase for potential future use:
+- Painted splatmap support (artist control of density)
+- Tree / rock instancing (non-grass foliage types)
+- Very high instance counts beyond what the vertex-shader grid can handle
+
+### Phase 8b: Render-Graph GPU Integration ⏳ (deferred)
 **Estimated scope:** 2-3 sessions  
 **Dependencies:** Phase 7 complete (✅)  
 **Blocks:** Phase 8c (rendering)
@@ -821,5 +864,4 @@ cargo run
 ---
 
 **Last updated:** 2026-04-27  
-**Prepared by:** GitHub Copilot  
-**Status:** Ready for Phase 8b implementation
+**Status:** GPU grass rendering live ✅

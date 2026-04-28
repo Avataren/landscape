@@ -1,40 +1,22 @@
-//! Foliage editor panel — UI for foliage instance generation and control.
-//!
-//! Provides:
-//! - Generate/Regenerate foliage button
-//! - Procedural parameter inspection
-//! - Preview toggle
-//! - Status display (instance count, memory usage)
+//! Foliage editor panel — controls for the two-LOD GPU grass system.
 
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
-use bevy_landscape::{FoliageSourceDesc, FoliageConfigResource, FoliageConfig, FoliageGenerateRequest};
-use bevy_landscape::foliage_backend::FoliageGenerationState;
+use bevy_landscape::{GpuGrassConfig, GRASS_MAX_GRID};
 use crate::toolbar::ToolbarState;
-
-/// Editor-local UI state for the foliage panel.
-#[derive(Resource, Default)]
-pub struct FoliagePanelState {
-    pub preview_enabled: bool,
-}
 
 pub struct FoliagePanelPlugin;
 
 impl Plugin for FoliagePanelPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<FoliagePanelState>()
-            .add_systems(EguiPrimaryContextPass, foliage_panel_system);
+        app.add_systems(EguiPrimaryContextPass, foliage_panel_system);
     }
 }
 
 fn foliage_panel_system(
     mut contexts: EguiContexts,
-    mut panel: ResMut<FoliagePanelState>,
     mut toolbar: ResMut<ToolbarState>,
-    foliage_config: Option<Res<FoliageConfigResource>>,
-    foliage_source: Option<Res<FoliageSourceDesc>>,
-    mut generate_events: MessageWriter<FoliageGenerateRequest>,
-    gen_state: Option<Res<FoliageGenerationState>>,
+    mut grass: Option<ResMut<GpuGrassConfig>>,
 ) -> Result {
     if !toolbar.foliage_open {
         return Ok(());
@@ -43,141 +25,168 @@ fn foliage_panel_system(
     let ctx = contexts.ctx_mut()?;
     let mut open = toolbar.foliage_open;
 
-    egui::Window::new("Foliage")
+    egui::Window::new("Grass")
         .open(&mut open)
-        .default_width(360.0)
-        .default_height(300.0)
+        .default_width(310.0)
         .resizable(true)
         .show(ctx, |ui| {
-            draw_foliage_panel(
-                ui,
-                &mut panel,
-                foliage_config.as_deref().and_then(|fc| fc.0.as_ref()),
-                foliage_source.as_deref(),
-                gen_state.as_deref(),
-                &mut generate_events,
-            );
+            let Some(ref mut grass_res) = grass else {
+                ui.label("GpuGrassConfig not available.");
+                return;
+            };
+            // Explicit deref so field borrows are plain struct projections,
+            // not split borrows across DerefMut (which the borrow checker rejects).
+            let cfg: &mut GpuGrassConfig = &mut **grass_res;
+
+            ui.checkbox(&mut cfg.enabled, "Enabled");
+            ui.separator();
+
+            // ── Near LOD ───────────────────────────────────────────────────
+            ui.strong("Near grass  (dense, close range)");
+            {
+                let range_before = cfg.near_range;
+                let max_near = (GRASS_MAX_GRID as f32 / 2.0) * cfg.near_spacing;
+                ui.horizontal(|ui| {
+                    ui.label("Range  ");
+                    let mut r = cfg.near_range;
+                    if ui.add(egui::Slider::new(&mut r, 20.0..=max_near.max(200.0))
+                        .suffix(" m").integer()).changed()
+                    {
+                        cfg.near_range = r.min(max_near);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Spacing");
+                    let mut s = cfg.near_spacing;
+                    if ui.add(egui::Slider::new(&mut s, 0.3..=3.0)
+                        .suffix(" m").logarithmic(true)).changed()
+                    {
+                        cfg.near_spacing = s;
+                        // Keep range constant: adjust grid_size to compensate.
+                        let new_g = ((range_before * 2.0) / s).round() as u32;
+                        let new_g = new_g.clamp(4, GRASS_MAX_GRID);
+                        cfg.near_range = (new_g as f32 / 2.0) * s;
+                    }
+                });
+                let ng = cfg.near_grid_size();
+                ui.label(egui::RichText::new(
+                    format!("{}×{} = {}k blades  |  range {:.0} m", ng, ng, ng*ng/1000, cfg.near_range)
+                ).small().color(egui::Color32::GRAY));
+            }
+
+            ui.add_space(6.0);
+
+            // ── Far LOD ────────────────────────────────────────────────────
+            ui.strong("Far grass  (sparse, long range)");
+            {
+                // Far spacing must be coarser than near.
+                let min_far_sp = (cfg.near_spacing * 2.0).max(1.0);
+                if cfg.far_spacing < min_far_sp { cfg.far_spacing = min_far_sp; }
+                // Far range must extend beyond near.
+                let min_far_r = cfg.near_range + 20.0;
+                if cfg.far_range < min_far_r { cfg.far_range = min_far_r; }
+
+                let range_before = cfg.far_range;
+                let max_far = (GRASS_MAX_GRID as f32 / 2.0) * cfg.far_spacing;
+                ui.horizontal(|ui| {
+                    ui.label("Range  ");
+                    let mut r = cfg.far_range;
+                    if ui.add(egui::Slider::new(&mut r, min_far_r..=max_far.max(500.0))
+                        .suffix(" m").integer()).changed()
+                    {
+                        cfg.far_range = r.min(max_far);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Spacing");
+                    let mut s = cfg.far_spacing;
+                    if ui.add(egui::Slider::new(&mut s, min_far_sp..=10.0)
+                        .suffix(" m").logarithmic(true)).changed()
+                    {
+                        cfg.far_spacing = s;
+                        let new_g = ((range_before * 2.0) / s).round() as u32;
+                        let new_g = new_g.clamp(4, GRASS_MAX_GRID);
+                        cfg.far_range = (new_g as f32 / 2.0) * s;
+                    }
+                });
+                let fg = cfg.far_grid_size();
+                ui.label(egui::RichText::new(
+                    format!("{}×{} = {}k blades  |  range {:.0} m", fg, fg, fg*fg/1000, cfg.far_range)
+                ).small().color(egui::Color32::GRAY));
+            }
+
+            // Total.
+            let ng = cfg.near_grid_size();
+            let fg = cfg.far_grid_size();
+            ui.label(egui::RichText::new(
+                format!("Total: {}k + {}k = {}k blades",
+                    ng*ng/1000, fg*fg/1000, (ng*ng + fg*fg)/1000)
+            ).small().color(egui::Color32::DARK_GRAY));
+
+            ui.separator();
+
+            // ── Blade appearance ───────────────────────────────────────────
+            ui.label("Blade appearance");
+            ui.horizontal(|ui| {
+                ui.label("Height");
+                ui.add(egui::Slider::new(&mut cfg.blade_height, 0.1..=5.0).suffix(" m"));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Width ");
+                ui.add(egui::Slider::new(&mut cfg.blade_width, 0.02..=0.5).suffix(" m"));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Color ");
+                let mut rgb = [cfg.base_color.red, cfg.base_color.green, cfg.base_color.blue];
+                if ui.color_edit_button_rgb(&mut rgb).changed() {
+                    cfg.base_color.red   = rgb[0];
+                    cfg.base_color.green = rgb[1];
+                    cfg.base_color.blue  = rgb[2];
+                }
+            });
+
+            ui.separator();
+
+            // ── Wind ───────────────────────────────────────────────────────
+            ui.label("Wind");
+            ui.horizontal(|ui| {
+                ui.label("Strength");
+                ui.add(egui::Slider::new(&mut cfg.wind_strength, 0.0..=2.0));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Scale   ");
+                ui.add(egui::Slider::new(&mut cfg.wind_scale, 0.005..=0.2).logarithmic(true));
+            });
+
+            ui.separator();
+
+            // ── Slope ──────────────────────────────────────────────────────
+            ui.label("Slope limit");
+            ui.horizontal(|ui| {
+                let mut slope_enabled = cfg.slope_max < 90.0;
+                if ui.checkbox(&mut slope_enabled, "").changed() {
+                    cfg.slope_max = if slope_enabled { 0.7 } else { 999.0 };
+                }
+                ui.add_enabled(
+                    slope_enabled,
+                    egui::Slider::new(&mut cfg.slope_max, 0.1..=3.0)
+                        .custom_formatter(|v, _| format!("{:.1}  (~{:.0}°)", v, v.atan() * 57.2958)),
+                );
+            });
+
+            // ── Altitude ───────────────────────────────────────────────────
+            ui.collapsing("Altitude filter", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Min");
+                    ui.add(egui::DragValue::new(&mut cfg.altitude_min).suffix(" m").speed(10.0));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Max");
+                    ui.add(egui::DragValue::new(&mut cfg.altitude_max).suffix(" m").speed(10.0));
+                });
+            });
         });
 
     toolbar.foliage_open = open;
     Ok(())
 }
-
-fn draw_foliage_panel(
-    ui: &mut egui::Ui,
-    panel: &mut FoliagePanelState,
-    config: Option<&FoliageConfig>,
-    source: Option<&FoliageSourceDesc>,
-    gen_state: Option<&FoliageGenerationState>,
-    generate_events: &mut MessageWriter<FoliageGenerateRequest>,
-) {
-    let default_config = FoliageConfig::default();
-    let config = config.unwrap_or(&default_config);
-    let foliage_root = source.and_then(|s| s.foliage_root.as_ref());
-
-    ui.group(|ui| {
-        ui.label("📦 Foliage Generation");
-        ui.separator();
-
-        // Status
-        ui.horizontal(|ui| {
-            ui.label("Root:");
-            if let Some(root) = foliage_root {
-                ui.monospace(root.to_string_lossy().as_ref());
-            } else {
-                ui.colored_label(egui::Color32::YELLOW, "Not set — load a level with foliage_root");
-            }
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("Instances/Cell:");
-            ui.label(format!("{}", config.instances_per_cell));
-        });
-
-        ui.separator();
-
-        // Generation button
-        let is_running = gen_state.map(|s| s.is_running).unwrap_or(false);
-        let can_generate = foliage_root.is_some() && !is_running;
-        ui.add_enabled_ui(can_generate, |ui| {
-            if ui
-                .button("🔄 Generate / Regenerate Foliage")
-                .on_hover_text("Bake instance buffers from procedural rules and painted splatmap")
-                .clicked()
-            {
-                generate_events.write(FoliageGenerateRequest);
-            }
-        });
-
-        if let Some(state) = gen_state {
-            if state.is_running {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    if state.tiles_total > 0 {
-                        ui.label(format!("⏳ {}/{} tiles...", state.tiles_done, state.tiles_total));
-                    } else {
-                        ui.label("⏳ Starting...");
-                    }
-                });
-            } else if !state.progress_message.is_empty() {
-                ui.label(&state.progress_message);
-            }
-        }
-    });
-
-    ui.group(|ui| {
-        ui.label("👁 Preview");
-        ui.separator();
-
-        ui.checkbox(&mut panel.preview_enabled, "Show Instances in Viewport");
-        ui.label("").on_hover_text("Toggle runtime rendering of foliage instances");
-    });
-
-    ui.group(|ui| {
-        ui.label("⚙ Procedural Parameters");
-        ui.separator();
-
-        ui.horizontal(|ui| {
-            ui.label("Slope Threshold:");
-            ui.label(format!("{:.2}", config.slope_threshold));
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("Altitude Min:");
-            ui.label(format!("{:.1} m", config.altitude_min));
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("Altitude Max:");
-            ui.label(format!("{:.1} m", config.altitude_max));
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("LOD0 Distance:");
-            ui.label(format!("{:.1} m", config.lod0_distance));
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("LOD1 Distance:");
-            ui.label(format!("{:.1} m", config.lod1_distance));
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("LOD0 Density:");
-            ui.label(format!("{:.0}%", config.lod0_density * 100.0));
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("LOD1 Density:");
-            ui.label(format!("{:.0}%", config.lod1_density * 100.0));
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("LOD2 Density:");
-            ui.label(format!("{:.0}%", config.lod2_density * 100.0));
-        });
-    });
-}
-
-
-
