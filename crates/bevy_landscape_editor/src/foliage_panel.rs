@@ -77,41 +77,46 @@ fn foliage_panel_system(
             ui.add_space(6.0);
 
             // ── Far LOD ────────────────────────────────────────────────────
-            ui.strong("Far grass  (sparse, long range)");
+            ui.strong("Far grass  (sparse, extension past near)");
             {
                 // Far spacing must be coarser than near.
                 let min_far_sp = (cfg.near_spacing * 2.0).max(1.0);
                 if cfg.far_spacing < min_far_sp { cfg.far_spacing = min_far_sp; }
-                // Far range must extend beyond near.
-                let min_far_r = cfg.near_range + 20.0;
-                if cfg.far_range < min_far_r { cfg.far_range = min_far_r; }
 
                 let range_before = cfg.far_range;
-                let max_far = (GRASS_MAX_GRID as f32 / 2.0) * cfg.far_spacing;
+                // Max far extension: limited by how many cells fit at current spacing
+                // after accounting for the near radius already consumed.
+                let max_far_ext = ((GRASS_MAX_GRID as f32 / 2.0) * cfg.far_spacing
+                    - cfg.near_range).max(100.0);
                 ui.horizontal(|ui| {
-                    ui.label("Range  ");
+                    ui.label("Extension");
                     let mut r = cfg.far_range;
-                    if ui.add(egui::Slider::new(&mut r, min_far_r..=max_far.max(500.0))
-                        .suffix(" m").integer()).changed()
+                    if ui.add(egui::Slider::new(&mut r, 50.0..=max_far_ext.max(2000.0))
+                        .suffix(" m past near").integer()).changed()
                     {
-                        cfg.far_range = r.min(max_far);
+                        cfg.far_range = r.min(max_far_ext);
                     }
                 });
                 ui.horizontal(|ui| {
-                    ui.label("Spacing");
+                    ui.label("Spacing  ");
                     let mut s = cfg.far_spacing;
-                    if ui.add(egui::Slider::new(&mut s, min_far_sp..=10.0)
+                    if ui.add(egui::Slider::new(&mut s, min_far_sp..=5.0)
                         .suffix(" m").logarithmic(true)).changed()
                     {
                         cfg.far_spacing = s;
-                        let new_g = ((range_before * 2.0) / s).round() as u32;
+                        // Keep total radius constant when spacing changes.
+                        let total_r = cfg.near_range + range_before;
+                        let new_g = ((total_r * 2.0) / s).round() as u32;
                         let new_g = new_g.clamp(4, GRASS_MAX_GRID);
-                        cfg.far_range = (new_g as f32 / 2.0) * s;
+                        let new_total = (new_g as f32 / 2.0) * s;
+                        cfg.far_range = (new_total - cfg.near_range).max(50.0);
                     }
                 });
                 let fg = cfg.far_grid_size();
+                let total_r = cfg.near_range + cfg.far_range;
                 ui.label(egui::RichText::new(
-                    format!("{}×{} = {}k blades  |  range {:.0} m", fg, fg, fg*fg/1000, cfg.far_range)
+                    format!("{}×{} = {}k blades  |  {:.0}–{:.0} m from camera",
+                        fg, fg, fg*fg/1000, cfg.near_range, total_r)
                 ).small().color(egui::Color32::GRAY));
             }
 
@@ -133,7 +138,7 @@ fn foliage_panel_system(
             });
             ui.horizontal(|ui| {
                 ui.label("Width ");
-                ui.add(egui::Slider::new(&mut cfg.blade_width, 0.02..=0.5).suffix(" m"));
+                ui.add(egui::Slider::new(&mut cfg.blade_width, 0.1..=3.0).suffix(" m"));
             });
             ui.horizontal(|ui| {
                 ui.label("Color ");
@@ -159,6 +164,11 @@ fn foliage_panel_system(
             });
 
             ui.separator();
+
+            // ── Material slot 0 binding ────────────────────────────────────
+            ui.separator();
+            ui.checkbox(&mut cfg.link_to_slot0,
+                "Follow material slot 0  (altitude & slope from ground texture)");
 
             // ── Slope ──────────────────────────────────────────────────────
             ui.label("Slope limit");
