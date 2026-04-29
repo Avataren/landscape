@@ -17,6 +17,7 @@ pub mod level;
 pub mod metadata;
 pub mod painted_splatmap;
 mod terrain;
+mod texture_arrays;
 
 pub use foliage::{
     foliage_tile_path, painted_splatmap_path, procedural_mask_path, FoliageConfig, FoliageInstance,

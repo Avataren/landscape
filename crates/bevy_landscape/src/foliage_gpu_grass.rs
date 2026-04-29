@@ -13,7 +13,6 @@
 use bevy::{
     asset::RenderAssetUsages,
     camera::visibility::NoFrustumCulling,
-    image::{ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     mesh::{MeshVertexBufferLayoutRef, PrimitiveTopology},
     pbr::{MaterialPipeline, MaterialPipelineKey},
     prelude::*,
@@ -31,6 +30,9 @@ use crate::terrain::{
     config::TerrainConfig,
     math::level_scale,
     source_heightmap::SourceHeightmapState,
+};
+use crate::texture_arrays::{
+    build_texture_2d_array, solid_layer, MipFilter, TextureArrayConfig, TextureArraySampler,
 };
 
 // ── Public config ─────────────────────────────────────────────────────────────
@@ -175,31 +177,6 @@ fn load_grass_textures(mut commands: Commands, asset_server: Res<AssetServer>) {
     });
 }
 
-/// 2×2 box-filter downsample. Works for any power-of-two bytes-per-pixel format.
-fn box_downsample(src: &[u8], src_w: u32, src_h: u32, bpp: usize) -> Vec<u8> {
-    let dst_w = (src_w / 2).max(1);
-    let dst_h = (src_h / 2).max(1);
-    let mut out = vec![0u8; (dst_w * dst_h) as usize * bpp];
-    for y in 0..dst_h {
-        for x in 0..dst_w {
-            let x0 = (x * 2) as usize;
-            let y0 = (y * 2) as usize;
-            let x1 = (x * 2 + 1).min(src_w - 1) as usize;
-            let y1 = (y * 2 + 1).min(src_h - 1) as usize;
-            let dst_i = (y * dst_w + x) as usize * bpp;
-            for c in 0..bpp {
-                let sw = src_w as usize;
-                let p00 = src[(y0 * sw + x0) * bpp + c] as u32;
-                let p10 = src[(y0 * sw + x1) * bpp + c] as u32;
-                let p01 = src[(y1 * sw + x0) * bpp + c] as u32;
-                let p11 = src[(y1 * sw + x1) * bpp + c] as u32;
-                out[dst_i + c] = ((p00 + p10 + p01 + p11 + 2) / 4) as u8;
-            }
-        }
-    }
-    out
-}
-
 /// Once all 12 PNGs are loaded, combines each group into a texture_2d_array
 /// with a full mip chain and patches both grass materials.
 fn combine_grass_textures(
@@ -233,58 +210,29 @@ fn combine_grass_textures(
         let w = imgs[0].width();
         let h = imgs[0].height();
         let fmt = imgs[0].texture_descriptor.format;
-        let bpp = fmt.block_copy_size(None).unwrap_or(4) as usize;
-        let num_mips = (w.max(h) as f32).log2().floor() as u32 + 1;
-
-        // Build mip chain for each of the 3 layers.
-        let mip_chains: Vec<Vec<Vec<u8>>> = imgs
+        let layers: Vec<Vec<u8>> = imgs
             .iter()
             .map(|img| {
-                let base = img.data.as_deref().unwrap_or(&[]).to_vec();
-                let mut chain = vec![base];
-                let mut cw = w;
-                let mut ch = h;
-                while cw > 1 || ch > 1 {
-                    let prev = chain.last().unwrap();
-                    chain.push(box_downsample(prev, cw, ch, bpp));
-                    cw = (cw / 2).max(1);
-                    ch = (ch / 2).max(1);
-                }
-                chain
+                img.data
+                    .as_deref()
+                    .expect("loaded grass image missing CPU data")
+                    .to_vec()
             })
             .collect();
 
-        // wgpu/Bevy default is LayerMajor: [layer0_mip0..N, layer1_mip0..N, layer2_mip0..N]
-        let mut combined = Vec::new();
-        for chain in &mip_chains {
-            for mip_data in chain {
-                combined.extend_from_slice(mip_data);
-            }
-        }
-
-        let mut arr = Image::new(
-            Extent3d {
+        images.add(build_texture_2d_array(
+            &layers,
+            TextureArrayConfig {
                 width: w,
                 height: h,
-                depth_or_array_layers: 3,
+                layers: 3,
+                format: fmt,
+                usage: RenderAssetUsages::RENDER_WORLD,
+                sampler: TextureArraySampler::clamp_linear_mip(),
+                view_dimension: Some(TextureViewDimension::D2Array),
             },
-            TextureDimension::D2,
-            combined,
-            fmt,
-            RenderAssetUsages::RENDER_WORLD,
-        );
-        arr.texture_descriptor.mip_level_count = num_mips;
-        arr.texture_view_descriptor = Some(TextureViewDescriptor {
-            dimension: Some(TextureViewDimension::D2Array),
-            ..default()
-        });
-        arr.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
-            mipmap_filter: ImageFilterMode::Linear,
-            min_filter: ImageFilterMode::Linear,
-            mag_filter: ImageFilterMode::Linear,
-            ..default()
-        });
-        images.add(arr)
+            MipFilter::Box,
+        ))
     };
 
     let diffuse_h = make_array(&loader.diffuse, &mut images);
@@ -437,27 +385,21 @@ fn make_fallback_array(
     fmt: TextureFormat,
 ) -> Handle<Image> {
     let bytes_per_texel = fmt.block_copy_size(None).unwrap_or(4) as usize;
-    let layer_data = rgba[..bytes_per_texel].to_vec();
-    let mut combined = Vec::with_capacity(layer_data.len() * 3);
-    for _ in 0..3 {
-        combined.extend_from_slice(&layer_data);
-    }
-    let mut img = Image::new(
-        Extent3d {
+    let layer_data = solid_layer(1, 1, &rgba[..bytes_per_texel]);
+    let layers = vec![layer_data; 3];
+    images.add(build_texture_2d_array(
+        &layers,
+        TextureArrayConfig {
             width: 1,
             height: 1,
-            depth_or_array_layers: 3,
+            layers: 3,
+            format: fmt,
+            usage: RenderAssetUsages::RENDER_WORLD,
+            sampler: TextureArraySampler::clamp_linear_mip(),
+            view_dimension: Some(TextureViewDimension::D2Array),
         },
-        TextureDimension::D2,
-        combined,
-        fmt,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    img.texture_view_descriptor = Some(TextureViewDescriptor {
-        dimension: Some(TextureViewDimension::D2Array),
-        ..default()
-    });
-    images.add(img)
+        MipFilter::Box,
+    ))
 }
 
 // ── Per-frame update ──────────────────────────────────────────────────────────
