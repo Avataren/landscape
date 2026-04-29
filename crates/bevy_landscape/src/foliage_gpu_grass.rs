@@ -135,6 +135,12 @@ impl Material for GpuGrassMaterial {
     fn fragment_shader() -> ShaderRef {
         "shaders/grass_blade.wgsl".into()
     }
+    fn prepass_vertex_shader() -> ShaderRef {
+        "shaders/grass_blade_prepass.wgsl".into()
+    }
+    fn prepass_fragment_shader() -> ShaderRef {
+        "shaders/grass_blade_prepass.wgsl".into()
+    }
     fn alpha_mode(&self) -> AlphaMode {
         AlphaMode::Mask(0.3)
     }

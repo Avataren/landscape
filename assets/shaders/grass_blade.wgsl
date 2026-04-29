@@ -7,6 +7,20 @@
 //             specular for shininess.
 
 #import bevy_pbr::view_transformations::position_world_to_clip
+#import bevy_pbr::{
+    mesh_view_bindings::{lights, view, clusterable_objects},
+    mesh_view_types::{
+        DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
+        POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT,
+        POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE,
+    },
+    shadows::{fetch_directional_shadow, fetch_point_shadow, fetch_spot_shadow},
+    clustered_forward::{
+        fragment_cluster_index,
+        unpack_clusterable_object_index_ranges,
+        get_clusterable_object_id,
+    },
+}
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const VERTS_PER_BLADE: u32 = 12u;
@@ -241,6 +255,15 @@ fn vertex(@builtin(vertex_index) vid: u32) -> VertexOutput {
     return out;
 }
 
+// ── Lighting helpers ──────────────────────────────────────────────────────────
+
+fn distance_attenuation(dist_sq: f32, inv_range_sq: f32) -> f32 {
+    let factor        = dist_sq * inv_range_sq;
+    let smooth_factor = saturate(1.0 - factor * factor);
+    let falloff       = smooth_factor * smooth_factor;
+    return falloff / max(dist_sq, 1e-4);
+}
+
 // ── Fragment shader ───────────────────────────────────────────────────────────
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
@@ -255,27 +278,104 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let diffuse = textureSample(diffuse_arr, diffuse_samp, uv, vi).rgb;
 
     // Tangent-space normal → world normal.
-    let nm_ts   = textureSample(normal_arr, normal_samp, uv, vi).xyz * 2.0 - 1.0;
-    let T       = normalize(in.tangent);
-    let B       = normalize(in.bitangent);
-    let N_geo   = normalize(in.world_n);
+    let nm_ts = textureSample(normal_arr, normal_samp, uv, vi).xyz * 2.0 - 1.0;
+    let T     = normalize(in.tangent);
+    let B     = normalize(in.bitangent);
+    // N_geo: geometry normal from vertex — used for shadow acne bias.
+    let N_geo = normalize(in.world_n);
+    // world_n: normal-mapped normal — used for all lighting calculations.
     let world_n = normalize(T * nm_ts.x + B * nm_ts.y + N_geo * nm_ts.z);
 
-    // Specular / roughness.
+    // Specular map value.
     let spec_val = textureSample(specular_arr, specular_samp, uv, vi).r;
 
-    // Lighting — half-Lambert with fixed sun + sky fill.
-    let sun_dir  = normalize(vec3<f32>(0.4, 1.0, 0.3));
-    let ndotl    = max(0.0, dot(world_n, sun_dir));
-    let ambient  = 0.25;
-    let diffuse_light = ambient + (1.0 - ambient) * ndotl;
+    // view-space depth for shadow cascade selection and cluster z-slice lookup.
+    let view_z = dot(
+        vec4<f32>(view.view_from_world[0].z, view.view_from_world[1].z,
+                  view.view_from_world[2].z, view.view_from_world[3].z),
+        vec4<f32>(in.world_pos, 1.0),
+    );
+    let is_orthographic = view.clip_from_view[3].w == 1.0;
+    let view_dir = normalize(view.world_position.xyz - in.world_pos);
 
-    // Simple specular highlight.
-    let view_dir  = normalize(vec3<f32>(0.0, 1.0, 0.5)); // approximate — no view uniform needed
-    let half_vec  = normalize(sun_dir + view_dir);
-    let spec      = pow(max(0.0, dot(world_n, half_vec)), 16.0) * spec_val * 0.4;
+    var direct = vec3<f32>(0.0);
 
-    var color = diffuse * diffuse_light + vec3<f32>(spec);
+    // --- Directional lights (sun etc.) ---
+    for (var i: u32 = 0u; i < lights.n_directional_lights; i++) {
+        let light = lights.directional_lights[i];
+        let ndotl = max(dot(world_n, light.direction_to_light), 0.0);
 
+        var shadow = 1.0;
+        if (light.flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
+            // Use geometry normal for shadow bias (more stable than normal-mapped).
+            shadow = fetch_directional_shadow(i, vec4<f32>(in.world_pos, 1.0), N_geo, view_z);
+        }
+
+        let half_vec = normalize(light.direction_to_light + view_dir);
+        let spec = pow(max(0.0, dot(world_n, half_vec)), 32.0) * spec_val * 0.3;
+        direct += (diffuse * ndotl + vec3<f32>(spec)) * shadow * light.color.rgb;
+    }
+
+    // --- Clustered point lights ---
+    let cluster_index = fragment_cluster_index(in.clip_pos.xy, view_z, is_orthographic);
+    let ranges = unpack_clusterable_object_index_ranges(cluster_index);
+
+    for (var i: u32 = ranges.first_point_light_index_offset;
+             i < ranges.first_spot_light_index_offset; i++) {
+        let light_id = get_clusterable_object_id(i);
+        let light    = &clusterable_objects.data[light_id];
+        let to_frag  = (*light).position_radius.xyz - in.world_pos;
+        let dist_sq  = dot(to_frag, to_frag);
+        let L        = normalize(to_frag);
+        let ndotl    = max(dot(world_n, L), 0.0);
+        let atten    = distance_attenuation(dist_sq, (*light).color_inverse_square_range.w);
+
+        var shadow = 1.0;
+        if ((*light).flags & POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
+            shadow = fetch_point_shadow(light_id, vec4<f32>(in.world_pos, 1.0), N_geo);
+        }
+
+        direct += diffuse * ndotl * atten * shadow * (*light).color_inverse_square_range.rgb;
+    }
+
+    // --- Spot lights ---
+    for (var i: u32 = ranges.first_spot_light_index_offset;
+             i < ranges.first_reflection_probe_index_offset; i++) {
+        let light_id = get_clusterable_object_id(i);
+        let light    = &clusterable_objects.data[light_id];
+        let to_frag  = (*light).position_radius.xyz - in.world_pos;
+        let dist_sq  = dot(to_frag, to_frag);
+        let L        = normalize(to_frag);
+        let ndotl    = max(dot(world_n, L), 0.0);
+        let atten    = distance_attenuation(dist_sq, (*light).color_inverse_square_range.w);
+
+        var spot_dir = vec3<f32>((*light).light_custom_data.x, 0.0, (*light).light_custom_data.y);
+        spot_dir.y = sqrt(max(0.0, 1.0 - spot_dir.x * spot_dir.x - spot_dir.z * spot_dir.z));
+        if ((*light).flags & POINT_LIGHT_FLAGS_SPOT_LIGHT_Y_NEGATIVE) != 0u {
+            spot_dir.y = -spot_dir.y;
+        }
+        let cd         = dot(-spot_dir, L);
+        let cone_atten = saturate(cd * (*light).light_custom_data.z + (*light).light_custom_data.w);
+        let spot_atten = cone_atten * cone_atten;
+
+        var shadow = 1.0;
+        if ((*light).flags & POINT_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
+            shadow = fetch_spot_shadow(
+                light_id, vec4<f32>(in.world_pos, 1.0), N_geo, (*light).shadow_map_near_z,
+            );
+        }
+
+        direct += diffuse * ndotl * atten * spot_atten * shadow
+            * (*light).color_inverse_square_range.rgb;
+    }
+
+    // --- Ambient (hemisphere + scene ambient) ---
+    let sky_t      = saturate(world_n.y * 0.5 + 0.5);
+    let sky_col    = vec3<f32>(0.15, 0.25, 0.40);
+    let gnd_col    = vec3<f32>(0.04, 0.03, 0.02);
+    let hemisphere = mix(gnd_col, sky_col, sky_t);
+    let ambient    = diffuse * (hemisphere / max(view.exposure, 1e-10) + lights.ambient_color.rgb);
+
+    let color = (direct + ambient) * view.exposure;
     return vec4<f32>(color, opacity);
 }
