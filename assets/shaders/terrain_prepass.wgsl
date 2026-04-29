@@ -84,7 +84,7 @@ fn vertex(v: Vertex) -> VertexOutput {
     let patch_size_ws = length(model[0].xyz);
 
     let lod_f     = round(log2(patch_size_ws / terrain.base_patch_size));
-    let lod_level = u32(clamp(lod_f, 0.0, 15.0));
+    let lod_level = u32(clamp(lod_f, 0.0, f32(terrain.num_lod_levels) - 1.0));
 
     let max_lod_idx = u32(terrain.num_lod_levels) - 1u;
     let coarse_lod  = min(lod_level + 1u, max_lod_idx);
