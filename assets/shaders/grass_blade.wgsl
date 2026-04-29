@@ -31,7 +31,7 @@ struct GrassParams {
     clip_level:   vec4<f32>,  // xy=ring_center XZ, z=inv_span, w=texel_ws
     blade:        vec4<f32>,  // x=inner_radius_sq, y=height, z=width, w=slope_max
     alt_wind:     vec4<f32>,  // x=alt_min, y=alt_max, z=wind_time, w=wind_strength
-    wind_color:   vec4<f32>,  // x=wind_scale, yzw=fallback RGB
+    wind_color:   vec4<f32>,  // x=wind_scale, yz=unused, w=debug_mode
     world_bounds: vec4<f32>,  // xy=world_min XZ, zw=world_max XZ
 }
 
@@ -239,10 +239,12 @@ fn vertex(@builtin(vertex_index) vid: u32) -> VertexOutput {
         local_tangent.x * sin_r + local_tangent.z * cos_r,
     ));
     let bitangent = vec3<f32>(0.0, 1.0, 0.0);
-    // Face normal = cross(tangent, bitangent), tilted slightly toward viewer.
-    let face_n_x = tangent.z;    // cross(T,B).x = Ty*Bz - Tz*By = 0 - Tz*1 = -Tz = -(sin_r or cos_r)
-    let face_n_z = -tangent.x;
-    let world_n  = normalize(vec3<f32>(face_n_x, 0.3, face_n_z));
+    // Face normal = cross(T, B): T=(tx,0,tz), B=(0,1,0)
+    // cross = (Ty*Bz - Tz*By, Tz*Bx - Tx*Bz, Tx*By - Ty*Bx)
+    //       = (0 - tz*1, tz*0 - tx*0, tx*1 - 0)
+    //       = (-tz, 0, tx)
+    // Tilt slightly upward (+Y) so blades self-light naturally from above.
+    let world_n = normalize(vec3<f32>(-tangent.z, 0.3, tangent.x));
 
     out.clip_pos  = position_world_to_clip(world_pos);
     out.world_pos = world_pos;
@@ -285,6 +287,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let N_geo = normalize(in.world_n);
     // world_n: normal-mapped normal — used for all lighting calculations.
     let world_n = normalize(T * nm_ts.x + B * nm_ts.y + N_geo * nm_ts.z);
+
+    // Debug mode: 1 = normals as colour (mirrors terrain F8 debug).
+    let debug_mode = params.wind_color.w;
+    if debug_mode >= 0.5 && debug_mode < 1.5 {
+        return vec4<f32>(world_n * 0.5 + vec3<f32>(0.5), 1.0);
+    }
 
     // Specular map value.
     let spec_val = textureSample(specular_arr, specular_samp, uv, vi).r;

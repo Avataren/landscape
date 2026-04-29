@@ -39,6 +39,10 @@ fn foliage_panel_system(
             let cfg: &mut GpuGrassConfig = &mut **grass_res;
 
             ui.checkbox(&mut cfg.enabled, "Enabled");
+            ui.checkbox(
+                &mut cfg.cast_shadows,
+                "Cast shadows  (expensive, off by default)",
+            );
             ui.separator();
 
             // ── Near LOD ───────────────────────────────────────────────────

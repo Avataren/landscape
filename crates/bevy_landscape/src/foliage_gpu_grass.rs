@@ -13,6 +13,7 @@
 use bevy::{
     asset::RenderAssetUsages,
     camera::visibility::NoFrustumCulling,
+    light::NotShadowCaster,
     mesh::{MeshVertexBufferLayoutRef, PrimitiveTopology},
     pbr::{MaterialPipeline, MaterialPipelineKey},
     prelude::*,
@@ -57,6 +58,9 @@ pub struct GpuGrassConfig {
     /// When true, altitude and slope limits are driven by material slot 0's
     /// procedural rules so grass only appears where the ground texture is active.
     pub link_to_slot0: bool,
+    /// When true, grass blades cast shadows. Off by default (expensive for
+    /// alpha-masked geometry and rarely visible at typical view distances).
+    pub cast_shadows: bool,
 }
 
 impl GpuGrassConfig {
@@ -88,6 +92,7 @@ impl Default for GpuGrassConfig {
             wind_scale: 0.035,
             base_color: LinearRgba::rgb(0.19, 0.42, 0.09),
             link_to_slot0: false,
+            cast_shadows: false,
         }
     }
 }
@@ -100,7 +105,7 @@ pub struct GrassParamsGpu {
     pub clip_level: Vec4,   // xy=ring_center XZ, z=inv_ring_span, w=texel_ws
     pub blade: Vec4,        // x=inner_radius_sq, y=blade_height, z=blade_width, w=slope_max
     pub alt_wind: Vec4,     // x=alt_min, y=alt_max, z=wind_time, w=wind_strength
-    pub wind_color: Vec4,   // x=wind_scale, yzw=base_color (fallback when no textures)
+    pub wind_color: Vec4,   // x=wind_scale, y=fallback_r, z=fallback_g, w=debug_mode
     pub world_bounds: Vec4, // xy=world_min XZ, zw=world_max XZ
 }
 
@@ -321,6 +326,7 @@ fn spawn_grass_entities(
         0.0,
         fallback_clip,
         fallback_world,
+        0.0,
     );
     let near_mat = materials.add(GpuGrassMaterial {
         height_tex: fallback_height.clone(),
@@ -335,6 +341,7 @@ fn spawn_grass_entities(
         MeshMaterial3d(near_mat),
         Transform::default(),
         NoFrustumCulling,
+        NotShadowCaster,
         GrassEntityNear,
     ));
 
@@ -348,6 +355,7 @@ fn spawn_grass_entities(
         0.0,
         fallback_clip,
         fallback_world,
+        0.0,
     );
     let far_mat = materials.add(GpuGrassMaterial {
         height_tex: fallback_height,
@@ -362,6 +370,7 @@ fn spawn_grass_entities(
         MeshMaterial3d(far_mat),
         Transform::default(),
         NoFrustumCulling,
+        NotShadowCaster,
         GrassEntityFar,
     ));
 }
@@ -416,6 +425,7 @@ fn update_grass_materials(
     terrain_config: Option<Res<TerrainConfig>>,
     clipmap_state: Option<Res<TerrainClipmapState>>,
     material_library: Option<Res<MaterialLibrary>>,
+    debug_cfg: Option<Res<crate::terrain::debug::TerrainDebugConfig>>,
     near_q: Query<&MeshMaterial3d<GpuGrassMaterial>, With<GrassEntityNear>>,
     far_q: Query<&MeshMaterial3d<GpuGrassMaterial>, With<GrassEntityFar>>,
     mut materials: ResMut<Assets<GpuGrassMaterial>>,
@@ -423,6 +433,12 @@ fn update_grass_materials(
     time: Res<Time>,
 ) {
     let Ok(cam) = camera_q.single() else { return };
+
+    // Mirror TerrainDebugConfig::fragment_debug_mode so F8 shows grass normals too.
+    let debug_mode = debug_cfg
+        .as_deref()
+        .map(|d| d.fragment_debug_mode as f32)
+        .unwrap_or(0.0);
 
     // Override altitude/slope from material slot 0 if requested.
     let effective = if config.link_to_slot0 {
@@ -497,6 +513,7 @@ fn update_grass_materials(
                 wt,
                 clip_level_near,
                 world_bounds,
+                debug_mode,
             );
             if let Some(ref hh) = height_handle {
                 mat.height_tex = hh.clone();
@@ -515,6 +532,7 @@ fn update_grass_materials(
                 wt,
                 clip_level_far,
                 world_bounds,
+                debug_mode,
             );
             if let Some(ref hh) = height_handle {
                 mat.height_tex = hh.clone();
@@ -532,6 +550,7 @@ fn build_params(
     wind_time: f32,
     clip_level_0: Vec4,
     world_bounds: Vec4,
+    debug_mode: f32,
 ) -> GrassParamsGpu {
     GrassParamsGpu {
         camera_grid: Vec4::new(camera_pos.x, camera_pos.z, grid_size as f32, spacing),
@@ -552,13 +571,31 @@ fn build_params(
             config.wind_scale,
             config.base_color.red,
             config.base_color.green,
-            config.base_color.blue,
+            debug_mode, // w = debug_mode (0 = normal, 1 = normals as colour)
         ),
         world_bounds,
     }
 }
 
 // ── Plugin ────────────────────────────────────────────────────────────────────
+
+fn sync_grass_shadow_casting(
+    config: Res<GpuGrassConfig>,
+    near_q: Query<Entity, With<GrassEntityNear>>,
+    far_q: Query<Entity, With<GrassEntityFar>>,
+    mut commands: Commands,
+) {
+    if !config.is_changed() {
+        return;
+    }
+    for entity in near_q.iter().chain(far_q.iter()) {
+        if config.cast_shadows {
+            commands.entity(entity).remove::<NotShadowCaster>();
+        } else {
+            commands.entity(entity).insert(NotShadowCaster);
+        }
+    }
+}
 
 pub struct GpuGrassPlugin;
 
@@ -567,6 +604,13 @@ impl Plugin for GpuGrassPlugin {
         app.init_resource::<GpuGrassConfig>()
             .add_plugins(MaterialPlugin::<GpuGrassMaterial>::default())
             .add_systems(Startup, (load_grass_textures, spawn_grass_entities))
-            .add_systems(Update, (update_grass_materials, combine_grass_textures));
+            .add_systems(
+                Update,
+                (
+                    update_grass_materials,
+                    combine_grass_textures,
+                    sync_grass_shadow_casting,
+                ),
+            );
     }
 }
