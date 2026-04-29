@@ -60,10 +60,18 @@ fn prepare_textures_bind_group(
     clouds_image: Res<CloudsImage>,
     render_device: Res<RenderDevice>,
 ) {
-    let cloud_render_view = gpu_images.get(&clouds_image.cloud_render_image).unwrap();
-    let cloud_history_view = gpu_images.get(&clouds_image.cloud_history_image).unwrap();
-    let cloud_atlas_view = gpu_images.get(&clouds_image.cloud_atlas_image).unwrap();
-    let cloud_worley_view = gpu_images.get(&clouds_image.cloud_worley_image).unwrap();
+    let Some(cloud_render_view) = gpu_images.get(&clouds_image.cloud_render_image) else {
+        return;
+    };
+    let Some(cloud_history_view) = gpu_images.get(&clouds_image.cloud_history_image) else {
+        return;
+    };
+    let Some(cloud_atlas_view) = gpu_images.get(&clouds_image.cloud_atlas_image) else {
+        return;
+    };
+    let Some(cloud_worley_view) = gpu_images.get(&clouds_image.cloud_worley_image) else {
+        return;
+    };
 
     let bind_group = render_device.create_bind_group(
         None,
@@ -184,8 +192,12 @@ impl Node for CloudsNode {
             return Ok(());
         }
 
-        let texture_bind_group = &world.resource::<CloudsImageBindGroup>().0;
-        let uniform_bind_group = &world.resource::<CloudsUniformBindGroup>().0;
+        let Some(texture_bind_group) = world.get_resource::<CloudsImageBindGroup>() else {
+            return Ok(());
+        };
+        let Some(uniform_bind_group) = world.get_resource::<CloudsUniformBindGroup>() else {
+            return Ok(());
+        };
         let pipeline_cache = world.resource::<PipelineCache>();
         let pipeline = world.resource::<CloudsPipeline>();
         let uniform = world.resource::<CloudsUniform>();
@@ -194,15 +206,17 @@ impl Node for CloudsNode {
         let mut pass = render_context
             .command_encoder()
             .begin_compute_pass(&ComputePassDescriptor::default());
-        pass.set_bind_group(0, uniform_bind_group, &[]);
-        pass.set_bind_group(1, texture_bind_group, &[]);
+        pass.set_bind_group(0, &uniform_bind_group.0, &[]);
+        pass.set_bind_group(1, &texture_bind_group.0, &[]);
 
         match self.state {
             CloudsState::Loading => {}
             CloudsState::Init => {
-                let init_pipeline = pipeline_cache
-                    .get_compute_pipeline(pipeline.init_pipeline)
-                    .unwrap();
+                let Some(init_pipeline) =
+                    pipeline_cache.get_compute_pipeline(pipeline.init_pipeline)
+                else {
+                    return Ok(());
+                };
                 pass.set_pipeline(init_pipeline);
                 pass.dispatch_workgroups(
                     CLOUD_ATLAS_SIZE.div_ceil(WORKGROUP_SIZE),
@@ -211,9 +225,11 @@ impl Node for CloudsNode {
                 );
             }
             CloudsState::Update => {
-                let update_pipeline = pipeline_cache
-                    .get_compute_pipeline(pipeline.update_pipeline)
-                    .unwrap();
+                let Some(update_pipeline) =
+                    pipeline_cache.get_compute_pipeline(pipeline.update_pipeline)
+                else {
+                    return Ok(());
+                };
                 pass.set_pipeline(update_pipeline);
                 pass.dispatch_workgroups(
                     resolution.x.div_ceil(WORKGROUP_SIZE),
