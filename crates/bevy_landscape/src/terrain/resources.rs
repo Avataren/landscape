@@ -99,6 +99,7 @@ pub struct TerrainResidency {
 
 impl TerrainResidency {
     /// Mark a tile as recently used (moves it to the back of the LRU).
+    #[allow(dead_code)]
     pub fn touch(&mut self, key: TileKey) {
         self.lru.retain(|k| *k != key);
         self.lru.push_back(key);
@@ -131,6 +132,7 @@ impl TerrainResidency {
 #[derive(Resource, Default)]
 pub struct TerrainStreamQueue {
     /// Tiles whose load has been requested but not yet completed.
+    #[allow(dead_code)]
     pub pending_requests: HashSet<TileKey>,
     /// Completed CPU payloads waiting to be consumed.
     #[allow(dead_code)]

@@ -33,10 +33,9 @@ use clipmap::build_patch_instances_for_view_in_bounds;
 use clipmap::PatchInstanceCpu;
 use clipmap::{build_trim_instances_for_view_in_bounds, TrimInstanceCpu};
 use clipmap_texture::{
-    apply_tiles_to_clipmap, begin_terrain_upload_frame, compute_clip_levels,
-    compute_initial_clip_levels, create_initial_clipmap_texture,
+    compute_clip_levels, compute_initial_clip_levels, create_initial_clipmap_texture,
     create_initial_normal_clipmap_texture, update_clipmap_textures, TerrainClipmapState,
-    TerrainClipmapUploads, HEIGHT_BYTES_PER_TEXEL,
+    HEIGHT_BYTES_PER_TEXEL,
 };
 use collision::{update_collision_tiles, TerrainCollisionCache};
 use components::TerrainCamera;
@@ -57,7 +56,6 @@ use render::TerrainRenderPlugin;
 use residency::update_required_tiles;
 use resources::{TerrainResidency, TerrainStreamQueue, TerrainViewState};
 use source_heightmap::{load_source_heightmap, SourceHeightmapState};
-use streamer::{poll_tile_stream_jobs, request_tile_loads, setup_tile_channel};
 
 // ---------------------------------------------------------------------------
 // ReloadTerrainRequest — hot-swap the active terrain without restarting
@@ -182,7 +180,6 @@ impl Plugin for TerrainPlugin {
             .init_resource::<LocalColliderTask>()
             .init_resource::<ShowTerrainCollision>()
             .init_resource::<PatchEntities>()
-            .init_resource::<TerrainClipmapUploads>()
             .init_resource::<MaterialLibrary>()
             .init_resource::<PbrTexturesDirty>()
             .init_resource::<PbrRebuildProgress>()
@@ -194,10 +191,9 @@ impl Plugin for TerrainPlugin {
             // Startup
             // Note: SourceHeightmapState is inserted by setup_terrain, not init'd here,
             // because it needs config/desc to load tile data.
-            .add_systems(Startup, (setup_tile_channel, setup_terrain).chain())
+            .add_systems(Startup, setup_terrain)
             .add_systems(PostStartup, preload_terrain_startup)
             // Update: camera view -> geometry/uniforms -> synthesis state.
-            .add_systems(First, begin_terrain_upload_frame)
             .add_systems(
                 Update,
                 update_terrain_view_state.in_set(TerrainSystemSet::View),
@@ -206,8 +202,6 @@ impl Plugin for TerrainPlugin {
                 Update,
                 (
                     update_required_tiles,
-                    request_tile_loads,
-                    poll_tile_stream_jobs,
                     update_collision_tiles,
                     update_patch_transforms,
                     update_clipmap_textures,
@@ -230,17 +224,8 @@ impl Plugin for TerrainPlugin {
             )
             .add_systems(
                 Update,
-                apply_tiles_to_clipmap
-                    .in_set(TerrainSystemSet::Update)
-                    .after(poll_tile_stream_jobs)
-                    .after(update_clipmap_textures)
-                    .after(update_terrain_view_state),
-            )
-            .add_systems(
-                Update,
                 update_patch_aabbs
                     .in_set(TerrainSystemSet::Update)
-                    .after(apply_tiles_to_clipmap)
                     .after(update_clipmap_textures),
             )
             .add_systems(Update, sync_material_library_to_terrain_material)

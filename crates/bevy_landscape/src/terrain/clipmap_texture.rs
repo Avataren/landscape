@@ -1,3 +1,8 @@
+// The legacy CPU tile upload pipeline (TerrainClipmapUploads, apply_tiles_to_clipmap,
+// and all supporting helpers) is preserved for tile-backed experiments but is not
+// scheduled in the normal synthesis-only rendering mode.
+#![allow(dead_code)]
+
 use crate::terrain::{
     config::{TerrainConfig, MAX_SUPPORTED_CLIPMAP_LEVELS},
     material::TerrainMaterial,

@@ -1,3 +1,7 @@
+// The CPU tile streaming path is preserved for tile-backed experiments but is
+// not scheduled in the normal synthesis-only rendering mode.
+#![allow(dead_code)]
+
 use crate::terrain::{
     resources::{HeightTileCpu, TerrainResidency, TerrainStreamQueue, TileKey, TileState},
     world_desc::TerrainSourceDesc,
