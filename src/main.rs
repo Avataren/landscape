@@ -2,6 +2,7 @@ mod app_config;
 mod player;
 
 use bevy::{
+    anti_alias::smaa::{Smaa, SmaaPreset},
     camera::{Exposure, ScreenSpaceTransmissionQuality},
     core_pipeline::{prepass::DepthPrepass, tonemapping::Tonemapping},
     diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin},
@@ -10,7 +11,9 @@ use bevy::{
         light_consts::lux, AtmosphereEnvironmentMapLight, CascadeShadowConfigBuilder, FogVolume,
         VolumetricLight,
     },
-    pbr::{Atmosphere, AtmosphereSettings, ScatteringMedium},
+    pbr::{
+        Atmosphere, AtmosphereSettings, ScatteringMedium, ScreenSpaceAmbientOcclusion,
+    },
     post_process::bloom::Bloom,
     prelude::*,
     render::{
@@ -337,11 +340,13 @@ fn setup_scene(
             ..default()
         },
         DepthPrepass,
-        // 4× MSAA — switched away from TAA because the temporal accumulation
-        // smeared the high-frequency synthesis detail and ghosted around fast
-        // camera movement.  4× is the typical sweet spot for forward-rendered
-        // terrain on desktop GPUs.
-        Msaa::Sample4,
+        // SMAA: non-temporal screen-space AA — no ghosting, compatible with SSAO.
+        // Requires Msaa::Off (MSAA and SSAO are mutually exclusive in Bevy 0.18).
+        Msaa::Off,
+        Smaa {
+            preset: SmaaPreset::High,
+        },
+        ScreenSpaceAmbientOcclusion::default(),
         Projection::Perspective(PerspectiveProjection {
             near: 0.1,
             // 2 000 km covers a 700 km terrain fully regardless of camera

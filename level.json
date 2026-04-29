@@ -6,7 +6,7 @@
   "collision_mip_level": 2,
   "world_scale": 2.0,
   "lod0_mesh_spacing": 1.0,
-  "height_scale": 512.0,
+  "height_scale": 1024.0,
   "clipmap_levels": 16,
   "material_library": {
     "slots": [],
@@ -121,10 +121,10 @@
   },
   "synthesis": {
     "enabled": true,
-    "erosion_strength": 0.8999999761581421,
-    "gain": 0.30000001192092896,
+    "erosion_strength": 0.550000011920929,
+    "gain": 0.44999998807907104,
     "lacunarity": 2.0999999046325684,
-    "max_amplitude": 2.0,
+    "max_amplitude": 1.0,
     "normal_detail_strength": 2.0,
     "seed": [
       0.0,
