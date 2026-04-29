@@ -1,76 +1,15 @@
 {
-  "tile_root": "/home/avataren/src/landscape/assets/tiles_diffusion",
+  "tile_root": "assets/tiles_generated",
   "normal_root": null,
   "diffuse_path": null,
-  "max_mip_level": 2,
+  "max_mip_level": 3,
   "collision_mip_level": 2,
-  "world_scale": 30.0,
+  "world_scale": 2.0,
   "lod0_mesh_spacing": 1.0,
-  "height_scale": 273.06668,
+  "height_scale": 512.0,
   "clipmap_levels": 16,
   "material_library": {
-    "slots": [
-      {
-        "name": "Rocky Terrain 02",
-        "visible": true,
-        "tint": [
-          0.5,
-          0.5,
-          0.5
-        ],
-        "albedo_path": "textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_diff_4k.jpg",
-        "normal_path": "textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_nor_gl_4k.png",
-        "orm_path": "textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_rough_4k.png",
-        "height_path": "textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_disp_4k.png",
-        "fine_scale_m": 1.0,
-        "coarse_scale_mul": 5.0,
-        "triplanar_threshold_deg": 45.0,
-        "height_blend_sharpness": 0.1,
-        "procedural": {
-          "altitude_range_m": [
-            -10000.0,
-            10000.0
-          ],
-          "slope_range_deg": [
-            0.0,
-            11.0
-          ],
-          "curvature_bias": 0.2,
-          "noise_scale_m": 25.0,
-          "noise_strength": 0.15
-        }
-      },
-      {
-        "name": "Rock Face 03",
-        "visible": true,
-        "tint": [
-          0.5,
-          0.5,
-          0.5
-        ],
-        "albedo_path": "textures/rock_face_03_4k.blend/textures/rock_face_03_diff_4k.jpg",
-        "normal_path": "textures/rock_face_03_4k.blend/textures/rock_face_03_nor_gl_4k.png",
-        "orm_path": "textures/rock_face_03_4k.blend/textures/rock_face_03_rough_4k.png",
-        "height_path": "textures/rock_face_03_4k.blend/textures/rock_face_03_disp_4k.png",
-        "fine_scale_m": 1.0,
-        "coarse_scale_mul": 5.0,
-        "triplanar_threshold_deg": 45.0,
-        "height_blend_sharpness": 0.1,
-        "procedural": {
-          "altitude_range_m": [
-            -10000.0,
-            10000.0
-          ],
-          "slope_range_deg": [
-            32.0,
-            90.0
-          ],
-          "curvature_bias": 0.0,
-          "noise_scale_m": 50.0,
-          "noise_strength": 0.25
-        }
-      }
-    ],
+    "slots": [],
     "max_slots": 8,
     "use_macro_color_override": false
   },
@@ -90,19 +29,19 @@
     ],
     "cloud_base_edge_softness": 0.10000000149011612,
     "cloud_base_scale": 1.5,
-    "cloud_bottom_height": 9300.0,
+    "cloud_bottom_height": 1250.0,
     "cloud_bottom_softness": 0.25,
-    "cloud_coverage": 0.4099999964237213,
-    "cloud_density": 0.0017000000225380063,
-    "cloud_detail_scale": 1.600000023841858,
+    "cloud_coverage": 0.6200000047683716,
+    "cloud_density": 0.029999999329447746,
+    "cloud_detail_scale": 42.0,
     "cloud_detail_strength": 0.27000001072883606,
-    "cloud_evolution_speed": 4.5,
-    "cloud_history_blend": 0.8999999761581421,
+    "cloud_evolution_speed": 1.0,
+    "cloud_history_blend": 0.8500000238418579,
     "cloud_min_transmittance": 0.07999999821186066,
     "cloud_shadow_step_multiply": 1.2999999523162842,
     "cloud_shadow_step_size": 10.0,
     "cloud_shadow_steps": 6,
-    "cloud_top_height": 9900.0,
+    "cloud_top_height": 2400.0,
     "cloud_view_steps": 16,
     "forward_scattering_g": 0.7200000286102295,
     "planet_radius": 6371000.0,
@@ -118,7 +57,7 @@
       1.25
     ],
     "wind_velocity": [
-      100.0,
+      4.0,
       0.0,
       1.2999999523162842
     ]
@@ -128,23 +67,23 @@
   },
   "water": {
     "fft": {
-      "amplitude": 0.014999999664723873,
-      "choppy": 1.25,
+      "amplitude": 12.0,
+      "choppy": 0.8500000238418579,
       "enabled": true,
       "seed": 12648430,
       "size": 128,
-      "strength": 0.7699999809265137,
+      "strength": 1.0,
       "wind_direction": [
-        0.25,
+        1.0,
         0.4000000059604645
       ],
-      "wind_speed": 11.5,
-      "world_size": 370.0
+      "wind_speed": 12.0,
+      "world_size": 1024.0
     },
     "settings": {
-      "amplitude": 6.0,
-      "capillary_strength": 0.8500000238418579,
-      "clarity": 0.8500000238418579,
+      "amplitude": 6.75,
+      "capillary_strength": 1.0,
+      "clarity": 0.9399999976158142,
       "deep_color": [
         0.03310476243495941,
         0.13998490571975708,
@@ -161,10 +100,10 @@
         1.0,
         1.0
       ],
-      "foam_threshold": 0.8500000238418579,
+      "foam_threshold": 0.699999988079071,
       "jacobian_foam_strength": 1.0,
-      "macro_noise_amplitude": 4.0,
-      "macro_noise_scale": 400.0,
+      "macro_noise_amplitude": 0.0,
+      "macro_noise_scale": 110.0,
       "refraction_strength": 15.0,
       "shallow_color": [
         0.17064493894577026,
@@ -175,24 +114,24 @@
       "shoreline_foam_depth": 1.5,
       "wave_direction": [
         1.0,
-        1.0
+        2.0
       ],
-      "wave_speed": 0.800000011920929
+      "wave_speed": 2.3499999046325684
     }
   },
   "synthesis": {
     "enabled": true,
-    "erosion_strength": 0.8500000238418579,
-    "gain": 0.33000001311302185,
-    "lacunarity": 2.700000047683716,
-    "max_amplitude": 30.0,
-    "normal_detail_strength": 10.0,
+    "erosion_strength": 0.8999999761581421,
+    "gain": 0.30000001192092896,
+    "lacunarity": 2.0999999046325684,
+    "max_amplitude": 2.0,
+    "normal_detail_strength": 2.0,
     "seed": [
-      2150.0,
+      0.0,
       0.0
     ],
-    "slope_mask_falloff_deg": 24.0,
-    "slope_mask_threshold_deg": 47.0
+    "slope_mask_falloff_deg": 20.0,
+    "slope_mask_threshold_deg": 40.0
   },
   "metadata": {
     "water_level": 0.35
