@@ -12,12 +12,14 @@
 //!
 //! Render world:
 //!   `DetailSynthesisPipeline`   – cached descriptor + pipeline id
-//!   `DetailSynthesisBindGroups` – per-LOD bind groups rebuilt each frame
+//!   `DetailSynthesisPersistState` – reusable per-LOD buffers and bind groups
+//!   `DetailSynthesisBindGroups` – dirty-only bind groups for this frame's dispatch
 //!   `DetailSynthesisNode`       – render graph node (runs before StartMainPass)
 
 use std::num::NonZeroU64;
 
 use bevy::{
+    asset::AssetId,
     core_pipeline::core_3d::graph::{Core3d, Node3d},
     prelude::*,
     render::{
@@ -27,12 +29,12 @@ use bevy::{
         render_resource::{
             BindGroup, BindGroupEntry, BindGroupLayoutDescriptor, BindGroupLayoutEntry,
             BindingResource, BindingType, Buffer, BufferBinding, BufferBindingType,
-            BufferInitDescriptor, BufferUsages, CachedComputePipelineId, CachedPipelineState,
+            BufferDescriptor, BufferUsages, CachedComputePipelineId, CachedPipelineState,
             ComputePassDescriptor, ComputePipelineDescriptor, PipelineCache, SamplerBindingType,
             ShaderStages, StorageTextureAccess, TextureAspect, TextureFormat, TextureSampleType,
             TextureViewDescriptor, TextureViewDimension,
         },
-        renderer::{RenderContext, RenderDevice},
+        renderer::{RenderContext, RenderDevice, RenderQueue},
         texture::GpuImage,
         Render, RenderApp, RenderSystems,
     },
@@ -42,6 +44,8 @@ use crate::terrain::{
     clipmap_texture::TerrainClipmapState, config::TerrainConfig, material::TerrainMaterial,
     source_heightmap::SourceHeightmapState,
 };
+
+use super::config::MAX_SUPPORTED_CLIPMAP_LEVELS;
 
 // ── Main-world types ──────────────────────────────────────────────────────────
 
@@ -168,6 +172,31 @@ struct SynthesisParamsGpu {
 
 const PARAMS_SIZE: u64 = std::mem::size_of::<SynthesisParamsGpu>() as u64;
 
+fn build_gpu_params(lp: &PerLodSynthParams, state: &DetailSynthesisState) -> SynthesisParamsGpu {
+    SynthesisParamsGpu {
+        clip_center_x: lp.clip_center_x,
+        clip_center_z: lp.clip_center_z,
+        texel_world_size: lp.texel_world_size,
+        clipmap_res: state.resolution as f32,
+        octave_count: lp.octave_count,
+        source_lod_spacing: state.source_spacing,
+        max_amplitude: state.config.max_amplitude,
+        lacunarity: state.config.lacunarity,
+        gain: state.config.gain,
+        erosion_strength: state.config.erosion_strength,
+        seed_x: state.config.seed.x,
+        seed_z: state.config.seed.y,
+        source_origin_x: state.source_origin.x,
+        source_origin_z: state.source_origin.y,
+        source_extent_x: state.source_extent.x,
+        source_extent_z: state.source_extent.y,
+        height_scale: state.height_scale,
+        slope_mask_threshold: state.config.slope_mask_threshold_deg,
+        slope_mask_falloff: state.config.slope_mask_falloff_deg,
+        _pad: 0.0,
+    }
+}
+
 // ── Render-world: pipeline resource ──────────────────────────────────────────
 
 #[derive(Resource)]
@@ -251,12 +280,37 @@ impl FromWorld for DetailSynthesisPipeline {
     }
 }
 
-// ── Render-world: per-frame bind groups ──────────────────────────────────────
+// ── Render-world: persistent per-LOD GPU resources ───────────────────────────
 
+/// Persists across frames in the render world.  Holds one reusable uniform
+/// buffer and bind group per LOD slot; rebuilt only when texture handles or
+/// resolution change.
+#[derive(Resource, Default)]
+struct DetailSynthesisPersistState {
+    /// One UNIFORM | COPY_DST buffer per LOD slot (length = MAX_SUPPORTED_CLIPMAP_LEVELS after init).
+    uniform_bufs: Vec<Buffer>,
+    /// Cached bind group per LOD slot; None = not yet built or invalidated.
+    bind_groups: Vec<Option<BindGroup>>,
+    /// Last params dispatched per LOD slot; used to detect per-LOD dirty.
+    last_lod_params: Vec<Option<PerLodSynthParams>>,
+    // Global-state snapshot for change detection:
+    last_clipmap_id: Option<AssetId<Image>>,
+    last_source_id: Option<AssetId<Image>>,
+    last_source_origin: Vec2,
+    last_source_extent: Vec2,
+    last_height_scale: f32,
+    last_source_spacing: f32,
+    last_config: Option<DetailSynthesisConfig>,
+    last_resolution: u32,
+}
+
+// ── Render-world: per-frame dispatch list ────────────────────────────────────
+
+/// Contains bind groups only for LODs that are dirty this frame.
+/// Frames where nothing changed will have an empty list and the node skips.
 #[derive(Resource, Default)]
 struct DetailSynthesisBindGroups {
-    groups: Vec<BindGroup>,
-    _bufs: Vec<Buffer>,
+    dispatches: Vec<BindGroup>,
 }
 
 // ── Render-world: prepare system ─────────────────────────────────────────────
@@ -268,8 +322,13 @@ fn prepare_detail_synthesis_bind_groups(
     state: Option<Res<DetailSynthesisState>>,
     gpu_images: Res<RenderAssets<GpuImage>>,
     render_device: Res<RenderDevice>,
+    render_queue: Res<RenderQueue>,
+    mut persist: ResMut<DetailSynthesisPersistState>,
 ) {
-    let Some(state) = state else { return };
+    let Some(state) = state else {
+        commands.insert_resource(DetailSynthesisBindGroups::default());
+        return;
+    };
     if state.lod_params.is_empty() {
         commands.insert_resource(DetailSynthesisBindGroups::default());
         return;
@@ -281,7 +340,6 @@ fn prepare_detail_synthesis_bind_groups(
     let Some(clipmap_gpu) = gpu_images.get(clipmap_handle) else {
         return;
     };
-
     let Some(source_handle) = &state.source_heightmap_handle else {
         return;
     };
@@ -289,88 +347,140 @@ fn prepare_detail_synthesis_bind_groups(
         return;
     };
 
-    let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout_desc);
-    let mut groups: Vec<BindGroup> = Vec::with_capacity(state.lod_params.len());
-    let mut bufs: Vec<Buffer> = Vec::with_capacity(state.lod_params.len());
-
-    for lp in &state.lod_params {
-        let gpu_params = SynthesisParamsGpu {
-            clip_center_x: lp.clip_center_x,
-            clip_center_z: lp.clip_center_z,
-            texel_world_size: lp.texel_world_size,
-            clipmap_res: state.resolution as f32,
-            octave_count: lp.octave_count,
-            source_lod_spacing: state.source_spacing,
-            max_amplitude: state.config.max_amplitude,
-            lacunarity: state.config.lacunarity,
-            gain: state.config.gain,
-            erosion_strength: state.config.erosion_strength,
-            seed_x: state.config.seed.x,
-            seed_z: state.config.seed.y,
-            source_origin_x: state.source_origin.x,
-            source_origin_z: state.source_origin.y,
-            source_extent_x: state.source_extent.x,
-            source_extent_z: state.source_extent.y,
-            height_scale: state.height_scale,
-            slope_mask_threshold: state.config.slope_mask_threshold_deg,
-            slope_mask_falloff: state.config.slope_mask_falloff_deg,
-            _pad: 0.0,
-        };
-
-        let uniform_buf = render_device.create_buffer_with_data(&BufferInitDescriptor {
-            label: Some("detail_synthesis_uniform"),
-            contents: bytemuck::bytes_of(&gpu_params),
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-        });
-
-        // D2 view targeting the specific clipmap layer for this LOD.
-        let layer_view = clipmap_gpu.texture.create_view(&TextureViewDescriptor {
-            label: Some("detail_synthesis_layer_view"),
-            format: Some(TextureFormat::R32Float),
-            dimension: Some(TextureViewDimension::D2),
-            aspect: TextureAspect::All,
-            base_mip_level: 0,
-            mip_level_count: Some(1),
-            base_array_layer: lp.lod_level,
-            array_layer_count: Some(1),
-            usage: None,
-        });
-
-        let bind_group = render_device.create_bind_group(
-            Some("detail_synthesis_bind_group"),
-            &layout,
-            &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: BindingResource::Buffer(BufferBinding {
-                        buffer: &uniform_buf,
-                        offset: 0,
-                        size: None,
-                    }),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: BindingResource::TextureView(&layer_view),
-                },
-                BindGroupEntry {
-                    binding: 2,
-                    resource: BindingResource::TextureView(&source_gpu.texture_view),
-                },
-                BindGroupEntry {
-                    binding: 3,
-                    resource: BindingResource::Sampler(&source_gpu.sampler),
-                },
-            ],
-        );
-
-        groups.push(bind_group);
-        bufs.push(uniform_buf);
+    // Lazy-init: allocate one reusable buffer per LOD slot on first call.
+    if persist.uniform_bufs.is_empty() {
+        persist.uniform_bufs = (0..MAX_SUPPORTED_CLIPMAP_LEVELS)
+            .map(|_| {
+                render_device.create_buffer(&BufferDescriptor {
+                    label: Some("detail_synthesis_uniform"),
+                    size: PARAMS_SIZE,
+                    usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            })
+            .collect();
+        persist.bind_groups = vec![None; MAX_SUPPORTED_CLIPMAP_LEVELS];
+        persist.last_lod_params = vec![None; MAX_SUPPORTED_CLIPMAP_LEVELS];
     }
 
-    commands.insert_resource(DetailSynthesisBindGroups {
-        groups,
-        _bufs: bufs,
-    });
+    let clipmap_id = clipmap_handle.id();
+    let source_id = source_handle.id();
+
+    let handles_changed = persist.last_clipmap_id != Some(clipmap_id)
+        || persist.last_source_id != Some(source_id);
+    let resolution_changed = persist.last_resolution != state.resolution;
+
+    // Any texture handle or resolution change invalidates all cached bind groups
+    // (they embed texture views tied to the old texture objects).
+    if handles_changed || resolution_changed {
+        for bg in &mut persist.bind_groups {
+            *bg = None;
+        }
+        for lp in &mut persist.last_lod_params {
+            *lp = None;
+        }
+    }
+
+    // Global dirty: all LODs need their uniform re-uploaded and re-dispatched.
+    let global_dirty = handles_changed
+        || resolution_changed
+        || persist.last_config.as_ref() != Some(&state.config)
+        || persist.last_source_origin != state.source_origin
+        || persist.last_source_extent != state.source_extent
+        || persist.last_height_scale != state.height_scale
+        || persist.last_source_spacing != state.source_spacing;
+
+    let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout_desc);
+    let mut dispatches: Vec<BindGroup> = Vec::new();
+    let mut active = [false; MAX_SUPPORTED_CLIPMAP_LEVELS];
+
+    for lp in &state.lod_params {
+        let idx = lp.lod_level as usize;
+        if idx >= MAX_SUPPORTED_CLIPMAP_LEVELS {
+            continue;
+        }
+        active[idx] = true;
+
+        let params_changed = persist.last_lod_params[idx].as_ref() != Some(lp);
+        let is_dirty = global_dirty || params_changed;
+
+        if is_dirty {
+            // Update the reusable buffer in-place; no allocation needed.
+            let gpu_params = build_gpu_params(lp, &state);
+            render_queue.write_buffer(
+                &persist.uniform_bufs[idx],
+                0,
+                bytemuck::bytes_of(&gpu_params),
+            );
+            persist.last_lod_params[idx] = Some(lp.clone());
+        }
+
+        // Build (or rebuild) the bind group if invalidated.
+        if persist.bind_groups[idx].is_none() {
+            let layer_view = clipmap_gpu.texture.create_view(&TextureViewDescriptor {
+                label: Some("detail_synthesis_layer_view"),
+                format: Some(TextureFormat::R32Float),
+                dimension: Some(TextureViewDimension::D2),
+                aspect: TextureAspect::All,
+                base_mip_level: 0,
+                mip_level_count: Some(1),
+                base_array_layer: lp.lod_level,
+                array_layer_count: Some(1),
+                usage: None,
+            });
+            let bind_group = render_device.create_bind_group(
+                Some("detail_synthesis_bind_group"),
+                &layout,
+                &[
+                    BindGroupEntry {
+                        binding: 0,
+                        resource: BindingResource::Buffer(BufferBinding {
+                            buffer: &persist.uniform_bufs[idx],
+                            offset: 0,
+                            size: None,
+                        }),
+                    },
+                    BindGroupEntry {
+                        binding: 1,
+                        resource: BindingResource::TextureView(&layer_view),
+                    },
+                    BindGroupEntry {
+                        binding: 2,
+                        resource: BindingResource::TextureView(&source_gpu.texture_view),
+                    },
+                    BindGroupEntry {
+                        binding: 3,
+                        resource: BindingResource::Sampler(&source_gpu.sampler),
+                    },
+                ],
+            );
+            persist.bind_groups[idx] = Some(bind_group);
+        }
+
+        if is_dirty {
+            dispatches.push(persist.bind_groups[idx].clone().unwrap());
+        }
+    }
+
+    // Evict stale LOD slots so a returning LOD gets a fresh dispatch.
+    for (i, is_active) in active.iter().enumerate() {
+        if !is_active && persist.last_lod_params[i].is_some() {
+            persist.last_lod_params[i] = None;
+            persist.bind_groups[i] = None;
+        }
+    }
+
+    // Update global snapshot.
+    persist.last_clipmap_id = Some(clipmap_id);
+    persist.last_source_id = Some(source_id);
+    persist.last_source_origin = state.source_origin;
+    persist.last_source_extent = state.source_extent;
+    persist.last_height_scale = state.height_scale;
+    persist.last_source_spacing = state.source_spacing;
+    persist.last_config = Some(state.config.clone());
+    persist.last_resolution = state.resolution;
+
+    commands.insert_resource(DetailSynthesisBindGroups { dispatches });
 }
 
 // ── Render graph node ─────────────────────────────────────────────────────────
@@ -392,7 +502,7 @@ impl Node for DetailSynthesisNode {
         let Some(bind_groups) = world.get_resource::<DetailSynthesisBindGroups>() else {
             return Ok(());
         };
-        if bind_groups.groups.is_empty() {
+        if bind_groups.dispatches.is_empty() {
             return Ok(());
         }
 
@@ -416,7 +526,7 @@ impl Node for DetailSynthesisNode {
         });
         pass.set_pipeline(compute_pipeline);
 
-        for bind_group in &bind_groups.groups {
+        for bind_group in &bind_groups.dispatches {
             pass.set_bind_group(0, bind_group, &[]);
             pass.dispatch_workgroups(workgroups, workgroups, 1);
         }
@@ -564,6 +674,7 @@ impl Plugin for DetailSynthesisPlugin {
 
         render_app
             .init_resource::<DetailSynthesisBindGroups>()
+            .init_resource::<DetailSynthesisPersistState>()
             .add_systems(
                 Render,
                 prepare_detail_synthesis_bind_groups.in_set(RenderSystems::PrepareResources),
