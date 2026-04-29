@@ -27,9 +27,14 @@ struct TerrainParams {
     world_bounds:       vec4<f32>,
     bounds_fade:        vec4<f32>,
     debug_flags:        vec4<f32>,
-    clip_levels: array<vec4<f32>, 32>,
-    slot_header: vec4<f32>,
-    slots:       array<MaterialSlotGpu, 8>,
+    clip_levels:        array<vec4<f32>, 32>,
+    slot_header:        vec4<f32>,
+    slots:              array<MaterialSlotGpu, 8>,
+    // Must match TerrainMaterialUniforms in material.rs; unused in prepass but
+    // required so the struct stride matches the bound uniform buffer exactly.
+    synthesis_norm:  vec4<f32>,
+    synthesis_norm2: vec4<f32>,
+    source_meta:     vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0)  var height_tex:  texture_2d_array<f32>;

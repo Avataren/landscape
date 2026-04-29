@@ -15,6 +15,7 @@
 struct MaterialSlotGpu {
     tint_vis: vec4<f32>,
     ranges:   vec4<f32>,
+    uv_scale: vec4<f32>, // x = fine_scale_m, y = coarse_scale_mul, z = has_tex (0/1), w = reserved
 }
 
 struct TerrainParams {
