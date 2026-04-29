@@ -247,8 +247,10 @@ impl Plugin for TerrainPlugin {
             .add_systems(Update, rebuild_pbr_textures_system)
             .add_systems(Update, reload_terrain_system.before(TerrainSystemSet::View))
             .add_plugins(TerrainRenderPlugin)
-            .add_plugins(DetailSynthesisPlugin)
-            .add_plugins(crate::foliage_plugin::FoliagePlugin);
+            .add_plugins(DetailSynthesisPlugin);
+        // Legacy baked-instance foliage is intentionally not mounted here.
+        // Runtime grass uses GpuGrassPlugin; painted foliage data can still be
+        // stored through the authoring modules without spawning this renderer.
     }
 }
 

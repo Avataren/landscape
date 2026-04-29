@@ -16,13 +16,9 @@ use crate::{
     foliage_reload::{reload_foliage_system, FoliageConfigResource, FoliageLoadState},
     foliage_render::update_foliage_view_state,
     foliage_stream_queue::{FoliageResidency, FoliageStreamQueue, FoliageViewState},
-    grass_mesh::{GrassBladeMeshConfig, generate_grass_blade_variants},
+    grass_mesh::{generate_grass_blade_variants, GrassBladeMeshConfig},
 };
-use bevy::{
-    camera::visibility::NoFrustumCulling,
-    mesh::VertexAttributeValues,
-    prelude::*,
-};
+use bevy::{camera::visibility::NoFrustumCulling, mesh::VertexAttributeValues, prelude::*};
 
 // ---------------------------------------------------------------------------
 // FoliageMeshHandles resource
@@ -54,7 +50,9 @@ impl FoliageMeshHandles {
     }
 
     pub fn get_entity(&self, lod: FoliageLodTier, variant_id: u8) -> Option<Entity> {
-        self.entities.get(Self::entity_idx(lod, variant_id)).copied()
+        self.entities
+            .get(Self::entity_idx(lod, variant_id))
+            .copied()
     }
 
     pub fn get_mesh_handle(&self, lod: FoliageLodTier, variant_id: u8) -> Option<&Handle<Mesh>> {
@@ -94,7 +92,12 @@ impl BladeMeshData {
             Some(bevy::mesh::Indices::U16(idx)) => idx.iter().map(|&i| i as u32).collect(),
             None => vec![],
         };
-        Self { positions, normals, uvs, indices }
+        Self {
+            positions,
+            normals,
+            uvs,
+            indices,
+        }
     }
 }
 
@@ -106,8 +109,7 @@ pub struct FoliagePlugin;
 
 impl Plugin for FoliagePlugin {
     fn build(&self, app: &mut App) {
-        app
-            .init_resource::<FoliageMeshHandles>()
+        app.init_resource::<FoliageMeshHandles>()
             .init_resource::<FoliageGpuState>()
             .init_resource::<FoliageGpuSyncRequest>()
             .init_resource::<FoliageStagingQueue>()
@@ -152,10 +154,7 @@ pub fn setup_foliage_rendering(
     let blade_meshes = generate_grass_blade_variants(&config);
 
     // Store CPU blade data for later mesh rebuilds
-    handles.base_blade_meshes = blade_meshes
-        .iter()
-        .map(BladeMeshData::from_mesh)
-        .collect();
+    handles.base_blade_meshes = blade_meshes.iter().map(BladeMeshData::from_mesh).collect();
 
     // Grass material: double-sided, opaque. We use Opaque rather than
     // AlphaMode::Mask to avoid the PBR prepass needing tangents that our
@@ -174,12 +173,10 @@ pub fn setup_foliage_rendering(
     // Build test instance data immediately (all LODs get subsampled versions)
     let lod0_instances = build_test_instances();
     // LOD1: every other instance; LOD2: every 4th instance
-    let lod1_instances: [Vec<FoliageInstance>; 8] = std::array::from_fn(|v| {
-        lod0_instances[v].iter().step_by(2).copied().collect()
-    });
-    let lod2_instances: [Vec<FoliageInstance>; 8] = std::array::from_fn(|v| {
-        lod0_instances[v].iter().step_by(4).copied().collect()
-    });
+    let lod1_instances: [Vec<FoliageInstance>; 8] =
+        std::array::from_fn(|v| lod0_instances[v].iter().step_by(2).copied().collect());
+    let lod2_instances: [Vec<FoliageInstance>; 8] =
+        std::array::from_fn(|v| lod0_instances[v].iter().step_by(4).copied().collect());
 
     // Spawn 24 entities (8 variants × 3 LODs)
     let lods = [
@@ -254,8 +251,12 @@ fn build_test_instances() -> [Vec<FoliageInstance>; 8] {
             let scale = Vec3::splat(scale_f);
 
             let variant = ((row + col) as usize) % 8;
-            per_variant[variant]
-                .push(FoliageInstance::new(Vec3::new(x, 0.0, z), rot, scale, variant as u32));
+            per_variant[variant].push(FoliageInstance::new(
+                Vec3::new(x, 0.0, z),
+                rot,
+                scale,
+                variant as u32,
+            ));
         }
     }
 
@@ -358,11 +359,7 @@ pub fn update_foliage_lod_visibility(
 ///
 /// For each `FoliageInstance`, every blade vertex is transformed by
 /// `(position, rotation, scale)` → world position and normal.
-pub fn build_instanced_mesh(
-    mesh: &mut Mesh,
-    blade: &BladeMeshData,
-    instances: &[FoliageInstance],
-) {
+pub fn build_instanced_mesh(mesh: &mut Mesh, blade: &BladeMeshData, instances: &[FoliageInstance]) {
     if instances.is_empty() || blade.positions.is_empty() {
         // Clear the mesh
         mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, Vec::<[f32; 3]>::new());
@@ -459,18 +456,14 @@ mod tests {
             bevy::mesh::PrimitiveTopology::TriangleList,
             bevy::asset::RenderAssetUsages::default(),
         );
-        let instance = FoliageInstance::new(
-            Vec3::new(10.0, 0.0, 5.0),
-            Quat::IDENTITY,
-            Vec3::ONE,
-            0,
-        );
+        let instance =
+            FoliageInstance::new(Vec3::new(10.0, 0.0, 5.0), Quat::IDENTITY, Vec3::ONE, 0);
         build_instanced_mesh(&mut mesh, &blade, &[instance]);
 
         match mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
             Some(VertexAttributeValues::Float32x3(v)) => {
                 assert_eq!(v.len(), 3); // 3 blade vertices
-                // First vertex should be at position + (0,0,0) = (10, 0, 5)
+                                        // First vertex should be at position + (0,0,0) = (10, 0, 5)
                 assert!((v[0][0] - 10.0).abs() < 1e-5);
                 assert!((v[0][1] - 0.0).abs() < 1e-5);
                 assert!((v[0][2] - 5.0).abs() < 1e-5);

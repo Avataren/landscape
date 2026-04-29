@@ -1,5 +1,5 @@
-mod player;
 mod app_config;
+mod player;
 
 use bevy::{
     camera::{Exposure, ScreenSpaceTransmissionQuality},
@@ -21,19 +21,145 @@ use bevy::{
     window::PrimaryWindow,
 };
 use bevy_landscape::{
-    level::load_level, FoliageSourceDesc, GpuGrassPlugin, TerrainCamera,
+    level::load_level, DetailSynthesisConfig, FoliageSourceDesc, GpuGrassPlugin, TerrainCamera,
     TerrainConfig, TerrainDebugPlugin, TerrainPlugin, TerrainSourceDesc, TerrainSystemSet,
 };
 use bevy_landscape_clouds::{CloudsConfig, VolumetricCloudsPlugin};
 use bevy_landscape_editor::{AppPreferences, LandscapeEditorPlugin};
 use bevy_landscape_generator::LandscapeGeneratorPlugin;
-use bevy_landscape_water::LandscapeWaterPlugin;
+use bevy_landscape_water::{LandscapeWaterPlugin, OceanFftSettings, WaterSettings};
 use player::{CameraMode, PlayerPlugin, PlayerSystemSet};
+use serde::Deserialize;
 
 const WINDOW_TITLE: &str = "Landscape Renderer";
 
 #[derive(Resource)]
 struct ShadowsEnabled(bool);
+
+#[derive(Deserialize)]
+struct WaterSettingsDto {
+    amplitude: f32,
+    wave_speed: f32,
+    wave_direction: [f32; 2],
+    clarity: f32,
+    deep_color: [f32; 3],
+    shallow_color: [f32; 3],
+    edge_scale: f32,
+    edge_color: [f32; 3],
+    refraction_strength: f32,
+    foam_threshold: f32,
+    foam_color: [f32; 3],
+    shoreline_foam_depth: f32,
+    shore_wave_damp_width: f32,
+    jacobian_foam_strength: f32,
+    capillary_strength: f32,
+    macro_noise_amplitude: f32,
+    macro_noise_scale: f32,
+}
+
+impl WaterSettingsDto {
+    fn apply_to(&self, s: &mut WaterSettings) {
+        fn color(rgb: [f32; 3]) -> Color {
+            Color::linear_rgb(rgb[0], rgb[1], rgb[2])
+        }
+
+        s.amplitude = self.amplitude;
+        s.wave_speed = self.wave_speed;
+        s.wave_direction = Vec2::new(self.wave_direction[0], self.wave_direction[1]);
+        s.clarity = self.clarity;
+        s.deep_color = color(self.deep_color);
+        s.shallow_color = color(self.shallow_color);
+        s.edge_scale = self.edge_scale;
+        s.edge_color = color(self.edge_color);
+        s.refraction_strength = self.refraction_strength;
+        s.foam_threshold = self.foam_threshold;
+        s.foam_color = color(self.foam_color);
+        s.shoreline_foam_depth = self.shoreline_foam_depth;
+        s.shore_wave_damp_width = self.shore_wave_damp_width;
+        s.jacobian_foam_strength = self.jacobian_foam_strength;
+        s.capillary_strength = self.capillary_strength;
+        s.macro_noise_amplitude = self.macro_noise_amplitude;
+        s.macro_noise_scale = self.macro_noise_scale;
+    }
+}
+
+#[derive(Deserialize)]
+struct OceanFftDto {
+    enabled: bool,
+    size: u32,
+    world_size: f32,
+    wind_speed: f32,
+    wind_direction: [f32; 2],
+    amplitude: f32,
+    choppy: f32,
+    seed: u32,
+    strength: f32,
+}
+
+impl OceanFftDto {
+    fn into_settings(self) -> OceanFftSettings {
+        OceanFftSettings {
+            enabled: self.enabled,
+            size: self.size,
+            world_size: self.world_size,
+            wind_speed: self.wind_speed,
+            wind_direction: Vec2::new(self.wind_direction[0], self.wind_direction[1]),
+            amplitude: self.amplitude,
+            choppy: self.choppy,
+            seed: self.seed,
+            strength: self.strength,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct WaterDesc {
+    settings: WaterSettingsDto,
+    fft: OceanFftDto,
+}
+
+#[derive(Deserialize)]
+struct SynthesisDto {
+    enabled: bool,
+    max_amplitude: f32,
+    lacunarity: f32,
+    gain: f32,
+    erosion_strength: f32,
+    seed: [f32; 2],
+    slope_mask_threshold_deg: f32,
+    slope_mask_falloff_deg: f32,
+    normal_detail_strength: f32,
+}
+
+impl SynthesisDto {
+    fn into_config(self) -> DetailSynthesisConfig {
+        DetailSynthesisConfig {
+            enabled: self.enabled,
+            max_amplitude: self.max_amplitude,
+            lacunarity: self.lacunarity,
+            gain: self.gain,
+            erosion_strength: self.erosion_strength,
+            seed: Vec2::new(self.seed[0], self.seed[1]),
+            slope_mask_threshold_deg: self.slope_mask_threshold_deg,
+            slope_mask_falloff_deg: self.slope_mask_falloff_deg,
+            normal_detail_strength: self.normal_detail_strength,
+        }
+    }
+}
+
+fn initial_water_settings(water_height: Option<f32>) -> WaterSettings {
+    WaterSettings {
+        height: water_height.unwrap_or(0.0),
+        amplitude: 6.75,
+        clarity: 0.94,
+        wave_speed: 2.35,
+        foam_threshold: 0.7,
+        shoreline_foam_depth: 1.5,
+        shore_wave_damp_width: 3.0,
+        spawn_tiles: None,
+        ..WaterSettings::default()
+    }
+}
 
 fn main() {
     // Priority: --level arg > preferences default > empty editor (no terrain)
@@ -44,57 +170,77 @@ fn main() {
     };
     let level_arg = level_arg.or_else(|| AppPreferences::load().default_level);
 
-    let (terrain_config, terrain_source, loaded_library, clouds_config, water_plugin) =
-        if let Some(ref path) = level_arg {
-            match load_level(path) {
-                Ok(desc) => {
-                    let loaded_clouds: Option<CloudsConfig> = desc
-                        .clouds
-                        .as_ref()
-                        .and_then(|v| serde_json::from_value(v.clone()).ok());
-                    let (mut config, source, library, wmin, wmax, meta) = desc.into_runtime();
-                    config.height_scale *= 1.0; // into_runtime already multiplies
-                    let water_height = meta
-                        .water_level
-                        .filter(|wl| *wl > 0.0)
-                        .map(|wl| wl * config.height_scale);
-                    let water = LandscapeWaterPlugin {
-                        water_height,
-                        world_min: wmin,
-                        world_max: wmax,
-                    };
-                    (config, source, Some(library), loaded_clouds, water)
-                }
-                Err(e) => {
-                    eprintln!(
-                        "Warning: failed to load level '{path}': {e}. Starting with empty editor."
-                    );
-                    (
-                        TerrainConfig::default(),
-                        TerrainSourceDesc::default(),
-                        None,
-                        None,
-                        LandscapeWaterPlugin::default(),
-                    )
-                }
+    let (
+        terrain_config,
+        terrain_source,
+        loaded_library,
+        clouds_config,
+        water_plugin,
+        water_desc,
+        synthesis_config,
+    ) = if let Some(ref path) = level_arg {
+        match load_level(path) {
+            Ok(desc) => {
+                let loaded_clouds: Option<CloudsConfig> = desc
+                    .clouds
+                    .as_ref()
+                    .and_then(|v| serde_json::from_value(v.clone()).ok());
+                let loaded_water: Option<WaterDesc> = desc
+                    .water
+                    .as_ref()
+                    .and_then(|v| serde_json::from_value(v.clone()).ok());
+                let loaded_synthesis: Option<SynthesisDto> = desc
+                    .synthesis
+                    .as_ref()
+                    .and_then(|v| serde_json::from_value(v.clone()).ok());
+                let (mut config, source, library, wmin, wmax, meta) = desc.into_runtime();
+                config.height_scale *= 1.0; // into_runtime already multiplies
+                let water_height = meta
+                    .water_level
+                    .filter(|wl| *wl > 0.0)
+                    .map(|wl| wl * config.height_scale);
+                let water = LandscapeWaterPlugin {
+                    water_height,
+                    world_min: wmin,
+                    world_max: wmax,
+                };
+                (
+                    config,
+                    source,
+                    Some(library),
+                    loaded_clouds,
+                    water,
+                    loaded_water,
+                    loaded_synthesis,
+                )
             }
-        } else {
-            // No level configured — start the editor with an empty flat terrain.
-            // Load foliage_root from landscape.toml if present.
-            // Use File → Import Heightmap to load data, then Save Landscape and
-            // set it as the default level in the preferences to auto-load on startup.
-            let mut source = TerrainSourceDesc::default();
-            // Try to load foliage_root from landscape.toml
-            let cfg = app_config::load();
-            source.foliage_root = cfg.source.foliage_root;
-            (
-                TerrainConfig::default(),
-                source,
-                None,
-                None,
-                LandscapeWaterPlugin::default(),
-            )
+            Err(e) => {
+                eprintln!(
+                    "Warning: failed to load level '{path}': {e}. Starting with empty editor."
+                );
+                (
+                    TerrainConfig::default(),
+                    TerrainSourceDesc::default(),
+                    None,
+                    None,
+                    LandscapeWaterPlugin::default(),
+                    None,
+                    None,
+                )
+            }
+        }
+    } else {
+        // No level configured: use landscape.toml as the editable workspace terrain.
+        // Use File → Import Heightmap to load data, then Save Landscape and
+        // set it as the default level in the preferences to auto-load on startup.
+        let (config, source) = app_config::load().into_runtime();
+        let water = LandscapeWaterPlugin {
+            world_min: source.world_min,
+            world_max: source.world_max,
+            ..default()
         };
+        (config, source, None, None, water, None, None)
+    };
 
     let mut app = App::new();
     if let Some(cc) = clouds_config {
@@ -103,16 +249,16 @@ fn main() {
     if let Some(lib) = loaded_library {
         app.insert_resource(lib);
     }
-    // Resolve foliage_root: prefer level file value, fall back to landscape.toml.
-    let foliage_root_str = terrain_source
-        .foliage_root
-        .clone()
-        .or_else(|| app_config::load().source.foliage_root);
+    // Runtime grass is generated on the GPU. The foliage root is still kept as
+    // an authoring location for future brush-painted density/type masks.
+    let foliage_root_str = terrain_source.foliage_root.clone();
     if let Some(root) = &foliage_root_str {
         app.insert_resource(FoliageSourceDesc {
             foliage_root: Some(std::path::PathBuf::from(root)),
         });
     }
+    let water_height_for_settings = water_plugin.water_height;
+
     app.insert_resource(ClearColor(Color::BLACK))
         // Terrain uses the atmosphere cubemap for ambient IBL; non-terrain PBR
         // objects also receive IBL from AtmosphereEnvironmentMapLight on the camera.
@@ -145,8 +291,19 @@ fn main() {
             config: terrain_config,
             source: terrain_source,
         })
-        .add_plugins(water_plugin)
-        .add_plugins(VolumetricCloudsPlugin)
+        .add_plugins(water_plugin);
+
+    if let Some(water) = water_desc {
+        let mut settings = initial_water_settings(water_height_for_settings);
+        water.settings.apply_to(&mut settings);
+        app.insert_resource(settings);
+        app.insert_resource(water.fft.into_settings());
+    }
+    if let Some(synthesis) = synthesis_config {
+        app.insert_resource(synthesis.into_config());
+    }
+
+    app.add_plugins(VolumetricCloudsPlugin)
         .add_plugins(LandscapeGeneratorPlugin)
         .add_plugins(TerrainDebugPlugin)
         .add_plugins(GpuGrassPlugin)

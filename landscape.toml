@@ -36,14 +36,6 @@ lod0_mesh_spacing   = 2.0
 # that map to flat zero-height resamples far outside the heightmap bounds.
 clipmap_levels  = 12
 
-[foliage]
-# Root path for foliage instance tiles, painted splatmaps, and procedural masks.
-# Subdirectory layout:
-#   - painted/L{n}/{tx}_{ty}.bin — painted density splatmap
-#   - procedural_masks/L{n}/{tx}_{ty}.bin — procedural density (slope, altitude, water proximity)
-#   - LOD{lod_idx}/L{n}/{tx}_{ty}.bin — baked instances per LOD tier
-foliage_root    = "assets/foliage"
-
 # Base world-space height range: a fully-white height texel (R16Unorm = 1.0)
 # maps to this many world units on the Y axis before `world_scale` is applied.
 #
@@ -61,3 +53,8 @@ height_scale    = 2048.0
 # bottom of the screen instead of matching mountain peaks). Flips the V UV
 # coordinate when sampling the macro colour texture.
 # macro_color_flip_v = false
+
+[foliage]
+# Root path for future foliage authoring data such as brush-painted density and
+# type masks. Runtime grass is currently generated directly on the GPU.
+foliage_root    = "assets/foliage"

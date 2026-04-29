@@ -13,28 +13,25 @@
 use bevy::{
     asset::RenderAssetUsages,
     camera::visibility::NoFrustumCulling,
+    image::{ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     mesh::{MeshVertexBufferLayoutRef, PrimitiveTopology},
     pbr::{MaterialPipeline, MaterialPipelineKey},
     prelude::*,
-    render::{
-        render_resource::{
-            AsBindGroup, Extent3d, RenderPipelineDescriptor, ShaderType,
-            SpecializedMeshPipelineError, TextureDimension, TextureFormat, TextureViewDescriptor,
-            TextureViewDimension,
-        },
+    render::render_resource::{
+        AsBindGroup, Extent3d, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+        TextureDimension, TextureFormat, TextureViewDescriptor, TextureViewDimension,
     },
-    image::{ImageFilterMode, ImageSampler, ImageSamplerDescriptor},
     shader::ShaderRef,
 };
 
+use crate::terrain::material_slots::MaterialLibrary;
 use crate::terrain::{
     clipmap_texture::{compute_clip_levels, TerrainClipmapState},
+    components::TerrainCamera,
     config::TerrainConfig,
     math::level_scale,
     source_heightmap::SourceHeightmapState,
-    components::TerrainCamera,
 };
-use crate::terrain::material_slots::MaterialLibrary;
 
 // ── Public config ─────────────────────────────────────────────────────────────
 
@@ -97,12 +94,12 @@ impl Default for GpuGrassConfig {
 
 #[derive(Clone, Copy, Default, ShaderType)]
 pub struct GrassParamsGpu {
-    pub camera_grid:  Vec4,  // xy=camera XZ, z=grid_size, w=spacing
-    pub clip_level:   Vec4,  // xy=ring_center XZ, z=inv_ring_span, w=texel_ws
-    pub blade:        Vec4,  // x=inner_radius_sq, y=blade_height, z=blade_width, w=slope_max
-    pub alt_wind:     Vec4,  // x=alt_min, y=alt_max, z=wind_time, w=wind_strength
-    pub wind_color:   Vec4,  // x=wind_scale, yzw=base_color (fallback when no textures)
-    pub world_bounds: Vec4,  // xy=world_min XZ, zw=world_max XZ
+    pub camera_grid: Vec4,  // xy=camera XZ, z=grid_size, w=spacing
+    pub clip_level: Vec4,   // xy=ring_center XZ, z=inv_ring_span, w=texel_ws
+    pub blade: Vec4,        // x=inner_radius_sq, y=blade_height, z=blade_width, w=slope_max
+    pub alt_wind: Vec4,     // x=alt_min, y=alt_max, z=wind_time, w=wind_strength
+    pub wind_color: Vec4,   // x=wind_scale, yzw=base_color (fallback when no textures)
+    pub world_bounds: Vec4, // xy=world_min XZ, zw=world_max XZ
 }
 
 // ── Material ──────────────────────────────────────────────────────────────────
@@ -130,9 +127,15 @@ pub struct GpuGrassMaterial {
 }
 
 impl Material for GpuGrassMaterial {
-    fn vertex_shader()   -> ShaderRef { "shaders/grass_blade.wgsl".into() }
-    fn fragment_shader() -> ShaderRef { "shaders/grass_blade.wgsl".into() }
-    fn alpha_mode(&self) -> AlphaMode { AlphaMode::Mask(0.3) }
+    fn vertex_shader() -> ShaderRef {
+        "shaders/grass_blade.wgsl".into()
+    }
+    fn fragment_shader() -> ShaderRef {
+        "shaders/grass_blade.wgsl".into()
+    }
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Mask(0.3)
+    }
 
     fn specialize(
         _pipeline: &MaterialPipeline,
@@ -151,9 +154,9 @@ impl Material for GpuGrassMaterial {
 /// once they are ready.
 #[derive(Resource)]
 pub struct GrassTextureLoader {
-    pub diffuse:  [Handle<Image>; 3],
-    pub normal:   [Handle<Image>; 3],
-    pub opacity:  [Handle<Image>; 3],
+    pub diffuse: [Handle<Image>; 3],
+    pub normal: [Handle<Image>; 3],
+    pub opacity: [Handle<Image>; 3],
     pub specular: [Handle<Image>; 3],
     pub ready: bool,
 }
@@ -164,9 +167,9 @@ fn load_grass_textures(mut commands: Commands, asset_server: Res<AssetServer>) {
         asset_server.load(format!("grass_01/{v}/{map}.png"))
     };
     commands.insert_resource(GrassTextureLoader {
-        diffuse:  variants.map(|v| load(v, "diffus")),
-        normal:   variants.map(|v| load(v, "normal")),
-        opacity:  variants.map(|v| load(v, "opacity")),
+        diffuse: variants.map(|v| load(v, "diffus")),
+        normal: variants.map(|v| load(v, "normal")),
+        opacity: variants.map(|v| load(v, "opacity")),
         specular: variants.map(|v| load(v, "specular")),
         ready: false,
     });
@@ -203,41 +206,53 @@ fn combine_grass_textures(
     mut loader: ResMut<GrassTextureLoader>,
     mut images: ResMut<Assets<Image>>,
     near_q: Query<&MeshMaterial3d<GpuGrassMaterial>, With<GrassEntityNear>>,
-    far_q:  Query<&MeshMaterial3d<GpuGrassMaterial>, With<GrassEntityFar>>,
+    far_q: Query<&MeshMaterial3d<GpuGrassMaterial>, With<GrassEntityFar>>,
     mut materials: ResMut<Assets<GpuGrassMaterial>>,
 ) {
-    if loader.ready { return; }
+    if loader.ready {
+        return;
+    }
 
     // Check all 12 handles are loaded.
-    let all_handles: Vec<&Handle<Image>> = loader.diffuse.iter()
+    let all_handles: Vec<&Handle<Image>> = loader
+        .diffuse
+        .iter()
         .chain(&loader.normal)
         .chain(&loader.opacity)
         .chain(&loader.specular)
         .collect();
-    if !all_handles.iter().all(|h| images.get(*h).is_some()) { return; }
+    if !all_handles.iter().all(|h| images.get(*h).is_some()) {
+        return;
+    }
 
     let make_array = |handles: &[Handle<Image>; 3], images: &mut Assets<Image>| -> Handle<Image> {
-        let imgs: Vec<_> = handles.iter().map(|h| images.get(h).unwrap().clone()).collect();
-        let w   = imgs[0].width();
-        let h   = imgs[0].height();
+        let imgs: Vec<_> = handles
+            .iter()
+            .map(|h| images.get(h).unwrap().clone())
+            .collect();
+        let w = imgs[0].width();
+        let h = imgs[0].height();
         let fmt = imgs[0].texture_descriptor.format;
         let bpp = fmt.block_copy_size(None).unwrap_or(4) as usize;
         let num_mips = (w.max(h) as f32).log2().floor() as u32 + 1;
 
         // Build mip chain for each of the 3 layers.
-        let mip_chains: Vec<Vec<Vec<u8>>> = imgs.iter().map(|img| {
-            let base = img.data.as_deref().unwrap_or(&[]).to_vec();
-            let mut chain = vec![base];
-            let mut cw = w;
-            let mut ch = h;
-            while cw > 1 || ch > 1 {
-                let prev = chain.last().unwrap();
-                chain.push(box_downsample(prev, cw, ch, bpp));
-                cw = (cw / 2).max(1);
-                ch = (ch / 2).max(1);
-            }
-            chain
-        }).collect();
+        let mip_chains: Vec<Vec<Vec<u8>>> = imgs
+            .iter()
+            .map(|img| {
+                let base = img.data.as_deref().unwrap_or(&[]).to_vec();
+                let mut chain = vec![base];
+                let mut cw = w;
+                let mut ch = h;
+                while cw > 1 || ch > 1 {
+                    let prev = chain.last().unwrap();
+                    chain.push(box_downsample(prev, cw, ch, bpp));
+                    cw = (cw / 2).max(1);
+                    ch = (ch / 2).max(1);
+                }
+                chain
+            })
+            .collect();
 
         // wgpu/Bevy default is LayerMajor: [layer0_mip0..N, layer1_mip0..N, layer2_mip0..N]
         let mut combined = Vec::new();
@@ -248,7 +263,11 @@ fn combine_grass_textures(
         }
 
         let mut arr = Image::new(
-            Extent3d { width: w, height: h, depth_or_array_layers: 3 },
+            Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 3,
+            },
             TextureDimension::D2,
             combined,
             fmt,
@@ -261,31 +280,31 @@ fn combine_grass_textures(
         });
         arr.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
             mipmap_filter: ImageFilterMode::Linear,
-            min_filter:    ImageFilterMode::Linear,
-            mag_filter:    ImageFilterMode::Linear,
+            min_filter: ImageFilterMode::Linear,
+            mag_filter: ImageFilterMode::Linear,
             ..default()
         });
         images.add(arr)
     };
 
-    let diffuse_h  = make_array(&loader.diffuse,  &mut images);
-    let normal_h   = make_array(&loader.normal,   &mut images);
-    let opacity_h  = make_array(&loader.opacity,  &mut images);
+    let diffuse_h = make_array(&loader.diffuse, &mut images);
+    let normal_h = make_array(&loader.normal, &mut images);
+    let opacity_h = make_array(&loader.opacity, &mut images);
     let specular_h = make_array(&loader.specular, &mut images);
 
     if let Ok(mat_handle) = near_q.single() {
         if let Some(mat) = materials.get_mut(&mat_handle.0) {
-            mat.diffuse_arr  = diffuse_h.clone();
-            mat.normal_arr   = normal_h.clone();
-            mat.opacity_arr  = opacity_h.clone();
+            mat.diffuse_arr = diffuse_h.clone();
+            mat.normal_arr = normal_h.clone();
+            mat.opacity_arr = opacity_h.clone();
             mat.specular_arr = specular_h.clone();
         }
     }
     if let Ok(mat_handle) = far_q.single() {
         if let Some(mat) = materials.get_mut(&mat_handle.0) {
-            mat.diffuse_arr  = diffuse_h.clone();
-            mat.normal_arr   = normal_h.clone();
-            mat.opacity_arr  = opacity_h.clone();
+            mat.diffuse_arr = diffuse_h.clone();
+            mat.normal_arr = normal_h.clone();
+            mat.opacity_arr = opacity_h.clone();
             mat.specular_arr = specular_h.clone();
         }
     }
@@ -296,8 +315,10 @@ fn combine_grass_textures(
 
 // ── Entity markers ────────────────────────────────────────────────────────────
 
-#[derive(Component)] pub struct GrassEntityNear;
-#[derive(Component)] pub struct GrassEntityFar;
+#[derive(Component)]
+pub struct GrassEntityNear;
+#[derive(Component)]
+pub struct GrassEntityFar;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -314,59 +335,98 @@ fn spawn_grass_entities(
     config: Res<GpuGrassConfig>,
 ) {
     let n_verts = (GRASS_MAX_GRID * GRASS_MAX_GRID * VERTS_PER_BLADE) as usize;
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::RENDER_WORLD);
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::RENDER_WORLD,
+    );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, vec![[0.0f32; 3]; n_verts]);
     let mesh_handle = meshes.add(mesh);
 
     let fallback_height = make_fallback_height_tex(&mut images);
-    let fallback_diffuse  = make_fallback_array(&mut images, [50, 110, 25, 255], TextureFormat::Rgba8UnormSrgb);
-    let fallback_normal   = make_fallback_array(&mut images, [128, 128, 255, 255], TextureFormat::Rgba8Unorm);
-    let fallback_opacity  = make_fallback_array(&mut images, [255, 0, 0, 0], TextureFormat::Rgba8Unorm);
-    let fallback_specular = make_fallback_array(&mut images, [30, 0, 0, 0], TextureFormat::Rgba8Unorm);
+    let fallback_diffuse = make_fallback_array(
+        &mut images,
+        [50, 110, 25, 255],
+        TextureFormat::Rgba8UnormSrgb,
+    );
+    let fallback_normal =
+        make_fallback_array(&mut images, [128, 128, 255, 255], TextureFormat::Rgba8Unorm);
+    let fallback_opacity =
+        make_fallback_array(&mut images, [255, 0, 0, 0], TextureFormat::Rgba8Unorm);
+    let fallback_specular =
+        make_fallback_array(&mut images, [30, 0, 0, 0], TextureFormat::Rgba8Unorm);
 
-    let fallback_clip  = Vec4::new(0.0, 0.0, 1.0 / 1_000_000.0, 1.0);
+    let fallback_clip = Vec4::new(0.0, 0.0, 1.0 / 1_000_000.0, 1.0);
     let fallback_world = Vec4::new(-500_000.0, -500_000.0, 500_000.0, 500_000.0);
 
     let near_params = build_params(
-        &config, config.near_grid_size(), config.near_spacing,
-        0.0, Vec3::ZERO, 0.0, fallback_clip, fallback_world,
+        &config,
+        config.near_grid_size(),
+        config.near_spacing,
+        0.0,
+        Vec3::ZERO,
+        0.0,
+        fallback_clip,
+        fallback_world,
     );
     let near_mat = materials.add(GpuGrassMaterial {
-        height_tex:   fallback_height.clone(),
-        params:       near_params,
-        diffuse_arr:  fallback_diffuse.clone(),
-        normal_arr:   fallback_normal.clone(),
-        opacity_arr:  fallback_opacity.clone(),
+        height_tex: fallback_height.clone(),
+        params: near_params,
+        diffuse_arr: fallback_diffuse.clone(),
+        normal_arr: fallback_normal.clone(),
+        opacity_arr: fallback_opacity.clone(),
         specular_arr: fallback_specular.clone(),
     });
-    commands.spawn((Mesh3d(mesh_handle.clone()), MeshMaterial3d(near_mat),
-                    Transform::default(), NoFrustumCulling, GrassEntityNear));
+    commands.spawn((
+        Mesh3d(mesh_handle.clone()),
+        MeshMaterial3d(near_mat),
+        Transform::default(),
+        NoFrustumCulling,
+        GrassEntityNear,
+    ));
 
     let inner_r_sq = config.near_range * config.near_range;
     let far_params = build_params(
-        &config, config.far_grid_size(), config.far_spacing,
-        inner_r_sq, Vec3::ZERO, 0.0, fallback_clip, fallback_world,
+        &config,
+        config.far_grid_size(),
+        config.far_spacing,
+        inner_r_sq,
+        Vec3::ZERO,
+        0.0,
+        fallback_clip,
+        fallback_world,
     );
     let far_mat = materials.add(GpuGrassMaterial {
-        height_tex:   fallback_height,
-        params:       far_params,
-        diffuse_arr:  fallback_diffuse,
-        normal_arr:   fallback_normal,
-        opacity_arr:  fallback_opacity,
+        height_tex: fallback_height,
+        params: far_params,
+        diffuse_arr: fallback_diffuse,
+        normal_arr: fallback_normal,
+        opacity_arr: fallback_opacity,
         specular_arr: fallback_specular,
     });
-    commands.spawn((Mesh3d(mesh_handle), MeshMaterial3d(far_mat),
-                    Transform::default(), NoFrustumCulling, GrassEntityFar));
+    commands.spawn((
+        Mesh3d(mesh_handle),
+        MeshMaterial3d(far_mat),
+        Transform::default(),
+        NoFrustumCulling,
+        GrassEntityFar,
+    ));
 }
 
 fn make_fallback_height_tex(images: &mut Assets<Image>) -> Handle<Image> {
     let mut img = Image::new(
-        Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-        TextureDimension::D2, vec![0u8; 4], TextureFormat::R32Float,
+        Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        vec![0u8; 4],
+        TextureFormat::R32Float,
         RenderAssetUsages::RENDER_WORLD,
     );
     img.texture_view_descriptor = Some(TextureViewDescriptor {
-        dimension: Some(TextureViewDimension::D2Array), ..default()
+        dimension: Some(TextureViewDimension::D2Array),
+        ..default()
     });
     images.add(img)
 }
@@ -379,13 +439,23 @@ fn make_fallback_array(
     let bytes_per_texel = fmt.block_copy_size(None).unwrap_or(4) as usize;
     let layer_data = rgba[..bytes_per_texel].to_vec();
     let mut combined = Vec::with_capacity(layer_data.len() * 3);
-    for _ in 0..3 { combined.extend_from_slice(&layer_data); }
+    for _ in 0..3 {
+        combined.extend_from_slice(&layer_data);
+    }
     let mut img = Image::new(
-        Extent3d { width: 1, height: 1, depth_or_array_layers: 3 },
-        TextureDimension::D2, combined, fmt, RenderAssetUsages::RENDER_WORLD,
+        Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 3,
+        },
+        TextureDimension::D2,
+        combined,
+        fmt,
+        RenderAssetUsages::RENDER_WORLD,
     );
     img.texture_view_descriptor = Some(TextureViewDescriptor {
-        dimension: Some(TextureViewDimension::D2Array), ..default()
+        dimension: Some(TextureViewDimension::D2Array),
+        ..default()
     });
     images.add(img)
 }
@@ -399,7 +469,7 @@ fn update_grass_materials(
     clipmap_state: Option<Res<TerrainClipmapState>>,
     material_library: Option<Res<MaterialLibrary>>,
     near_q: Query<&MeshMaterial3d<GpuGrassMaterial>, With<GrassEntityNear>>,
-    far_q:  Query<&MeshMaterial3d<GpuGrassMaterial>, With<GrassEntityFar>>,
+    far_q: Query<&MeshMaterial3d<GpuGrassMaterial>, With<GrassEntityFar>>,
     mut materials: ResMut<Assets<GpuGrassMaterial>>,
     config: Res<GpuGrassConfig>,
     time: Res<Time>,
@@ -415,11 +485,17 @@ fn update_grass_materials(
                 let mut c = config.clone();
                 c.altitude_min = p.altitude_range_m.x;
                 c.altitude_max = p.altitude_range_m.y;
-                c.slope_max    = slope_max;
+                c.slope_max = slope_max;
                 std::borrow::Cow::Owned(c)
-            } else { std::borrow::Cow::Borrowed(config.as_ref()) }
-        } else { std::borrow::Cow::Borrowed(config.as_ref()) }
-    } else { std::borrow::Cow::Borrowed(config.as_ref()) };
+            } else {
+                std::borrow::Cow::Borrowed(config.as_ref())
+            }
+        } else {
+            std::borrow::Cow::Borrowed(config.as_ref())
+        }
+    } else {
+        std::borrow::Cow::Borrowed(config.as_ref())
+    };
     let config = effective.as_ref();
 
     let fallback_clip = Vec4::new(0.0, 0.0, 1.0 / 1_000_000.0, 1.0);
@@ -436,7 +512,10 @@ fn update_grass_materials(
 
             // Far: smallest LOD whose half-span covers near_range + far_range.
             let far_total = config.near_range + config.far_range;
-            let (far_idx, far_lv) = levels.iter().copied().enumerate()
+            let (far_idx, far_lv) = levels
+                .iter()
+                .copied()
+                .enumerate()
                 .find(|(_, lv)| (0.5 / lv.z) >= far_total)
                 .unwrap_or((levels.len() - 1, *levels.last().unwrap_or(&levels[0])));
             let far = Vec4::new(far_idx as f32, far_lv.y, far_lv.z, far_lv.w);
@@ -446,7 +525,8 @@ fn update_grass_materials(
             (fallback_clip, fallback_clip)
         };
 
-    let world_bounds = source_state.as_deref()
+    let world_bounds = source_state
+        .as_deref()
         .map(|s| {
             let max = s.world_origin + s.world_extent;
             Vec4::new(s.world_origin.x, s.world_origin.y, max.x, max.y)
@@ -454,39 +534,77 @@ fn update_grass_materials(
         .unwrap_or(Vec4::new(-500_000.0, -500_000.0, 500_000.0, 500_000.0));
 
     let wt = time.elapsed_secs();
-    let height_handle = clipmap_state.as_deref().map(|cs| cs.height_texture_handle.clone());
+    let height_handle = clipmap_state
+        .as_deref()
+        .map(|cs| cs.height_texture_handle.clone());
 
     if let Ok(h) = near_q.single() {
         if let Some(mat) = materials.get_mut(&h.0) {
-            mat.params = build_params(&config, config.near_grid_size(), config.near_spacing,
-                                      0.0, cam.translation, wt, clip_level_near, world_bounds);
-            if let Some(ref hh) = height_handle { mat.height_tex = hh.clone(); }
+            mat.params = build_params(
+                &config,
+                config.near_grid_size(),
+                config.near_spacing,
+                0.0,
+                cam.translation,
+                wt,
+                clip_level_near,
+                world_bounds,
+            );
+            if let Some(ref hh) = height_handle {
+                mat.height_tex = hh.clone();
+            }
         }
     }
     if let Ok(h) = far_q.single() {
         if let Some(mat) = materials.get_mut(&h.0) {
             let inner_r_sq = config.near_range * config.near_range;
-            mat.params = build_params(&config, config.far_grid_size(), config.far_spacing,
-                                      inner_r_sq, cam.translation, wt, clip_level_far, world_bounds);
-            if let Some(ref hh) = height_handle { mat.height_tex = hh.clone(); }
+            mat.params = build_params(
+                &config,
+                config.far_grid_size(),
+                config.far_spacing,
+                inner_r_sq,
+                cam.translation,
+                wt,
+                clip_level_far,
+                world_bounds,
+            );
+            if let Some(ref hh) = height_handle {
+                mat.height_tex = hh.clone();
+            }
         }
     }
 }
 
 fn build_params(
     config: &GpuGrassConfig,
-    grid_size: u32, spacing: f32, inner_radius_sq: f32,
-    camera_pos: Vec3, wind_time: f32,
-    clip_level_0: Vec4, world_bounds: Vec4,
+    grid_size: u32,
+    spacing: f32,
+    inner_radius_sq: f32,
+    camera_pos: Vec3,
+    wind_time: f32,
+    clip_level_0: Vec4,
+    world_bounds: Vec4,
 ) -> GrassParamsGpu {
     GrassParamsGpu {
         camera_grid: Vec4::new(camera_pos.x, camera_pos.z, grid_size as f32, spacing),
-        clip_level:  clip_level_0,
-        blade: Vec4::new(inner_radius_sq, config.blade_height, config.blade_width, config.slope_max),
-        alt_wind: Vec4::new(config.altitude_min, config.altitude_max, wind_time, config.wind_strength),
+        clip_level: clip_level_0,
+        blade: Vec4::new(
+            inner_radius_sq,
+            config.blade_height,
+            config.blade_width,
+            config.slope_max,
+        ),
+        alt_wind: Vec4::new(
+            config.altitude_min,
+            config.altitude_max,
+            wind_time,
+            config.wind_strength,
+        ),
         wind_color: Vec4::new(
             config.wind_scale,
-            config.base_color.red, config.base_color.green, config.base_color.blue,
+            config.base_color.red,
+            config.base_color.green,
+            config.base_color.blue,
         ),
         world_bounds,
     }

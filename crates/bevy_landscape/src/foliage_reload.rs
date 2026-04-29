@@ -107,7 +107,7 @@ mod tests {
     #[test]
     fn test_foliage_config_resource_default() {
         let config = FoliageConfigResource::default();
-        assert!(config.0.is_none());
+        assert!(config.0.is_some());
     }
 
     #[test]

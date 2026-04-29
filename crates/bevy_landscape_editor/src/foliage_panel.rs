@@ -1,9 +1,9 @@
 //! Foliage editor panel — controls for the two-LOD GPU grass system.
 
+use crate::toolbar::ToolbarState;
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
 use bevy_landscape::{GpuGrassConfig, GRASS_MAX_GRID};
-use crate::toolbar::ToolbarState;
 
 pub struct FoliagePanelPlugin;
 
@@ -49,8 +49,13 @@ fn foliage_panel_system(
                 ui.horizontal(|ui| {
                     ui.label("Range  ");
                     let mut r = cfg.near_range;
-                    if ui.add(egui::Slider::new(&mut r, 20.0..=max_near.max(200.0))
-                        .suffix(" m").integer()).changed()
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut r, 20.0..=max_near.max(200.0))
+                                .suffix(" m")
+                                .integer(),
+                        )
+                        .changed()
                     {
                         cfg.near_range = r.min(max_near);
                     }
@@ -58,8 +63,13 @@ fn foliage_panel_system(
                 ui.horizontal(|ui| {
                     ui.label("Spacing");
                     let mut s = cfg.near_spacing;
-                    if ui.add(egui::Slider::new(&mut s, 0.3..=3.0)
-                        .suffix(" m").logarithmic(true)).changed()
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut s, 0.3..=3.0)
+                                .suffix(" m")
+                                .logarithmic(true),
+                        )
+                        .changed()
                     {
                         cfg.near_spacing = s;
                         // Keep range constant: adjust grid_size to compensate.
@@ -69,9 +79,17 @@ fn foliage_panel_system(
                     }
                 });
                 let ng = cfg.near_grid_size();
-                ui.label(egui::RichText::new(
-                    format!("{}×{} = {}k blades  |  range {:.0} m", ng, ng, ng*ng/1000, cfg.near_range)
-                ).small().color(egui::Color32::GRAY));
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}×{} = {}k blades  |  range {:.0} m",
+                        ng,
+                        ng,
+                        ng * ng / 1000,
+                        cfg.near_range
+                    ))
+                    .small()
+                    .color(egui::Color32::GRAY),
+                );
             }
 
             ui.add_space(6.0);
@@ -81,18 +99,25 @@ fn foliage_panel_system(
             {
                 // Far spacing must be coarser than near.
                 let min_far_sp = (cfg.near_spacing * 2.0).max(1.0);
-                if cfg.far_spacing < min_far_sp { cfg.far_spacing = min_far_sp; }
+                if cfg.far_spacing < min_far_sp {
+                    cfg.far_spacing = min_far_sp;
+                }
 
                 let range_before = cfg.far_range;
                 // Max far extension: limited by how many cells fit at current spacing
                 // after accounting for the near radius already consumed.
-                let max_far_ext = ((GRASS_MAX_GRID as f32 / 2.0) * cfg.far_spacing
-                    - cfg.near_range).max(100.0);
+                let max_far_ext =
+                    ((GRASS_MAX_GRID as f32 / 2.0) * cfg.far_spacing - cfg.near_range).max(100.0);
                 ui.horizontal(|ui| {
                     ui.label("Extension");
                     let mut r = cfg.far_range;
-                    if ui.add(egui::Slider::new(&mut r, 50.0..=max_far_ext.max(2000.0))
-                        .suffix(" m past near").integer()).changed()
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut r, 50.0..=max_far_ext.max(2000.0))
+                                .suffix(" m past near")
+                                .integer(),
+                        )
+                        .changed()
                     {
                         cfg.far_range = r.min(max_far_ext);
                     }
@@ -100,8 +125,13 @@ fn foliage_panel_system(
                 ui.horizontal(|ui| {
                     ui.label("Spacing  ");
                     let mut s = cfg.far_spacing;
-                    if ui.add(egui::Slider::new(&mut s, min_far_sp..=5.0)
-                        .suffix(" m").logarithmic(true)).changed()
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut s, min_far_sp..=5.0)
+                                .suffix(" m")
+                                .logarithmic(true),
+                        )
+                        .changed()
                     {
                         cfg.far_spacing = s;
                         // Keep total radius constant when spacing changes.
@@ -114,19 +144,33 @@ fn foliage_panel_system(
                 });
                 let fg = cfg.far_grid_size();
                 let total_r = cfg.near_range + cfg.far_range;
-                ui.label(egui::RichText::new(
-                    format!("{}×{} = {}k blades  |  {:.0}–{:.0} m from camera",
-                        fg, fg, fg*fg/1000, cfg.near_range, total_r)
-                ).small().color(egui::Color32::GRAY));
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}×{} = {}k blades  |  {:.0}–{:.0} m from camera",
+                        fg,
+                        fg,
+                        fg * fg / 1000,
+                        cfg.near_range,
+                        total_r
+                    ))
+                    .small()
+                    .color(egui::Color32::GRAY),
+                );
             }
 
             // Total.
             let ng = cfg.near_grid_size();
             let fg = cfg.far_grid_size();
-            ui.label(egui::RichText::new(
-                format!("Total: {}k + {}k = {}k blades",
-                    ng*ng/1000, fg*fg/1000, (ng*ng + fg*fg)/1000)
-            ).small().color(egui::Color32::DARK_GRAY));
+            ui.label(
+                egui::RichText::new(format!(
+                    "Total: {}k + {}k = {}k blades",
+                    ng * ng / 1000,
+                    fg * fg / 1000,
+                    (ng * ng + fg * fg) / 1000
+                ))
+                .small()
+                .color(egui::Color32::DARK_GRAY),
+            );
 
             ui.separator();
 
@@ -142,11 +186,15 @@ fn foliage_panel_system(
             });
             ui.horizontal(|ui| {
                 ui.label("Color ");
-                let mut rgb = [cfg.base_color.red, cfg.base_color.green, cfg.base_color.blue];
+                let mut rgb = [
+                    cfg.base_color.red,
+                    cfg.base_color.green,
+                    cfg.base_color.blue,
+                ];
                 if ui.color_edit_button_rgb(&mut rgb).changed() {
-                    cfg.base_color.red   = rgb[0];
+                    cfg.base_color.red = rgb[0];
                     cfg.base_color.green = rgb[1];
-                    cfg.base_color.blue  = rgb[2];
+                    cfg.base_color.blue = rgb[2];
                 }
             });
 
@@ -167,8 +215,10 @@ fn foliage_panel_system(
 
             // ── Material slot 0 binding ────────────────────────────────────
             ui.separator();
-            ui.checkbox(&mut cfg.link_to_slot0,
-                "Follow material slot 0  (altitude & slope from ground texture)");
+            ui.checkbox(
+                &mut cfg.link_to_slot0,
+                "Follow material slot 0  (altitude & slope from ground texture)",
+            );
 
             // ── Slope ──────────────────────────────────────────────────────
             ui.label("Slope limit");
@@ -179,8 +229,9 @@ fn foliage_panel_system(
                 }
                 ui.add_enabled(
                     slope_enabled,
-                    egui::Slider::new(&mut cfg.slope_max, 0.1..=3.0)
-                        .custom_formatter(|v, _| format!("{:.1}  (~{:.0}°)", v, v.atan() * 57.2958)),
+                    egui::Slider::new(&mut cfg.slope_max, 0.1..=3.0).custom_formatter(|v, _| {
+                        format!("{:.1}  (~{:.0}°)", v, v.atan() * 57.2958)
+                    }),
                 );
             });
 
@@ -188,11 +239,19 @@ fn foliage_panel_system(
             ui.collapsing("Altitude filter", |ui| {
                 ui.horizontal(|ui| {
                     ui.label("Min");
-                    ui.add(egui::DragValue::new(&mut cfg.altitude_min).suffix(" m").speed(10.0));
+                    ui.add(
+                        egui::DragValue::new(&mut cfg.altitude_min)
+                            .suffix(" m")
+                            .speed(10.0),
+                    );
                 });
                 ui.horizontal(|ui| {
                     ui.label("Max");
-                    ui.add(egui::DragValue::new(&mut cfg.altitude_max).suffix(" m").speed(10.0));
+                    ui.add(
+                        egui::DragValue::new(&mut cfg.altitude_max)
+                            .suffix(" m")
+                            .speed(10.0),
+                    );
                 });
             });
         });

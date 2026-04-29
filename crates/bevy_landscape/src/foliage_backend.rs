@@ -14,11 +14,11 @@ use crate::{
     foliage::{FoliageConfig, FoliageLodTier},
     foliage_gpu::{FoliageStagingBatch, FoliageStagingQueue},
     foliage_instance_gen::bake_and_write_foliage_instances,
+    foliage_plugin::FoliageMeshHandles,
     foliage_reload::FoliageConfigResource,
     foliage_tiles::read_foliage_tile,
-    foliage_plugin::FoliageMeshHandles,
-    terrain::world_desc::TerrainSourceDesc,
     terrain::config::TerrainConfig,
+    terrain::world_desc::TerrainSourceDesc,
     FoliageSourceDesc,
 };
 use bevy::prelude::*;
@@ -125,7 +125,7 @@ pub fn poll_foliage_generation(
     foliage_source: Res<FoliageSourceDesc>,
     foliage_config_res: Res<FoliageConfigResource>,
     mut staging_queue: ResMut<FoliageStagingQueue>,
-    handles: Res<FoliageMeshHandles>,
+    _handles: Res<FoliageMeshHandles>,
 ) {
     if !state.is_running {
         return;
@@ -153,7 +153,10 @@ pub fn poll_foliage_generation(
                 if let Some(foliage_root) = &foliage_source.foliage_root {
                     load_generated_tiles_into_queue(
                         foliage_root,
-                        foliage_config_res.0.as_ref().unwrap_or(&FoliageConfig::default()),
+                        foliage_config_res
+                            .0
+                            .as_ref()
+                            .unwrap_or(&FoliageConfig::default()),
                         &mut staging_queue,
                     );
                 }
@@ -268,10 +271,7 @@ fn run_generation(
 }
 
 /// Returns `(tx, ty, height_data_f32)` for every L0 height tile found on disk.
-fn discover_height_tiles(
-    tile_root: Option<&Path>,
-    _max_mip: u8,
-) -> Vec<(i32, i32, Vec<f32>)> {
+fn discover_height_tiles(tile_root: Option<&Path>, _max_mip: u8) -> Vec<(i32, i32, Vec<f32>)> {
     let Some(root) = tile_root else {
         return vec![];
     };

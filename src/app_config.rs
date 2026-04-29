@@ -1,3 +1,4 @@
+use bevy_landscape::{TerrainConfig, TerrainSourceDesc};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -58,6 +59,38 @@ pub struct TerrainRenderCfg {
 pub struct AppConfig {
     pub source: TerrainSourceCfg,
     pub render: TerrainRenderCfg,
+}
+
+impl AppConfig {
+    pub fn into_runtime(self) -> (TerrainConfig, TerrainSourceDesc) {
+        let mut config = TerrainConfig::default();
+        if let Some(v) = self.render.clipmap_levels {
+            config.clipmap_levels = v;
+        }
+        if let Some(v) = self.render.world_scale {
+            config.world_scale = v;
+        }
+        config.lod0_mesh_spacing = self.render.lod0_mesh_spacing.unwrap_or(config.world_scale);
+        let base_height_scale = self.render.height_scale.unwrap_or(config.height_scale);
+        config.height_scale = base_height_scale * config.world_scale;
+        if let Some(v) = self.render.macro_color_flip_v {
+            config.macro_color_flip_v = v;
+        }
+
+        let source = TerrainSourceDesc {
+            tile_root: self.source.tile_root,
+            normal_root: self.source.normal_root,
+            material_root: None,
+            macro_color_root: self.source.macro_color_root,
+            foliage_root: self.source.foliage_root,
+            world_min: self.source.world_min,
+            world_max: self.source.world_max,
+            max_mip_level: self.source.max_mip_level,
+            collision_mip_level: self.source.collision_mip_level,
+        };
+
+        (config, source)
+    }
 }
 
 /// Scans `{tile_root}/height/L0/` for baked tile filenames (`{tx}_{ty}.bin`),
@@ -136,9 +169,9 @@ pub fn load() -> AppConfig {
         height_scale: None,
         macro_color_flip_v: None,
     });
-    let fc = cfg.foliage.unwrap_or(FoliageSourceToml {
-        foliage_root: None,
-    });
+    let fc = cfg
+        .foliage
+        .unwrap_or(FoliageSourceToml { foliage_root: None });
 
     let world_scale = rc.world_scale.unwrap_or(1.0);
     // tile_size matches TerrainConfig::default() — always 256 for this project.
