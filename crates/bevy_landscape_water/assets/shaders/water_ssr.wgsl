@@ -10,18 +10,29 @@
 #import bevy_pbr::{
     mesh_view_bindings::{view_transmission_texture, view_transmission_sampler},
     prepass_utils,
-    view_transformations::{position_world_to_clip, ndc_to_uv, ndc_to_frag_coord},
+    view_transformations::{
+        position_world_to_clip,
+        ndc_to_uv,
+        ndc_to_frag_coord,
+        depth_ndc_to_view_z,
+    },
 }
 
 // Coarse linear steps cover the full ray; bisection tightens each hit.
 const SSR_LINEAR_STEPS: i32 = 32;
 const SSR_BISECT_STEPS: i32 = 6;
 // Step past the water surface before marching so the terrain depth values
-// stored in the prepass (water writes no depth of its own) don't trigger
-// an immediate false positive.
+// stored in the prepass (water writes no depth of its own) don't cause an
+// immediate false positive.
 const SSR_START_OFFSET_M: f32 = 1.5;
 // Maximum world-space ray length. Reflections beyond this fall back to IBL.
 const SSR_MAX_DISTANCE_M: f32 = 300.0;
+// Maximum view-space distance (metres) the scene geometry at a candidate hit
+// may sit in front of the ray's expected position. Prevents grazing-angle
+// rays from picking up geometry that is only superficially visible at that
+// screen UV but is actually far from the ray in world space (the "banding"
+// artifact where a single object's colour smears across many water pixels).
+const SSR_THICKNESS_M: f32 = 6.0;
 
 // Returns reflected scene colour (rgb) and a confidence weight (a).
 //   confidence = 0 → no screen-space hit; caller falls back to PBR IBL.
@@ -31,7 +42,7 @@ fn screen_space_reflect(
     reflect_dir: vec3<f32>,  // unit reflection direction (world space)
     frag_coord:  vec4<f32>,  // in.position (screen xy + fragment depth)
 ) -> vec4<f32> {
-    // Project ray start (offset past water surface) and end into NDC.
+    // Project ray start (offset past the water surface) and end into NDC.
     let start_clip = position_world_to_clip(world_pos + reflect_dir * SSR_START_OFFSET_M);
     if start_clip.w <= 0.001 { return vec4(0.0); }
     let start_ndc = start_clip.xyz / start_clip.w;
@@ -42,11 +53,12 @@ fn screen_space_reflect(
 
     let ray_ndc = end_ndc - start_ndc;
 
-    // Initialise prev_scene_depth to 0 (= "sky / no geometry") so the first
-    // step begins in state A ("ray ahead of geometry"), preventing the start
-    // offset position from immediately triggering a transition.
-    var prev_ndc:          vec3<f32> = start_ndc;
-    var prev_scene_depth:  f32       = 0.0;
+    // prev_scene_vz is initialised to a large negative sentinel representing
+    // "no geometry / sky", placing the first step firmly in state A
+    // ("ray ahead of geometry") so only a genuine A→B transition fires.
+    var prev_ndc:      vec3<f32> = start_ndc;
+    var prev_scene_vz: f32       = -1.0e9;
+    var prev_ray_vz:   f32       = depth_ndc_to_view_z(start_ndc.z);
 
     for (var i = 1; i <= SSR_LINEAR_STEPS; i++) {
         let t          = f32(i) / f32(SSR_LINEAR_STEPS);
@@ -61,22 +73,42 @@ fn screen_space_reflect(
             vec4(sample_frag_xy, sample_ndc.z, 1.0), 0u
         );
 
+        // Convert to view-space Z (linear in metres, negative forward).
+        // Closer to camera = less negative = greater value.
+        // Using view-space instead of NDC depth gives uniform precision at all
+        // distances — reversed-Z packs distant values near 0 in NDC, making
+        // the comparison unreliable beyond ~100 m.
+        let ray_vz = depth_ndc_to_view_z(sample_ndc.z);
+
         // scene_depth == 0 is the reversed-Z far plane (sky / empty).
+        var scene_vz = -1.0e9; // sentinel for sky
         if scene_depth > 0.0 {
-            // Reversed-Z: higher depth value = closer to camera.
-            // scene_depth > sample_ndc.z → scene geometry is closer than the
-            // ray sample → the ray has crossed the surface (state A → B).
-            // Guard on prev_scene_depth <= prev_ndc.z (state A at previous
-            // step) to fire only on a genuine transition, not inside slabs.
-            if scene_depth > sample_ndc.z && prev_scene_depth <= prev_ndc.z {
+            scene_vz = depth_ndc_to_view_z(scene_depth);
+
+            // scene_vz > ray_vz → scene geometry is closer to the camera than
+            // the ray → the ray has crossed the surface (state A → B).
+            //
+            // Thickness check: reject candidates where the scene is much closer
+            // than the ray, which indicates a false positive from a different
+            // object visible at that screen UV (the source of banding artifacts
+            // at grazing angles).
+            //
+            // Guard on prev_scene_vz <= prev_ray_vz (state A at previous step)
+            // to fire only on a genuine transition, not while inside a slab.
+            if scene_vz > ray_vz
+                && (scene_vz - ray_vz) < SSR_THICKNESS_M
+                && prev_scene_vz <= prev_ray_vz
+            {
                 // Bisect between the two straddling steps for sub-step precision.
                 var lo = prev_ndc;
                 var hi = sample_ndc;
                 for (var b = 0; b < SSR_BISECT_STEPS; b++) {
-                    let mid    = (lo + hi) * 0.5;
-                    let mid_xy = ndc_to_frag_coord(mid.xy);
-                    let mid_d  = prepass_utils::prepass_depth(vec4(mid_xy, mid.z, 1.0), 0u);
-                    if mid_d > mid.z {
+                    let mid      = (lo + hi) * 0.5;
+                    let mid_xy   = ndc_to_frag_coord(mid.xy);
+                    let mid_d    = prepass_utils::prepass_depth(vec4(mid_xy, mid.z, 1.0), 0u);
+                    let mid_svz  = select(-1.0e9, depth_ndc_to_view_z(mid_d), mid_d > 0.0);
+                    let mid_rvz  = depth_ndc_to_view_z(mid.z);
+                    if mid_svz > mid_rvz {
                         hi = mid;
                     } else {
                         lo = mid;
@@ -98,8 +130,9 @@ fn screen_space_reflect(
             }
         }
 
-        prev_ndc         = sample_ndc;
-        prev_scene_depth = scene_depth;
+        prev_ndc      = sample_ndc;
+        prev_scene_vz = scene_vz;
+        prev_ray_vz   = ray_vz;
     }
 
     return vec4(0.0); // no hit — IBL provides the fallback
