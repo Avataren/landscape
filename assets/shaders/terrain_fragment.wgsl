@@ -29,6 +29,10 @@
     },
 }
 
+#ifdef SCREEN_SPACE_AMBIENT_OCCLUSION
+#import bevy_pbr::ssao_utils::ssao_multibounce
+#endif
+
 // Must match TerrainMaterialUniforms in material.rs exactly.
 struct MaterialSlotGpu {
     tint_vis: vec4<f32>,   // rgb = tint, a = visibility (0/1)
@@ -1074,7 +1078,19 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     let sky_ambient_physical = hemisphere_ambient(n, albedo) / max(view.exposure, 1e-10);
 #endif
     let flat_ambient         = albedo * lights.ambient_color.rgb;
-    let ambient              = sky_ambient_physical + flat_ambient;
+    var ambient              = sky_ambient_physical + flat_ambient;
+
+    // Apply SSAO — mirrors Bevy's standard PBR path.
+    // The multibounce approximation accounts for inter-reflection so occluded
+    // areas keep a colour-tinted appearance rather than going flat grey.
+#ifdef SCREEN_SPACE_AMBIENT_OCCLUSION
+    let ssao_val = textureLoad(
+        view_bindings::screen_space_ambient_occlusion_texture,
+        vec2<i32>(in.clip_pos.xy),
+        0,
+    ).r;
+    ambient *= ssao_multibounce(ssao_val, albedo);
+#endif
 
     // Apply camera exposure (physical luminance → display values).
     var out_rgb = (direct + ambient) * view.exposure;

@@ -22,6 +22,13 @@
     },
 }
 
+#ifdef SCREEN_SPACE_AMBIENT_OCCLUSION
+#import bevy_pbr::{
+    mesh_view_bindings::screen_space_ambient_occlusion_texture,
+    ssao_utils::ssao_multibounce,
+}
+#endif
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 const VERTS_PER_BLADE: u32 = 12u;
 
@@ -382,7 +389,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let sky_col    = vec3<f32>(0.15, 0.25, 0.40);
     let gnd_col    = vec3<f32>(0.04, 0.03, 0.02);
     let hemisphere = mix(gnd_col, sky_col, sky_t);
-    let ambient    = diffuse * (hemisphere / max(view.exposure, 1e-10) + lights.ambient_color.rgb);
+    var ambient    = diffuse * (hemisphere / max(view.exposure, 1e-10) + lights.ambient_color.rgb);
+
+#ifdef SCREEN_SPACE_AMBIENT_OCCLUSION
+    let ssao_val = textureLoad(screen_space_ambient_occlusion_texture, vec2<i32>(in.clip_pos.xy), 0).r;
+    ambient *= ssao_multibounce(ssao_val, diffuse);
+#endif
 
     let color = (direct + ambient) * view.exposure;
     return vec4<f32>(color, opacity);
