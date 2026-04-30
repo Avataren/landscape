@@ -26,6 +26,8 @@ struct WaterMaterial {
     fft_cascade_world_sizes:     vec4<f32>,
     // 1 / fft_cascade_world_sizes per component (cascade UV scale).
     fft_cascade_inv_world_sizes: vec4<f32>,
+    // x = ssr_enabled (0=off 1=on), y = ssr_steps, z = ssr_max_distance (m), w = ssr_thickness (m)
+    ssr_params:                  vec4<f32>,
     terrain_clip_levels:         array<vec4<f32>, 16>,
 };
 

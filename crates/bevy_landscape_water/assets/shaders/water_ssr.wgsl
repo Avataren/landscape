@@ -17,22 +17,12 @@
         depth_ndc_to_view_z,
     },
 }
+#import bevy_landscape_water::water_bindings::material
 
-// Coarse linear steps cover the full ray; bisection tightens each hit.
-const SSR_LINEAR_STEPS: i32 = 32;
-const SSR_BISECT_STEPS: i32 = 6;
 // Step past the water surface before marching so the terrain depth values
 // stored in the prepass (water writes no depth of its own) don't cause an
 // immediate false positive.
 const SSR_START_OFFSET_M: f32 = 1.5;
-// Maximum world-space ray length. Reflections beyond this fall back to IBL.
-const SSR_MAX_DISTANCE_M: f32 = 300.0;
-// Maximum view-space distance (metres) the scene geometry at a candidate hit
-// may sit in front of the ray's expected position. Prevents grazing-angle
-// rays from picking up geometry that is only superficially visible at that
-// screen UV but is actually far from the ray in world space (the "banding"
-// artifact where a single object's colour smears across many water pixels).
-const SSR_THICKNESS_M: f32 = 6.0;
 
 // Returns reflected scene colour (rgb) and a confidence weight (a).
 //   confidence = 0 → no screen-space hit; caller falls back to PBR IBL.
@@ -42,12 +32,18 @@ fn screen_space_reflect(
     reflect_dir: vec3<f32>,  // unit reflection direction (world space)
     frag_coord:  vec4<f32>,  // in.position (screen xy + fragment depth)
 ) -> vec4<f32> {
+    // ssr_params: x=enabled, y=steps, z=max_distance, w=thickness
+    if material.ssr_params.x < 0.5 { return vec4(0.0); }
+    let ssr_steps       = i32(clamp(material.ssr_params.y, 4.0, 128.0));
+    let ssr_max_dist    = material.ssr_params.z;
+    let ssr_thickness   = material.ssr_params.w;
+
     // Project ray start (offset past the water surface) and end into NDC.
     let start_clip = position_world_to_clip(world_pos + reflect_dir * SSR_START_OFFSET_M);
     if start_clip.w <= 0.001 { return vec4(0.0); }
     let start_ndc = start_clip.xyz / start_clip.w;
 
-    let end_clip = position_world_to_clip(world_pos + reflect_dir * SSR_MAX_DISTANCE_M);
+    let end_clip = position_world_to_clip(world_pos + reflect_dir * ssr_max_dist);
     if end_clip.w <= 0.001 { return vec4(0.0); }
     let end_ndc = end_clip.xyz / end_clip.w;
 
@@ -60,8 +56,8 @@ fn screen_space_reflect(
     var prev_scene_vz: f32       = -1.0e9;
     var prev_ray_vz:   f32       = depth_ndc_to_view_z(start_ndc.z);
 
-    for (var i = 1; i <= SSR_LINEAR_STEPS; i++) {
-        let t          = f32(i) / f32(SSR_LINEAR_STEPS);
+    for (var i = 1; i <= ssr_steps; i++) {
+        let t          = f32(i) / f32(ssr_steps);
         let sample_ndc = start_ndc + ray_ndc * t;
         let sample_uv  = ndc_to_uv(sample_ndc.xy);
 
@@ -96,13 +92,13 @@ fn screen_space_reflect(
             // Guard on prev_scene_vz <= prev_ray_vz (state A at previous step)
             // to fire only on a genuine transition, not while inside a slab.
             if scene_vz > ray_vz
-                && (scene_vz - ray_vz) < SSR_THICKNESS_M
+                && (scene_vz - ray_vz) < ssr_thickness
                 && prev_scene_vz <= prev_ray_vz
             {
                 // Bisect between the two straddling steps for sub-step precision.
                 var lo = prev_ndc;
                 var hi = sample_ndc;
-                for (var b = 0; b < SSR_BISECT_STEPS; b++) {
+                for (var b = 0; b < 6; b++) {
                     let mid      = (lo + hi) * 0.5;
                     let mid_xy   = ndc_to_frag_coord(mid.xy);
                     let mid_d    = prepass_utils::prepass_depth(vec4(mid_xy, mid.z, 1.0), 0u);

@@ -7,6 +7,7 @@ mod import;
 mod level_io;
 mod material_panel;
 mod preferences;
+mod rendering_panel;
 mod sky_panel;
 mod synthesis_panel;
 mod texture_browser;
@@ -24,13 +25,15 @@ use import::ImportPlugin;
 use level_io::LevelIoPlugin;
 use material_panel::MaterialPanelPlugin;
 use preferences::PreferencesPlugin;
+use rendering_panel::RenderingPanelPlugin;
 use sky_panel::SkyPanelPlugin;
 use synthesis_panel::SynthesisPanelPlugin;
 use texture_browser::TextureBrowserPlugin;
 use water_panel::WaterPanelPlugin;
 
-pub use level_io::{water_from_level_value, synthesis_from_level_value, LevelIoState};
+pub use level_io::{rendering_from_level_value, synthesis_from_level_value, water_from_level_value, LevelIoState};
 pub use preferences::AppPreferences;
+pub use rendering_panel::SsaoSettings;
 
 pub struct LandscapeEditorPlugin;
 
@@ -49,6 +52,7 @@ impl Plugin for LandscapeEditorPlugin {
             .add_plugins(ImportPlugin)
             .add_plugins(LevelIoPlugin)
             .add_plugins(PreferencesPlugin)
+            .add_plugins(RenderingPanelPlugin)
             .add_plugins(SkyPanelPlugin)
             .add_plugins(SynthesisPanelPlugin)
             .add_plugins(WaterPanelPlugin)

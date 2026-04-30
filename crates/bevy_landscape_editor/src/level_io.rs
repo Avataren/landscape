@@ -47,7 +47,20 @@ struct WaterSettingsDto {
     capillary_strength: f32,
     macro_noise_amplitude: f32,
     macro_noise_scale: f32,
+    #[serde(default = "default_true")]
+    ssr_enabled: bool,
+    #[serde(default = "default_ssr_steps")]
+    ssr_steps: u32,
+    #[serde(default = "default_ssr_max_distance")]
+    ssr_max_distance: f32,
+    #[serde(default = "default_ssr_thickness")]
+    ssr_thickness: f32,
 }
+
+fn default_true() -> bool { true }
+fn default_ssr_steps() -> u32 { 32 }
+fn default_ssr_max_distance() -> f32 { 300.0 }
+fn default_ssr_thickness() -> f32 { 6.0 }
 
 impl From<&WaterSettings> for WaterSettingsDto {
     fn from(s: &WaterSettings) -> Self {
@@ -73,6 +86,10 @@ impl From<&WaterSettings> for WaterSettingsDto {
             capillary_strength: s.capillary_strength,
             macro_noise_amplitude: s.macro_noise_amplitude,
             macro_noise_scale: s.macro_noise_scale,
+            ssr_enabled: s.ssr_enabled,
+            ssr_steps: s.ssr_steps,
+            ssr_max_distance: s.ssr_max_distance,
+            ssr_thickness: s.ssr_thickness,
         }
     }
 }
@@ -99,6 +116,10 @@ impl WaterSettingsDto {
         s.capillary_strength = self.capillary_strength;
         s.macro_noise_amplitude = self.macro_noise_amplitude;
         s.macro_noise_scale = self.macro_noise_scale;
+        s.ssr_enabled = self.ssr_enabled;
+        s.ssr_steps = self.ssr_steps;
+        s.ssr_max_distance = self.ssr_max_distance;
+        s.ssr_thickness = self.ssr_thickness;
     }
 }
 
@@ -227,6 +248,24 @@ pub fn synthesis_from_level_value(v: &serde_json::Value) -> Option<DetailSynthes
     Some(c)
 }
 
+/// Serialisable snapshot of SSAO rendering settings.
+#[derive(Serialize, Deserialize)]
+struct RenderingSettingsDto {
+    ssao_enabled: bool,
+    ssao_quality: crate::rendering_panel::SsaoQuality,
+}
+
+/// Parse `SsaoSettings` from the JSON value stored in a level file.
+pub fn rendering_from_level_value(
+    v: &serde_json::Value,
+) -> Option<crate::rendering_panel::SsaoSettings> {
+    let dto: RenderingSettingsDto = serde_json::from_value(v.clone()).ok()?;
+    Some(crate::rendering_panel::SsaoSettings {
+        enabled: dto.ssao_enabled,
+        quality: dto.ssao_quality,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Resource
 // ---------------------------------------------------------------------------
@@ -310,6 +349,7 @@ fn level_io_system(
     water_settings: Option<ResMut<WaterSettings>>,
     fft_settings: Option<ResMut<OceanFftSettings>>,
     synthesis: Option<ResMut<DetailSynthesisConfig>>,
+    ssao: Option<ResMut<crate::rendering_panel::SsaoSettings>>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
 
@@ -340,6 +380,13 @@ fn level_io_system(
                     if let Some(syn) = &synthesis {
                         level_desc.synthesis =
                             serde_json::to_value(SynthesisDto::from(syn.as_ref())).ok();
+                    }
+                    if let Some(ref ssao_res) = ssao {
+                        level_desc.rendering = serde_json::to_value(RenderingSettingsDto {
+                            ssao_enabled: ssao_res.enabled,
+                            ssao_quality: ssao_res.quality,
+                        })
+                        .ok();
                     }
                     if let Some(gp) = &generator_params {
                         level_desc.metadata = TerrainMetadata {
@@ -393,6 +440,14 @@ fn level_io_system(
                             }) {
                                 if let Some(mut syn) = synthesis {
                                     sd.apply_to(syn.as_mut());
+                                }
+                            }
+                            if let Some(rd) = level_desc.rendering.as_ref().and_then(|v| {
+                                serde_json::from_value::<RenderingSettingsDto>(v.clone()).ok()
+                            }) {
+                                if let Some(mut ssao_res) = ssao {
+                                    ssao_res.enabled = rd.ssao_enabled;
+                                    ssao_res.quality = rd.ssao_quality;
                                 }
                             }
                             let saved_foliage_config = level_desc.foliage_config.clone();

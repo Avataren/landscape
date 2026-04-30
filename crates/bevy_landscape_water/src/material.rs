@@ -58,6 +58,14 @@ pub struct WaterMaterial {
     pub macro_noise_amplitude: f32,
     /// Macro-noise dominant wavelength in metres.
     pub macro_noise_scale: f32,
+    /// Whether screen-space reflections are enabled.
+    pub ssr_enabled: bool,
+    /// Number of linear ray-march steps (4–128).
+    pub ssr_steps: u32,
+    /// Maximum ray length in world metres before falling back to IBL.
+    pub ssr_max_distance: f32,
+    /// Maximum view-space depth difference (metres) that counts as a hit.
+    pub ssr_thickness: f32,
     /// Terrain height clipmap bound for shoreline damping.
     #[texture(101, visibility(vertex, fragment), dimension = "2d_array")]
     #[sampler(102, visibility(vertex, fragment))]
@@ -117,6 +125,10 @@ impl Default for WaterMaterial {
             capillary_strength: 1.0,
             macro_noise_amplitude: 0.0,
             macro_noise_scale: 110.0,
+            ssr_enabled: true,
+            ssr_steps: 32,
+            ssr_max_distance: 300.0,
+            ssr_thickness: 6.0,
             terrain_height_texture: Handle::default(),
             terrain_world_bounds: Vec4::ZERO,
             terrain_height_scale: 0.0,
@@ -165,6 +177,8 @@ pub struct WaterMaterialUniform {
     /// 1.0 / fft_cascade_world_sizes (matched components).  Pre-divided to
     /// save divides on the fragment shader hot path.
     pub fft_cascade_inv_world_sizes: Vec4,
+    /// x = ssr_enabled (0/1), y = ssr_steps, z = ssr_max_distance (m), w = ssr_thickness (m)
+    pub ssr_params: Vec4,
     pub terrain_clip_levels: [Vec4; MAX_SUPPORTED_CLIPMAP_LEVELS],
 }
 
@@ -229,6 +243,12 @@ impl AsBindGroupShaderType<WaterMaterialUniform> for WaterMaterial {
                 } else {
                     0.0
                 },
+            ),
+            ssr_params: Vec4::new(
+                if self.ssr_enabled { 1.0 } else { 0.0 },
+                self.ssr_steps as f32,
+                self.ssr_max_distance,
+                self.ssr_thickness,
             ),
             terrain_clip_levels: self.terrain_clip_levels,
         }

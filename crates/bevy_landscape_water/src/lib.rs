@@ -97,6 +97,18 @@ pub struct WaterSettings {
     pub macro_noise_amplitude: f32,
     /// Macro height-noise dominant wavelength in metres.
     pub macro_noise_scale: f32,
+    /// Whether screen-space reflections are active on the water surface.
+    pub ssr_enabled: bool,
+    /// Number of linear ray-march steps (4–128). Higher = fewer missed hits at
+    /// the cost of GPU time. 32 is a good balance for most scenes.
+    pub ssr_steps: u32,
+    /// Maximum SSR ray length in world metres. Reflections beyond this fall
+    /// back to IBL/sky.
+    pub ssr_max_distance: f32,
+    /// Maximum view-space depth difference (metres) between the ray and the
+    /// scene surface that still counts as a reflection hit. Keeps SSR from
+    /// smearing across pixels where the geometry is behind the ray's plane.
+    pub ssr_thickness: f32,
 }
 
 impl Default for WaterSettings {
@@ -129,6 +141,10 @@ impl Default for WaterSettings {
             // defaults off.  Users can re-enable from the panel.
             macro_noise_amplitude: 0.0,
             macro_noise_scale: 110.0,
+            ssr_enabled: true,
+            ssr_steps: 32,
+            ssr_max_distance: 300.0,
+            ssr_thickness: 6.0,
         }
     }
 }
@@ -671,6 +687,10 @@ fn rebuild_water_tiles(
                 capillary_strength: settings.capillary_strength,
                 macro_noise_amplitude: settings.macro_noise_amplitude,
                 macro_noise_scale: settings.macro_noise_scale,
+                ssr_enabled: settings.ssr_enabled,
+                ssr_steps: settings.ssr_steps,
+                ssr_max_distance: settings.ssr_max_distance,
+                ssr_thickness: settings.ssr_thickness,
                 terrain_height_texture: terrain_fallback.height_texture.clone(),
                 terrain_world_bounds: Vec4::ZERO,
                 terrain_height_scale: 0.0,
@@ -1124,6 +1144,10 @@ fn sync_water_materials(
             mat.extension.capillary_strength = settings.capillary_strength;
             mat.extension.macro_noise_amplitude = settings.macro_noise_amplitude;
             mat.extension.macro_noise_scale = settings.macro_noise_scale;
+            mat.extension.ssr_enabled = settings.ssr_enabled;
+            mat.extension.ssr_steps = settings.ssr_steps;
+            mat.extension.ssr_max_distance = settings.ssr_max_distance;
+            mat.extension.ssr_thickness = settings.ssr_thickness;
         }
 
         if fft_changed {

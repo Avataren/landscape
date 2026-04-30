@@ -30,7 +30,8 @@ use bevy_landscape::{
 };
 use bevy_landscape_clouds::{CloudsConfig, VolumetricCloudsPlugin};
 use bevy_landscape_editor::{
-    water_from_level_value, synthesis_from_level_value, AppPreferences, LandscapeEditorPlugin,
+    rendering_from_level_value, synthesis_from_level_value, water_from_level_value,
+    AppPreferences, LandscapeEditorPlugin, SsaoSettings,
 };
 use bevy_landscape_generator::LandscapeGeneratorPlugin;
 use bevy_landscape_water::{LandscapeWaterPlugin, OceanFftSettings, WaterSettings};
@@ -58,6 +59,7 @@ fn main() {
         water_plugin,
         water_desc,
         synthesis_config,
+        ssao_settings,
     ): (
         TerrainConfig,
         TerrainSourceDesc,
@@ -66,6 +68,7 @@ fn main() {
         LandscapeWaterPlugin,
         Option<(WaterSettings, OceanFftSettings)>,
         Option<DetailSynthesisConfig>,
+        Option<SsaoSettings>,
     ) = if let Some(ref path) = level_arg {
         match load_level(path) {
             Ok(desc) => {
@@ -75,6 +78,7 @@ fn main() {
                     .and_then(|v| serde_json::from_value(v.clone()).ok());
                 let raw_water = desc.water.clone();
                 let raw_synthesis = desc.synthesis.clone();
+                let raw_rendering = desc.rendering.clone();
                 let (config, source, library, wmin, wmax, meta) = desc.into_runtime();
                 let water_height = meta
                     .water_level
@@ -86,12 +90,15 @@ fn main() {
                 let loaded_synthesis = raw_synthesis
                     .as_ref()
                     .and_then(synthesis_from_level_value);
+                let loaded_rendering = raw_rendering
+                    .as_ref()
+                    .and_then(rendering_from_level_value);
                 let water = LandscapeWaterPlugin {
                     water_height,
                     world_min: wmin,
                     world_max: wmax,
                 };
-                (config, source, Some(library), loaded_clouds, water, loaded_water, loaded_synthesis)
+                (config, source, Some(library), loaded_clouds, water, loaded_water, loaded_synthesis, loaded_rendering)
             }
             Err(e) => {
                 eprintln!(
@@ -103,6 +110,7 @@ fn main() {
                     None,
                     None,
                     LandscapeWaterPlugin::default(),
+                    None,
                     None,
                     None,
                 )
@@ -118,7 +126,7 @@ fn main() {
             world_max: source.world_max,
             ..default()
         };
-        (config, source, None, None, water, None, None)
+        (config, source, None, None, water, None, None, None)
     };
 
     let mut app = App::new();
@@ -176,6 +184,9 @@ fn main() {
     }
     if let Some(synthesis) = synthesis_config {
         app.insert_resource(synthesis);
+    }
+    if let Some(ssao) = ssao_settings {
+        app.insert_resource(ssao);
     }
 
     app.add_plugins(VolumetricCloudsPlugin)

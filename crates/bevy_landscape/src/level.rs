@@ -89,6 +89,10 @@ pub struct LevelDesc {
     /// can remain independent of the editor's synthesis configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub synthesis: Option<serde_json::Value>,
+    /// Rendering quality settings (SSAO, SSR). Stored as raw JSON so
+    /// `bevy_landscape` does not depend on the editor or renderer crates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendering: Option<serde_json::Value>,
     /// Metadata loaded from `{tile_root}/metadata.toml` (water level, etc.).
     /// Merged from the sidecar file during `into_runtime`; also preserved here
     /// so a saved level.json is self-contained even without the tile directory.
@@ -124,6 +128,7 @@ impl Default for LevelDesc {
             sky: None,
             water: None,
             synthesis: None,
+            rendering: None,
             metadata: TerrainMetadata::default(),
         }
     }
@@ -164,6 +169,7 @@ impl LevelDesc {
             sky: None,
             water: None,
             synthesis: None,
+            rendering: None,
             metadata: TerrainMetadata::default(),
         }
     }

@@ -53,6 +53,8 @@ pub(crate) struct ToolbarState {
     water_height_initialized: bool,
     /// Foliage panel open state (managed here to avoid exceeding Bevy parameter limits).
     pub foliage_open: bool,
+    /// Rendering quality panel open state.
+    pub rendering_open: bool,
 }
 
 impl Default for ToolbarState {
@@ -65,6 +67,7 @@ impl Default for ToolbarState {
             water_height_offset: 0.0,
             water_height_initialized: false,
             foliage_open: false,
+            rendering_open: false,
         }
     }
 }
@@ -168,6 +171,9 @@ pub(crate) fn toolbar_system(
                     ui.close();
                 }
                 if ui.checkbox(&mut toolbar.foliage_open, "Foliage").clicked() {
+                    ui.close();
+                }
+                if ui.checkbox(&mut toolbar.rendering_open, "Rendering").clicked() {
                     ui.close();
                 }
                 if ui.checkbox(&mut generator_panel.open, "Terrain Generator").clicked() {
