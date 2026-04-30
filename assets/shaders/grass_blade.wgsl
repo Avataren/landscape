@@ -237,7 +237,7 @@ fn vertex(@builtin(vertex_index) vid: u32) -> VertexOutput {
 
     let world_pos = vec3<f32>(wx + rx, wy + ly, wz + rz);
 
-    // TBN — tangent = horizontal axis of this quad, bitangent = world up.
+    // TBN — tangent = horizontal axis of this quad (rotation-dependent).
     // Quad A extends along local X; Quad B extends along local Z.
     var local_tangent = vec3<f32>(1.0, 0.0, 0.0);
     if quad_idx == 1u { local_tangent = vec3<f32>(0.0, 0.0, 1.0); }
@@ -245,13 +245,17 @@ fn vertex(@builtin(vertex_index) vid: u32) -> VertexOutput {
         local_tangent.x * cos_r - local_tangent.z * sin_r, 0.0,
         local_tangent.x * sin_r + local_tangent.z * cos_r,
     ));
-    let bitangent = vec3<f32>(0.0, 1.0, 0.0);
-    // Face normal = cross(T, B): T=(tx,0,tz), B=(0,1,0)
-    // cross = (Ty*Bz - Tz*By, Tz*Bx - Tx*Bz, Tx*By - Ty*Bx)
-    //       = (0 - tz*1, tz*0 - tx*0, tx*1 - 0)
-    //       = (-tz, 0, tx)
-    // Tilt slightly upward (+Y) so blades self-light naturally from above.
-    let world_n = normalize(vec3<f32>(-tangent.z, 0.3, tangent.x));
+
+    // Geometry normal: world-up — rotation-independent so all blades receive
+    // consistent sky/sun illumination regardless of their random yaw.
+    // The normal map (fragment shader) adds per-fragment surface detail.
+    let world_n = vec3<f32>(0.0, 1.0, 0.0);
+
+    // Bitangent: cross(T, N) gives the blade's outward face direction in XZ,
+    // perpendicular to T and orthogonal to N.  With N = (0,1,0) and T in XZ:
+    //   cross((tx,0,tz), (0,1,0)) = (-tz, 0, tx)
+    // The TBN is now orthonormal: T⊥B, T⊥N, B⊥N.
+    let bitangent = normalize(cross(tangent, world_n));
 
     out.clip_pos  = position_world_to_clip(world_pos);
     out.world_pos = world_pos;
