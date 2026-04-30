@@ -9,6 +9,7 @@
     prepass_utils,
     view_transformations::{frag_coord_to_ndc, position_ndc_to_world},
 }
+#import bevy_landscape_water::water_ssr as water_ssr
 #endif
 
 #ifdef PREPASS_PIPELINE
@@ -390,6 +391,18 @@ fn fragment(
     } else {
         out.color = pbr_input.material.base_color;
     }
+
+#ifdef DEPTH_PREPASS
+    // Screen-space reflections: where the reflection ray finds a valid scene
+    // hit, replace the PBR IBL specular with the actual reflected colour.
+    // Fresnel weights the blend (grazing → reflective; normal incidence →
+    // transmission dominates). Foam suppresses reflections on breaking crests.
+    let ssr_dir = reflect(-(view_to_camera), water_normal);
+    let ssr     = water_ssr::screen_space_reflect(in.world_position.xyz, ssr_dir, in.position);
+    let ssr_w   = ssr.a * fresnel * (1.0 - foam_weight);
+    out.color   = vec4(mix(out.color.rgb, ssr.rgb, ssr_w), out.color.a);
+#endif
+
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
 #endif
 

@@ -251,6 +251,9 @@ pub const WATER_VERTEX_SHADER_HANDLE: Handle<Shader> =
 pub const WATER_FRAGMENT_SHADER_HANDLE: Handle<Shader> =
     uuid_handle!("d3f8a1c2-4e56-7890-abcd-ef1234567893");
 
+pub const WATER_SSR_HANDLE: Handle<Shader> =
+    uuid_handle!("d3f8a1c2-4e56-7890-abcd-ef1234567894");
+
 impl MaterialExtension for WaterMaterial {
     fn vertex_shader() -> ShaderRef {
         WATER_VERTEX_SHADER_HANDLE.into()
@@ -335,6 +338,15 @@ impl Plugin for WaterMaterialPlugin {
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/assets/shaders/water_fragment.wgsl"
+            ),
+            Shader::from_wgsl
+        );
+        load_internal_asset!(
+            app,
+            WATER_SSR_HANDLE,
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/shaders/water_ssr.wgsl"
             ),
             Shader::from_wgsl
         );
