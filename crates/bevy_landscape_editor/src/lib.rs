@@ -29,7 +29,7 @@ use synthesis_panel::SynthesisPanelPlugin;
 use texture_browser::TextureBrowserPlugin;
 use water_panel::WaterPanelPlugin;
 
-pub use level_io::LevelIoState;
+pub use level_io::{water_from_level_value, synthesis_from_level_value, LevelIoState};
 pub use preferences::AppPreferences;
 
 pub struct LandscapeEditorPlugin;

@@ -49,14 +49,6 @@ pub struct FoliageLodGpuState {
 }
 
 impl FoliageLodGpuState {
-    pub fn new() -> Self {
-        Self {
-            variant_offsets: HashMap::new(),
-            gpu_capacity: 0,
-            resident_count: 0,
-        }
-    }
-
     /// Add or update a variant's GPU metadata.
     pub fn set_variant(&mut self, variant_id: u8, offset: u32, count: u32) {
         // If variant already exists, subtract the old count
@@ -86,35 +78,25 @@ impl FoliageLodGpuState {
 /// Global GPU state tracking for all LODs.
 #[derive(Resource, Default, Debug)]
 pub struct FoliageGpuState {
-    pub lod0: FoliageLodGpuState,
-    pub lod1: FoliageLodGpuState,
-    pub lod2: FoliageLodGpuState,
+    pub lods: [FoliageLodGpuState; 3],
 }
 
 impl FoliageGpuState {
     /// Get mutable LOD state by tier.
     pub fn get_lod_mut(&mut self, lod: FoliageLodTier) -> &mut FoliageLodGpuState {
-        match lod {
-            FoliageLodTier::Lod0 => &mut self.lod0,
-            FoliageLodTier::Lod1 => &mut self.lod1,
-            FoliageLodTier::Lod2 => &mut self.lod2,
-        }
+        &mut self.lods[lod as usize]
     }
 
     /// Get LOD state by tier (read-only).
     pub fn get_lod(&self, lod: FoliageLodTier) -> &FoliageLodGpuState {
-        match lod {
-            FoliageLodTier::Lod0 => &self.lod0,
-            FoliageLodTier::Lod1 => &self.lod1,
-            FoliageLodTier::Lod2 => &self.lod2,
-        }
+        &self.lods[lod as usize]
     }
 
     /// Clear all GPU state (for hot-reload).
     pub fn clear_all(&mut self) {
-        self.lod0.clear();
-        self.lod1.clear();
-        self.lod2.clear();
+        for lod in &mut self.lods {
+            lod.clear();
+        }
     }
 }
 
@@ -186,15 +168,10 @@ impl FoliageStagingQueue {
 // GPU sync marker for hot-reload
 // ---------------------------------------------------------------------------
 
-/// Marks the frame when GPU sync should occur.
+/// Set to true during a hot-reload to signal that GPU foliage buffers need clearing.
 #[derive(Resource, Default, Debug)]
 pub struct FoliageGpuSyncRequest {
-    /// Set to true when a hot-reload is pending.
     pub needs_sync: bool,
-    /// Frame number when sync was requested (for diagnostics).
-    pub requested_frame: u32,
-    /// Frame number when sync completed (None if pending).
-    pub completed_frame: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -206,16 +183,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_foliage_lod_gpu_state_new() {
-        let state = FoliageLodGpuState::new();
-        assert_eq!(state.resident_count, 0);
-        assert_eq!(state.gpu_capacity, 0);
-        assert!(state.variant_offsets.is_empty());
-    }
-
-    #[test]
     fn test_foliage_lod_gpu_state_set_variant() {
-        let mut state = FoliageLodGpuState::new();
+        let mut state = FoliageLodGpuState::default();
         state.set_variant(0, 0, 100);
         assert_eq!(state.resident_count, 100);
         assert_eq!(state.variant_offsets[&0].offset, 0);
@@ -229,18 +198,17 @@ mod tests {
 
     #[test]
     fn test_foliage_lod_gpu_state_update_variant() {
-        let mut state = FoliageLodGpuState::new();
+        let mut state = FoliageLodGpuState::default();
         state.set_variant(0, 0, 100);
         assert_eq!(state.resident_count, 100);
 
-        // Update same variant with new count
         state.set_variant(0, 0, 150);
         assert_eq!(state.resident_count, 150);
     }
 
     #[test]
     fn test_foliage_lod_gpu_state_clear() {
-        let mut state = FoliageLodGpuState::new();
+        let mut state = FoliageLodGpuState::default();
         state.set_variant(0, 0, 100);
         state.set_variant(1, 100, 200);
         assert_eq!(state.resident_count, 300);
@@ -276,9 +244,9 @@ mod tests {
             .set_variant(0, 0, 200);
 
         gpu_state.clear_all();
-        assert_eq!(gpu_state.lod0.resident_count, 0);
-        assert_eq!(gpu_state.lod1.resident_count, 0);
-        assert_eq!(gpu_state.lod2.resident_count, 0);
+        assert_eq!(gpu_state.lods[0].resident_count, 0);
+        assert_eq!(gpu_state.lods[1].resident_count, 0);
+        assert_eq!(gpu_state.lods[2].resident_count, 0);
     }
 
     #[test]
@@ -346,13 +314,9 @@ mod tests {
 
     #[test]
     fn test_foliage_gpu_sync_request() {
-        let sync = FoliageGpuSyncRequest {
-            needs_sync: true,
-            requested_frame: 42,
-            completed_frame: None,
-        };
+        let sync = FoliageGpuSyncRequest { needs_sync: true };
         assert!(sync.needs_sync);
-        assert_eq!(sync.requested_frame, 42);
-        assert!(sync.completed_frame.is_none());
+        let cleared = FoliageGpuSyncRequest::default();
+        assert!(!cleared.needs_sync);
     }
 }

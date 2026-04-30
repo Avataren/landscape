@@ -135,7 +135,7 @@ pub fn poll_foliage_generation(
         return;
     };
 
-    let rx = rx_arc.lock().unwrap();
+    let Ok(rx) = rx_arc.lock() else { return };
     loop {
         match rx.try_recv() {
             Ok(GenerationProgress::TileComplete { done, total }) => {

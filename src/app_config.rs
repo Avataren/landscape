@@ -18,12 +18,12 @@ struct TerrainSourceToml {
     collision_mip_level: Option<u8>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct FoliageSourceToml {
     foliage_root: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct TerrainConfigToml {
     clipmap_levels: Option<u32>,
     /// Source-of-truth X/Z terrain scale; copied into TerrainConfig.world_scale at startup.
@@ -162,16 +162,8 @@ pub fn load() -> AppConfig {
     let cfg: ConfigFile = toml::from_str(&toml_str).expect("Failed to parse landscape.toml");
 
     let t = cfg.terrain;
-    let rc = cfg.terrain_config.unwrap_or(TerrainConfigToml {
-        clipmap_levels: None,
-        world_scale: None,
-        lod0_mesh_spacing: None,
-        height_scale: None,
-        macro_color_flip_v: None,
-    });
-    let fc = cfg
-        .foliage
-        .unwrap_or(FoliageSourceToml { foliage_root: None });
+    let rc = cfg.terrain_config.unwrap_or_default();
+    let fc = cfg.foliage.unwrap_or_default();
 
     let world_scale = rc.world_scale.unwrap_or(1.0);
     // tile_size matches TerrainConfig::default() — always 256 for this project.

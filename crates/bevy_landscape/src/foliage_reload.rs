@@ -61,9 +61,7 @@ pub fn reload_foliage_system(
         // Bump generation counter (invalidates all in-flight tiles)
         stream_queue.reload_generation += 1;
 
-        // Set GPU sync request (signals render graph to insert barrier)
         gpu_sync.needs_sync = true;
-        gpu_sync.requested_frame = 0;
 
         // Clear residency (old tiles are no longer valid)
         residency.tiles.clear();
@@ -80,19 +78,6 @@ pub fn reload_foliage_system(
         load_state.last_reload_frame += 1;
 
         debug!("Foliage hot-reload: generation bumped, residency cleared, GPU sync requested");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// GPU sync completion handler
-// ---------------------------------------------------------------------------
-
-/// Mark GPU sync as complete once render graph barrier executes.
-/// This should be called from the render-app after the GPU sync barrier.
-pub fn mark_gpu_sync_complete(mut gpu_sync: ResMut<FoliageGpuSyncRequest>) {
-    if gpu_sync.needs_sync && gpu_sync.completed_frame.is_none() {
-        gpu_sync.needs_sync = false;
-        debug!("GPU sync complete, foliage buffers safe to reallocate");
     }
 }
 
@@ -120,21 +105,11 @@ mod tests {
     #[test]
     fn test_gpu_sync_request_state_progression() {
         let mut sync = FoliageGpuSyncRequest::default();
-        assert!(!sync.needs_sync); // Defaults to false
-        assert_eq!(sync.requested_frame, 0);
-        assert!(sync.completed_frame.is_none());
-
-        // Simulate request
+        assert!(!sync.needs_sync);
         sync.needs_sync = true;
-        sync.requested_frame = 100;
         assert!(sync.needs_sync);
-        assert_eq!(sync.requested_frame, 100);
-
-        // Simulate completion
-        sync.completed_frame = Some(101);
         sync.needs_sync = false;
         assert!(!sync.needs_sync);
-        assert_eq!(sync.completed_frame, Some(101));
     }
 
     #[test]
@@ -175,20 +150,18 @@ mod tests {
     fn test_foliage_gpu_state_clear_all() {
         let mut gpu_state = FoliageGpuState::default();
 
-        // Add some data to each LOD
-        gpu_state.lod0.set_variant(0, 0, 100);
-        gpu_state.lod1.set_variant(0, 0, 200);
-        gpu_state.lod2.set_variant(0, 0, 300);
+        gpu_state.lods[0].set_variant(0, 0, 100);
+        gpu_state.lods[1].set_variant(0, 0, 200);
+        gpu_state.lods[2].set_variant(0, 0, 300);
 
-        assert_eq!(gpu_state.lod0.resident_count, 100);
-        assert_eq!(gpu_state.lod1.resident_count, 200);
-        assert_eq!(gpu_state.lod2.resident_count, 300);
+        assert_eq!(gpu_state.lods[0].resident_count, 100);
+        assert_eq!(gpu_state.lods[1].resident_count, 200);
+        assert_eq!(gpu_state.lods[2].resident_count, 300);
 
-        // Clear all
         gpu_state.clear_all();
 
-        assert_eq!(gpu_state.lod0.resident_count, 0);
-        assert_eq!(gpu_state.lod1.resident_count, 0);
-        assert_eq!(gpu_state.lod2.resident_count, 0);
+        assert_eq!(gpu_state.lods[0].resident_count, 0);
+        assert_eq!(gpu_state.lods[1].resident_count, 0);
+        assert_eq!(gpu_state.lods[2].resident_count, 0);
     }
 }

@@ -17,6 +17,7 @@ use crate::{
     foliage_render::update_foliage_view_state,
     foliage_stream_queue::{FoliageResidency, FoliageStreamQueue, FoliageViewState},
     grass_mesh::{generate_grass_blade_variants, GrassBladeMeshConfig},
+    terrain::world_desc::TerrainSourceDesc,
 };
 use bevy::{camera::visibility::NoFrustumCulling, mesh::VertexAttributeValues, prelude::*};
 
@@ -324,6 +325,7 @@ pub fn update_foliage_meshes(
 pub fn update_foliage_lod_visibility(
     foliage_config: Res<FoliageConfigResource>,
     view_state: Res<FoliageViewState>,
+    terrain_desc: Res<TerrainSourceDesc>,
     mut query: Query<(&FoliageVariantComponent, &mut Visibility)>,
 ) {
     let (lod0_dist, lod1_dist) = match &foliage_config.0 {
@@ -332,7 +334,8 @@ pub fn update_foliage_lod_visibility(
     };
 
     let cam = view_state.camera_pos_ws;
-    let dist_xz = Vec2::new(cam.x, cam.z).length();
+    let terrain_center = (terrain_desc.world_min + terrain_desc.world_max) * 0.5;
+    let dist_xz = Vec2::new(cam.x - terrain_center.x, cam.z - terrain_center.y).length();
 
     let active_lod = if dist_xz < lod0_dist {
         FoliageLodTier::Lod0

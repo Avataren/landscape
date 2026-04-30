@@ -28,7 +28,7 @@ impl Default for GrassBladeMeshConfig {
 
 /// Variant parameters for grass blade geometry.
 #[derive(Clone, Copy, Debug)]
-pub struct GrassBladVariant {
+pub struct GrassBladeVariant {
     /// Forward bend (0..1): 0 = straight, 1 = fully bent forward (45°)
     pub bend_forward: f32,
     /// Tip curl (0..1): 0 = no curl, 1 = 90° curl at tip
@@ -37,54 +37,54 @@ pub struct GrassBladVariant {
     pub asymmetry: f32,
 }
 
-impl GrassBladVariant {
+impl GrassBladeVariant {
     /// Create the 8 default grass blade variants.
-    pub fn create_variants() -> [GrassBladVariant; 8] {
+    pub fn create_variants() -> [GrassBladeVariant; 8] {
         [
             // Variant 0: mostly straight
-            GrassBladVariant {
+            GrassBladeVariant {
                 bend_forward: 0.0,
                 tip_curl: 0.05,
                 asymmetry: 0.0,
             },
             // Variant 1: slight forward bend
-            GrassBladVariant {
+            GrassBladeVariant {
                 bend_forward: 0.1,
                 tip_curl: 0.1,
                 asymmetry: 0.1,
             },
             // Variant 2: moderate forward bend
-            GrassBladVariant {
+            GrassBladeVariant {
                 bend_forward: 0.25,
                 tip_curl: 0.15,
                 asymmetry: -0.15,
             },
             // Variant 3: strong forward bend
-            GrassBladVariant {
+            GrassBladeVariant {
                 bend_forward: 0.4,
                 tip_curl: 0.2,
                 asymmetry: 0.2,
             },
             // Variant 4: mild curl, asymmetric
-            GrassBladVariant {
+            GrassBladeVariant {
                 bend_forward: 0.05,
                 tip_curl: 0.3,
                 asymmetry: -0.1,
             },
             // Variant 5: curled tip, slight bend
-            GrassBladVariant {
+            GrassBladeVariant {
                 bend_forward: 0.15,
                 tip_curl: 0.35,
                 asymmetry: 0.25,
             },
             // Variant 6: heavily bent and curled
-            GrassBladVariant {
+            GrassBladeVariant {
                 bend_forward: 0.35,
                 tip_curl: 0.25,
                 asymmetry: -0.2,
             },
             // Variant 7: very pronounced bend and curl
-            GrassBladVariant {
+            GrassBladeVariant {
                 bend_forward: 0.5,
                 tip_curl: 0.4,
                 asymmetry: 0.15,
@@ -96,7 +96,7 @@ impl GrassBladVariant {
 /// Generate a grass blade mesh with the given variant parameters.
 ///
 /// Returns a Bevy Mesh suitable for rendering via instancing.
-pub fn generate_grass_blade(config: &GrassBladeMeshConfig, variant: GrassBladVariant) -> Mesh {
+pub fn generate_grass_blade(config: &GrassBladeMeshConfig, variant: GrassBladeVariant) -> Mesh {
     let segments = config.segments as usize;
     let height = config.blade_height;
     let width = config.blade_width;
@@ -193,7 +193,7 @@ pub fn generate_grass_blade(config: &GrassBladeMeshConfig, variant: GrassBladVar
 
 /// Generate all 8 grass blade variants.
 pub fn generate_grass_blade_variants(config: &GrassBladeMeshConfig) -> Vec<Mesh> {
-    let variants = GrassBladVariant::create_variants();
+    let variants = GrassBladeVariant::create_variants();
     variants
         .iter()
         .map(|v| generate_grass_blade(config, *v))
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn test_grass_blade_variants() {
-        let variants = GrassBladVariant::create_variants();
+        let variants = GrassBladeVariant::create_variants();
         assert_eq!(variants.len(), 8);
 
         // Check that variants have reasonable ranges
@@ -220,7 +220,7 @@ mod tests {
     #[test]
     fn test_generate_grass_blade() {
         let config = GrassBladeMeshConfig::default();
-        let variant = GrassBladVariant::create_variants()[0];
+        let variant = GrassBladeVariant::create_variants()[0];
         let mesh = generate_grass_blade(&config, variant);
 
         // Check that mesh has valid data

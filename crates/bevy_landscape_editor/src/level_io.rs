@@ -198,6 +198,36 @@ impl SynthesisDto {
 }
 
 // ---------------------------------------------------------------------------
+// Public helpers for parsing level-file JSON values
+// ---------------------------------------------------------------------------
+
+/// Parse `WaterSettings` + `OceanFftSettings` from the JSON value stored in a
+/// level file. `height` sets `WaterSettings::height` (derived from terrain
+/// metadata, not stored in the DTO).
+pub fn water_from_level_value(
+    v: &serde_json::Value,
+    height: Option<f32>,
+) -> Option<(WaterSettings, OceanFftSettings)> {
+    let wd: WaterDesc = serde_json::from_value(v.clone()).ok()?;
+    let mut ws = WaterSettings {
+        height: height.unwrap_or(0.0),
+        ..WaterSettings::default()
+    };
+    wd.settings.apply_to(&mut ws);
+    let mut fft = OceanFftSettings::default();
+    wd.fft.apply_to(&mut fft);
+    Some((ws, fft))
+}
+
+/// Parse `DetailSynthesisConfig` from the JSON value stored in a level file.
+pub fn synthesis_from_level_value(v: &serde_json::Value) -> Option<DetailSynthesisConfig> {
+    let dto: SynthesisDto = serde_json::from_value(v.clone()).ok()?;
+    let mut c = DetailSynthesisConfig::default();
+    dto.apply_to(&mut c);
+    Some(c)
+}
+
+// ---------------------------------------------------------------------------
 // Resource
 // ---------------------------------------------------------------------------
 
