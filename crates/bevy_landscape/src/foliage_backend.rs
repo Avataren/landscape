@@ -14,7 +14,6 @@ use crate::{
     foliage::{FoliageConfig, FoliageLodTier},
     foliage_gpu::{FoliageStagingBatch, FoliageStagingQueue},
     foliage_instance_gen::bake_and_write_foliage_instances,
-    foliage_plugin::FoliageMeshHandles,
     foliage_reload::FoliageConfigResource,
     foliage_tiles::read_foliage_tile,
     terrain::config::TerrainConfig,
@@ -125,7 +124,6 @@ pub fn poll_foliage_generation(
     foliage_source: Res<FoliageSourceDesc>,
     foliage_config_res: Res<FoliageConfigResource>,
     mut staging_queue: ResMut<FoliageStagingQueue>,
-    _handles: Res<FoliageMeshHandles>,
 ) {
     if !state.is_running {
         return;
