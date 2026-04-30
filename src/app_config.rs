@@ -1,4 +1,4 @@
-use bevy_landscape::{TerrainConfig, TerrainSourceDesc};
+use bevy_landscape::{scan_world_bounds, TerrainConfig, TerrainSourceDesc};
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -93,66 +93,6 @@ impl AppConfig {
     }
 }
 
-/// Scans `{tile_root}/height/L0/` for baked tile filenames (`{tx}_{ty}.bin`),
-/// derives the tile index extents, and returns `(world_min, world_max)` in
-/// world-space after applying `world_scale`.
-///
-/// Returns a `(-8192, 8192) * world_scale` fallback when no tiles are found
-/// (e.g. procedural-only mode) so the renderer still has valid bounds.
-fn scan_world_bounds(
-    tile_root: &std::path::Path,
-    tile_size: u32,
-    world_scale: f32,
-) -> (bevy::math::Vec2, bevy::math::Vec2) {
-    let fallback_half = 8192.0 * world_scale;
-    let fallback = (
-        bevy::math::Vec2::splat(-fallback_half),
-        bevy::math::Vec2::splat(fallback_half),
-    );
-
-    let l0_dir = tile_root.join("height").join("L0");
-    let Ok(dir) = std::fs::read_dir(&l0_dir) else {
-        return fallback;
-    };
-
-    let mut min_tx = i32::MAX;
-    let mut min_ty = i32::MAX;
-    let mut max_tx = i32::MIN;
-    let mut max_ty = i32::MIN;
-    let mut found = false;
-
-    for entry in dir.flatten() {
-        let name = entry.file_name();
-        let Some(stem) = name.to_str().and_then(|s| s.strip_suffix(".bin")) else {
-            continue;
-        };
-        // Tile names: "{tx}_{ty}" where both components may be negative.
-        // split_once('_') splits on the *first* underscore, which is always the
-        // separator between the two signed integers (e.g. "-32_-31" → "-32", "-31").
-        let Some((tx_str, ty_str)) = stem.split_once('_') else {
-            continue;
-        };
-        let (Ok(tx), Ok(ty)) = (tx_str.parse::<i32>(), ty_str.parse::<i32>()) else {
-            continue;
-        };
-        min_tx = min_tx.min(tx);
-        min_ty = min_ty.min(ty);
-        max_tx = max_tx.max(tx);
-        max_ty = max_ty.max(ty);
-        found = true;
-    }
-
-    if !found {
-        return fallback;
-    }
-
-    let ts = tile_size as f32 * world_scale;
-    (
-        bevy::math::Vec2::new(min_tx as f32 * ts, min_ty as f32 * ts),
-        bevy::math::Vec2::new((max_tx + 1) as f32 * ts, (max_ty + 1) as f32 * ts),
-    )
-}
-
 /// Reads `landscape.toml` next to the executable / workspace root.
 /// Panics with a clear message if the file is malformed.
 pub fn load() -> AppConfig {
@@ -197,48 +137,3 @@ pub fn load() -> AppConfig {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scan_world_bounds_derives_correct_extents() {
-        // Build a temporary tile directory matching the 16k baked layout:
-        // L0 tiles from (-32,-32) to (31,31) inclusive → world [-8192, 8192].
-        let dir = tempfile::tempdir().unwrap();
-        let l0 = dir.path().join("height").join("L0");
-        std::fs::create_dir_all(&l0).unwrap();
-
-        for tx in -32i32..=31 {
-            for ty in -32i32..=31 {
-                std::fs::write(l0.join(format!("{}_{}.bin", tx, ty)), b"").unwrap();
-            }
-        }
-
-        let (min, max) = scan_world_bounds(dir.path(), 256, 1.0);
-        assert_eq!(min, bevy::math::Vec2::splat(-8192.0));
-        assert_eq!(max, bevy::math::Vec2::splat(8192.0));
-    }
-
-    #[test]
-    fn scan_world_bounds_applies_world_scale() {
-        let dir = tempfile::tempdir().unwrap();
-        let l0 = dir.path().join("height").join("L0");
-        std::fs::create_dir_all(&l0).unwrap();
-        // Single 1×1 tile at origin → index range [0,0].
-        std::fs::write(l0.join("0_0.bin"), b"").unwrap();
-
-        let (min, max) = scan_world_bounds(dir.path(), 256, 2.0);
-        assert_eq!(min, bevy::math::Vec2::ZERO);
-        assert_eq!(max, bevy::math::Vec2::splat(512.0)); // 1 * 256 * 2.0
-    }
-
-    #[test]
-    fn scan_world_bounds_fallback_on_empty_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        // No L0 directory at all.
-        let (min, max) = scan_world_bounds(dir.path(), 256, 1.0);
-        assert_eq!(min, bevy::math::Vec2::splat(-8192.0));
-        assert_eq!(max, bevy::math::Vec2::splat(8192.0));
-    }
-}

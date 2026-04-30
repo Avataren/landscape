@@ -284,7 +284,7 @@ pub fn load_level(path: impl AsRef<Path>) -> Result<LevelDesc, String> {
 // Internal: tile-directory scan (shared logic with app_config)
 // ---------------------------------------------------------------------------
 
-fn scan_world_bounds(tile_root: &Path, tile_size: u32, world_scale: f32) -> (Vec2, Vec2) {
+pub fn scan_world_bounds(tile_root: &Path, tile_size: u32, world_scale: f32) -> (Vec2, Vec2) {
     let fallback_half = 8192.0 * world_scale;
     let fallback = (Vec2::splat(-fallback_half), Vec2::splat(fallback_half));
 
@@ -331,6 +331,40 @@ fn scan_world_bounds(tile_root: &Path, tile_size: u32, world_scale: f32) -> (Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scan_world_bounds_derives_correct_extents() {
+        let dir = tempfile::tempdir().unwrap();
+        let l0 = dir.path().join("height").join("L0");
+        std::fs::create_dir_all(&l0).unwrap();
+        for tx in -32i32..=31 {
+            for ty in -32i32..=31 {
+                std::fs::write(l0.join(format!("{}_{}.bin", tx, ty)), b"").unwrap();
+            }
+        }
+        let (min, max) = scan_world_bounds(dir.path(), 256, 1.0);
+        assert_eq!(min, Vec2::splat(-8192.0));
+        assert_eq!(max, Vec2::splat(8192.0));
+    }
+
+    #[test]
+    fn scan_world_bounds_applies_world_scale() {
+        let dir = tempfile::tempdir().unwrap();
+        let l0 = dir.path().join("height").join("L0");
+        std::fs::create_dir_all(&l0).unwrap();
+        std::fs::write(l0.join("0_0.bin"), b"").unwrap();
+        let (min, max) = scan_world_bounds(dir.path(), 256, 2.0);
+        assert_eq!(min, Vec2::ZERO);
+        assert_eq!(max, Vec2::splat(512.0));
+    }
+
+    #[test]
+    fn scan_world_bounds_fallback_on_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let (min, max) = scan_world_bounds(dir.path(), 256, 1.0);
+        assert_eq!(min, Vec2::splat(-8192.0));
+        assert_eq!(max, Vec2::splat(8192.0));
+    }
 
     #[test]
     fn runtime_derives_clipmap_levels_from_world_bounds() {

@@ -1,14 +1,6 @@
 pub mod bake;
 pub mod foliage;
-pub mod foliage_backend;
-pub mod foliage_generation;
-pub mod foliage_gpu;
 pub mod foliage_gpu_grass;
-pub mod foliage_instance_gen;
-pub mod foliage_reload;
-pub mod foliage_render;
-pub mod foliage_stream_queue;
-pub mod foliage_tiles;
 pub mod grass_material;
 pub mod level;
 pub mod metadata;
@@ -20,10 +12,10 @@ pub use foliage::{
     foliage_tile_path, painted_splatmap_path, procedural_mask_path, FoliageConfig, FoliageInstance,
     FoliageLodTier, FoliageSourceDesc,
 };
-pub use foliage_backend::FoliageGenerateRequest;
+pub use foliage::backend::FoliageGenerateRequest;
 pub use foliage_gpu_grass::{GpuGrassConfig, GpuGrassPlugin, GRASS_MAX_GRID};
-pub use foliage_reload::FoliageConfigResource;
-pub use level::{load_level, save_level, LevelDesc};
+pub use foliage::reload::FoliageConfigResource;
+pub use level::{load_level, save_level, scan_world_bounds, LevelDesc};
 pub use metadata::TerrainMetadata;
 pub use terrain::clipmap_texture::{
     compute_clip_levels, compute_initial_clip_levels, TerrainClipmapState,

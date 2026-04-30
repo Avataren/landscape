@@ -10,16 +10,14 @@
 //! The heavy work runs on a background OS thread; the main thread polls a
 //! channel for progress updates and the final completion signal.
 
-use crate::{
-    foliage::{FoliageConfig, FoliageLodTier},
-    foliage_gpu::{FoliageStagingBatch, FoliageStagingQueue},
-    foliage_instance_gen::bake_and_write_foliage_instances,
-    foliage_reload::FoliageConfigResource,
-    foliage_tiles::read_foliage_tile,
-    terrain::config::TerrainConfig,
-    terrain::world_desc::TerrainSourceDesc,
-    FoliageSourceDesc,
-};
+use super::{FoliageConfig, FoliageLodTier, FoliageSourceDesc};
+use super::gpu::{FoliageStagingBatch, FoliageStagingQueue};
+use super::instance_gen::bake_and_write_foliage_instances;
+use super::reload::FoliageConfigResource;
+use super::tiles::read_foliage_tile;
+use crate::metadata::TerrainMetadata;
+use crate::terrain::config::TerrainConfig;
+use crate::terrain::world_desc::TerrainSourceDesc;
 use bevy::prelude::*;
 use std::{
     path::{Path, PathBuf},
@@ -29,10 +27,6 @@ use std::{
     },
 };
 
-// ---------------------------------------------------------------------------
-// Events & resources
-// ---------------------------------------------------------------------------
-
 /// Send this message to trigger foliage (re)generation from the terrain heightmap.
 #[derive(Message, Default, Clone)]
 pub struct FoliageGenerateRequest;
@@ -40,11 +34,8 @@ pub struct FoliageGenerateRequest;
 /// Progress messages sent from the background thread to the main thread.
 #[derive(Debug)]
 pub enum GenerationProgress {
-    /// A tile finished baking. `done` out of `total`.
     TileComplete { done: usize, total: usize },
-    /// All tiles done, `total_instances` generated across all LOD0 tiles.
     Finished { total_instances: usize },
-    /// Generation failed with an error message.
     Failed(String),
 }
 
@@ -55,13 +46,8 @@ pub struct FoliageGenerationState {
     pub progress_message: String,
     pub tiles_done: usize,
     pub tiles_total: usize,
-    /// Receiver wrapped for Bevy resource compatibility.
     pub receiver: Option<Arc<Mutex<Receiver<GenerationProgress>>>>,
 }
-
-// ---------------------------------------------------------------------------
-// Systems
-// ---------------------------------------------------------------------------
 
 /// React to `FoliageGenerateRequest` messages and start the background thread.
 pub fn start_foliage_generation(
@@ -98,14 +84,7 @@ pub fn start_foliage_generation(
 
         std::thread::spawn(move || {
             run_generation(
-                foliage_root,
-                tile_root,
-                tile_size,
-                world_scale,
-                height_scale,
-                max_mip,
-                config,
-                tx,
+                foliage_root, tile_root, tile_size, world_scale, height_scale, max_mip, config, tx,
             );
         });
 
@@ -128,11 +107,7 @@ pub fn poll_foliage_generation(
     if !state.is_running {
         return;
     }
-
-    let Some(rx_arc) = state.receiver.clone() else {
-        return;
-    };
-
+    let Some(rx_arc) = state.receiver.clone() else { return };
     let Ok(rx) = rx_arc.lock() else { return };
     loop {
         match rx.try_recv() {
@@ -146,15 +121,10 @@ pub fn poll_foliage_generation(
                 state.receiver = None;
                 state.progress_message = format!("Done — {total_instances} instances generated.");
                 info!("Foliage generation complete: {} instances", total_instances);
-
-                // Load generated tiles into the staging queue
                 if let Some(foliage_root) = &foliage_source.foliage_root {
                     load_generated_tiles_into_queue(
                         foliage_root,
-                        foliage_config_res
-                            .0
-                            .as_ref()
-                            .unwrap_or(&FoliageConfig::default()),
+                        foliage_config_res.0.as_ref().unwrap_or(&FoliageConfig::default()),
                         &mut staging_queue,
                     );
                 }
@@ -183,24 +153,15 @@ pub fn load_existing_foliage_tiles(
     foliage_config_res: Res<FoliageConfigResource>,
     mut staging_queue: ResMut<FoliageStagingQueue>,
 ) {
-    let Some(foliage_root) = &foliage_source.foliage_root else {
-        return;
-    };
-
+    let Some(foliage_root) = &foliage_source.foliage_root else { return };
     let config = foliage_config_res.0.as_ref().cloned().unwrap_or_default();
     let lod0_dir = foliage_root.join("LOD0/L0");
-
     if !lod0_dir.exists() {
         return;
     }
-
     info!("Foliage: loading existing tiles from {:?}", foliage_root);
     load_generated_tiles_into_queue(foliage_root, &config, &mut staging_queue);
 }
-
-// ---------------------------------------------------------------------------
-// Background generation thread
-// ---------------------------------------------------------------------------
 
 fn run_generation(
     foliage_root: PathBuf,
@@ -212,17 +173,23 @@ fn run_generation(
     config: FoliageConfig,
     tx: Sender<GenerationProgress>,
 ) {
-    // Discover all L0 tile files
     let tiles = discover_height_tiles(tile_root.as_deref(), max_mip);
     let total = tiles.len();
 
     if total == 0 {
-        // No terrain tiles — generate a flat test area
         let _ = tx.send(GenerationProgress::Failed(
             "No terrain height tiles found; run bake_tiles first or load a level".to_string(),
         ));
         return;
     }
+
+    // Load water level from tile metadata (normalised [0,1] × height_scale → world Y).
+    let water_level = tile_root
+        .as_deref()
+        .map(TerrainMetadata::load)
+        .and_then(|m| m.water_level)
+        .map(|wl| wl * height_scale)
+        .unwrap_or(f32::NEG_INFINITY);
 
     let mut total_instances = 0usize;
 
@@ -230,83 +197,59 @@ fn run_generation(
         match bake_and_write_foliage_instances(
             &foliage_root,
             tile_size,
-            0, // L0 only for now
+            0,
             tx_tile,
             ty_tile,
             world_scale,
             height_scale,
             &height_data,
             &config,
+            water_level,
         ) {
             Ok(()) => {
-                // Count instances in the written LOD0 tile
-                let lod0_path = crate::foliage::foliage_tile_path(
-                    &foliage_root,
-                    FoliageLodTier::Lod0,
-                    0,
-                    tx_tile,
-                    ty_tile,
+                let lod0_path = super::foliage_tile_path(
+                    &foliage_root, FoliageLodTier::Lod0, 0, tx_tile, ty_tile,
                 );
                 if let Ok(instances) = read_foliage_tile(&lod0_path) {
                     total_instances += instances.len();
                 }
             }
             Err(e) => {
-                let _ = tx.send(GenerationProgress::Failed(format!(
-                    "Tile ({tx_tile},{ty_tile}): {e}"
-                )));
+                let _ = tx.send(GenerationProgress::Failed(
+                    format!("Tile ({tx_tile},{ty_tile}): {e}"),
+                ));
                 return;
             }
         }
-
-        let _ = tx.send(GenerationProgress::TileComplete {
-            done: done + 1,
-            total,
-        });
+        let _ = tx.send(GenerationProgress::TileComplete { done: done + 1, total });
     }
 
     let _ = tx.send(GenerationProgress::Finished { total_instances });
 }
 
-/// Returns `(tx, ty, height_data_f32)` for every L0 height tile found on disk.
 fn discover_height_tiles(tile_root: Option<&Path>, _max_mip: u8) -> Vec<(i32, i32, Vec<f32>)> {
-    let Some(root) = tile_root else {
-        return vec![];
-    };
-
+    let Some(root) = tile_root else { return vec![] };
     let l0_dir = root.join("height/L0");
     if !l0_dir.exists() {
         return vec![];
     }
-
+    let Ok(entries) = std::fs::read_dir(&l0_dir) else { return vec![] };
     let mut tiles = vec![];
-
-    let Ok(entries) = std::fs::read_dir(&l0_dir) else {
-        return tiles;
-    };
 
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("bin") {
             continue;
         }
-
-        // Parse tx_ty from filename like "3_-2.bin"
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let parts: Vec<&str> = stem.split('_').collect();
         if parts.len() < 2 {
             continue;
         }
         let tx = parts[0].parse::<i32>().unwrap_or(0);
-        // Handle negative coordinates: filename might be "3_-2.bin" → stem "3_-2"
         let ty_str = parts[1..].join("_");
         let ty = ty_str.parse::<i32>().unwrap_or(0);
-
-        // Read R16Unorm tile → f32 heights
-        let Ok(bytes) = std::fs::read(&path) else {
-            continue;
-        };
-        // Each texel is 2 bytes (R16Unorm), 256×256 = 65536 texels
+        let Ok(bytes) = std::fs::read(&path) else { continue };
         if bytes.len() < 4 {
             continue;
         }
@@ -314,19 +257,12 @@ fn discover_height_tiles(tile_root: Option<&Path>, _max_mip: u8) -> Vec<(i32, i3
             .chunks_exact(2)
             .map(|b| u16::from_le_bytes([b[0], b[1]]) as f32 / 65535.0)
             .collect();
-
         tiles.push((tx, ty, height_data));
     }
 
     tiles
 }
 
-// ---------------------------------------------------------------------------
-// Load tiles from disk into staging queue
-// ---------------------------------------------------------------------------
-
-/// Scan foliage_root for all LOD0/L0 tiles and push them into the staging queue.
-/// LOD1 and LOD2 tiles are loaded similarly.
 pub fn load_generated_tiles_into_queue(
     foliage_root: &Path,
     _config: &FoliageConfig,
@@ -337,13 +273,9 @@ pub fn load_generated_tiles_into_queue(
         if !lod_dir.exists() {
             continue;
         }
+        let Ok(entries) = std::fs::read_dir(&lod_dir) else { continue };
 
-        let Ok(entries) = std::fs::read_dir(&lod_dir) else {
-            continue;
-        };
-
-        // Collect all instances for this LOD (across all tiles) grouped by variant
-        let mut per_variant: [Vec<crate::foliage::FoliageInstance>; 8] =
+        let mut per_variant: [Vec<super::FoliageInstance>; 8] =
             std::array::from_fn(|_| Vec::new());
 
         for entry in entries.flatten() {
@@ -351,16 +283,13 @@ pub fn load_generated_tiles_into_queue(
             if path.extension().and_then(|e| e.to_str()) != Some("bin") {
                 continue;
             }
-            let Ok(instances) = read_foliage_tile(&path) else {
-                continue;
-            };
+            let Ok(instances) = read_foliage_tile(&path) else { continue };
             for inst in instances {
                 let v = inst.variant_id.min(7) as usize;
                 per_variant[v].push(inst);
             }
         }
 
-        // Push one batch per variant
         for (variant_id, instances) in per_variant.iter().enumerate() {
             if instances.is_empty() {
                 continue;
@@ -375,10 +304,6 @@ pub fn load_generated_tiles_into_queue(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -389,7 +314,6 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let mut queue = FoliageStagingQueue::default();
         let config = FoliageConfig::default();
-        // No tiles present — should not panic, queue stays empty
         load_generated_tiles_into_queue(dir.path(), &config, &mut queue);
         assert!(queue.batches.is_empty());
     }

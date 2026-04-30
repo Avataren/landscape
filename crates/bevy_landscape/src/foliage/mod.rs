@@ -17,6 +17,15 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub mod backend;
+pub mod generation;
+pub mod gpu;
+pub mod instance_gen;
+pub mod reload;
+pub mod render;
+pub mod stream_queue;
+pub mod tiles;
+
 /// Configuration for foliage generation and rendering.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FoliageConfig {
@@ -56,7 +65,7 @@ impl Default for FoliageConfig {
             lod2_density: 0.1,
             instances_per_cell: 100,
             random_seed: 42,
-            slope_threshold: 0.8, // steeper than this = no grass
+            slope_threshold: 0.8,
             altitude_min: -8192.0,
             altitude_max: 8192.0,
             water_proximity_falloff: 50.0,
@@ -92,100 +101,67 @@ pub struct FoliageInstance {
 }
 
 impl FoliageInstance {
-    /// Create a new foliage instance.
     pub fn new(position: Vec3, rotation: Quat, scale: Vec3, variant_id: u32) -> Self {
         Self {
             position,
             rotation,
             scale,
-            variant_id: variant_id % 8, // Clamp to valid variant range
+            variant_id: variant_id % 8,
         }
     }
 
-    /// Serialize to binary format (48 bytes).
     pub fn to_bytes(&self) -> [u8; 48] {
         let mut bytes = [0u8; 48];
-
-        // Position (Vec3, 12 bytes, bytes 0-11)
         bytes[0..4].copy_from_slice(&self.position.x.to_le_bytes());
         bytes[4..8].copy_from_slice(&self.position.y.to_le_bytes());
         bytes[8..12].copy_from_slice(&self.position.z.to_le_bytes());
-
-        // Rotation (Quat, 16 bytes, bytes 12-27)
         bytes[12..16].copy_from_slice(&self.rotation.x.to_le_bytes());
         bytes[16..20].copy_from_slice(&self.rotation.y.to_le_bytes());
         bytes[20..24].copy_from_slice(&self.rotation.z.to_le_bytes());
         bytes[24..28].copy_from_slice(&self.rotation.w.to_le_bytes());
-
-        // Scale (Vec3, 12 bytes, bytes 28-39)
         bytes[28..32].copy_from_slice(&self.scale.x.to_le_bytes());
         bytes[32..36].copy_from_slice(&self.scale.y.to_le_bytes());
         bytes[36..40].copy_from_slice(&self.scale.z.to_le_bytes());
-
-        // Variant ID (u32, 4 bytes, bytes 40-43)
         bytes[40..44].copy_from_slice(&self.variant_id.to_le_bytes());
-
-        // Padding (u32, 4 bytes, bytes 44-47) — set to 0
-        // (already initialized to 0)
-
         bytes
     }
 
-    /// Deserialize from binary format (48 bytes).
     pub fn from_bytes(bytes: &[u8; 48]) -> Self {
         let position = Vec3::new(
             f32::from_le_bytes(*<&[u8; 4]>::try_from(&bytes[0..4]).unwrap()),
             f32::from_le_bytes(*<&[u8; 4]>::try_from(&bytes[4..8]).unwrap()),
             f32::from_le_bytes(*<&[u8; 4]>::try_from(&bytes[8..12]).unwrap()),
         );
-
         let rotation = Quat::from_xyzw(
             f32::from_le_bytes(*<&[u8; 4]>::try_from(&bytes[12..16]).unwrap()),
             f32::from_le_bytes(*<&[u8; 4]>::try_from(&bytes[16..20]).unwrap()),
             f32::from_le_bytes(*<&[u8; 4]>::try_from(&bytes[20..24]).unwrap()),
             f32::from_le_bytes(*<&[u8; 4]>::try_from(&bytes[24..28]).unwrap()),
         );
-
         let scale = Vec3::new(
             f32::from_le_bytes(*<&[u8; 4]>::try_from(&bytes[28..32]).unwrap()),
             f32::from_le_bytes(*<&[u8; 4]>::try_from(&bytes[32..36]).unwrap()),
             f32::from_le_bytes(*<&[u8; 4]>::try_from(&bytes[36..40]).unwrap()),
         );
-
         let variant_id = u32::from_le_bytes(*<&[u8; 4]>::try_from(&bytes[40..44]).unwrap()) % 8;
-
-        Self {
-            position,
-            rotation,
-            scale,
-            variant_id,
-        }
+        Self { position, rotation, scale, variant_id }
     }
 }
 
 /// LOD tier for foliage instancing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum FoliageLodTier {
-    /// LOD0: 0 metres to `FoliageConfig::lod0_distance`
     #[default]
     Lod0 = 0,
-    /// LOD1: `lod0_distance` to `lod1_distance`
     Lod1 = 1,
-    /// LOD2: `lod1_distance` to `lod2_distance` (or beyond)
     Lod2 = 2,
 }
 
 impl FoliageLodTier {
-    /// All LOD tiers.
     pub fn all() -> &'static [FoliageLodTier] {
-        &[
-            FoliageLodTier::Lod0,
-            FoliageLodTier::Lod1,
-            FoliageLodTier::Lod2,
-        ]
+        &[FoliageLodTier::Lod0, FoliageLodTier::Lod1, FoliageLodTier::Lod2]
     }
 
-    /// Get the directory suffix for this LOD tier (e.g., "LOD0", "LOD1", "LOD2").
     pub fn dir_suffix(&self) -> &'static str {
         match self {
             FoliageLodTier::Lod0 => "LOD0",
@@ -247,10 +223,8 @@ mod tests {
             Vec3::splat(1.0),
             5,
         );
-
         let bytes = inst.to_bytes();
         let restored = FoliageInstance::from_bytes(&bytes);
-
         assert!(restored.position.abs_diff_eq(inst.position, 1e-6));
         assert!(restored.rotation.abs_diff_eq(inst.rotation, 1e-6));
         assert!(restored.scale.abs_diff_eq(inst.scale, 1e-6));
