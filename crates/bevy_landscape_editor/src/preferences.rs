@@ -105,7 +105,11 @@ fn preferences_system(
     if let Some(maybe_path) = picked {
         dialog.pick_rx = None;
         if let Some(p) = maybe_path {
-            dialog.draft.default_level = Some(p.display().to_string());
+            let stored = std::env::current_dir()
+                .ok()
+                .and_then(|cwd| p.strip_prefix(&cwd).ok().map(|r| r.to_path_buf()))
+                .unwrap_or(p);
+            dialog.draft.default_level = Some(stored.display().to_string());
         }
     }
 
