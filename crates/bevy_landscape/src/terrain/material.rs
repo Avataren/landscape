@@ -41,7 +41,7 @@ pub struct MaterialSlotGpu {
 //   offset 20 – patch_resolution  f32
 //   offset 24 – world_bounds      vec4<f32>   (min_x, min_z, max_x, max_z)
 //   offset 40 – bounds_fade       vec4<f32>   (fade_distance, use_macro_color_map, flip_v, show_wireframe)
-//   offset 56 – debug_flags       vec4<f32>   (show_normals_only, _, _, _)
+//   offset 56 – debug_flags       vec4<f32>   (fragment_debug_mode, ssao_debug, pbr_debug, _)
 //   offset 72 – clip_levels[0]    vec4<f32>
 //   offset 88 – clip_levels[1]    vec4<f32>
 //   …
@@ -74,10 +74,10 @@ pub struct TerrainMaterialUniforms {
     /// x = fade distance, y = use_macro_color, z = flip_v, w = show_wireframe.
     pub bounds_fade: Vec4,
     /// Per-pixel debug toggles applied in the fragment shader.
-    /// x = fragment_debug_mode (0 = normal shading, 1 = normals as colour, 2 = detail height).
-    /// y = use_baked_normals (1 = sample baked RG8Snorm normal array for shading,
-    ///     0 = recompute via finite-differences on the height clipmap).
-    /// z, w = reserved.
+    /// x = fragment_debug_mode (0 = normal shading, 1 = normals as colour, 2 = detail height, 3 = LOD/morph).
+    /// y = ssao_debug (1 = render SSAO texture as greyscale, overrides all other shading).
+    /// z = pbr_debug (0 = off, 1 = raw normal-map, 2 = ORM roughness).
+    /// w = reserved.
     pub debug_flags: Vec4,
     /// Per-LOD clipmap data: (origin_x, origin_z, inv_ring_span, texel_world_size).
     /// Indexed by LOD level (0 = finest).  Unused entries are zero.

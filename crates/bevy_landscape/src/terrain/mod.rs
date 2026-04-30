@@ -20,7 +20,7 @@ pub mod streamer;
 pub mod synthesis_cpu;
 pub mod world_desc;
 
-pub use debug::TerrainDebugPlugin;
+pub use debug::{TerrainDebugConfig, TerrainDebugPlugin};
 pub use world_desc::TerrainSourceDesc;
 
 use bevy::{

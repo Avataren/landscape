@@ -1,4 +1,5 @@
 mod cloud_panel;
+mod debug_panel;
 mod diffusion_panel;
 mod fog_panel;
 mod foliage_panel;
@@ -18,6 +19,7 @@ use bevy::prelude::*;
 use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 
 use cloud_panel::CloudPanelPlugin;
+use debug_panel::DebugPanelPlugin;
 use fog_panel::FogPanelPlugin;
 use foliage_panel::FoliagePanelPlugin;
 use generator_panel::GeneratorPanelPlugin;
@@ -44,6 +46,7 @@ impl Plugin for LandscapeEditorPlugin {
         }
         app.init_resource::<toolbar::ToolbarState>();
         app.add_plugins(CloudPanelPlugin)
+            .add_plugins(DebugPanelPlugin)
             .add_plugins(FogPanelPlugin)
             .add_plugins(FoliagePanelPlugin)
             .add_plugins(GeneratorPanelPlugin)

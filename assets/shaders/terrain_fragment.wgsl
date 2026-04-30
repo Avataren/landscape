@@ -880,6 +880,18 @@ fn fragment(in: TerrainVOut) -> @location(0) vec4<f32> {
     // Apply per-slot PBR normal maps on top of the macro normal.
     let n = apply_normal_detail(n_macro, in.world_pos.xz, in.world_pos.y, slope_deg);
 
+    // --- SSAO visualizer (debug_flags.y == 1) — highest priority ---
+    // Shows the raw SSAO texture as greyscale.  Falls back to white when SSAO
+    // is disabled (Bevy binds a 1×1 opaque-white fallback texture in that case).
+    if terrain.debug_flags.y > 0.5 {
+        let ao = textureLoad(
+            view_bindings::screen_space_ambient_occlusion_texture,
+            vec2<i32>(in.clip_pos.xy),
+            0,
+        ).r;
+        return vec4<f32>(ao, ao, ao, 1.0);
+    }
+
     // --- PBR texture debug (debug_flags.z) ---
     // Samples slot 0 directly at world UV — bypasses zone blending so you
     // see exactly what the GPU reads from the texture array.

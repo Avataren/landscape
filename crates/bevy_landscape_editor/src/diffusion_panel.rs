@@ -1028,8 +1028,9 @@ pub(crate) fn draw_diffusion_tab(ui: &mut egui::Ui, state: &mut DiffusionPanelSt
 
                     ui.add_space(6.0);
                     ui.label("Selected region");
+                    let zoom_size = preview_w * 0.25;
                     let (zoom_response, zoom_painter) = ui.allocate_painter(
-                        egui::vec2(preview_w, preview_w),
+                        egui::vec2(zoom_size, zoom_size),
                         egui::Sense::hover(),
                     );
                     let zoom_rect = zoom_response.rect;
@@ -1124,26 +1125,39 @@ pub(crate) fn draw_diffusion_tab(ui: &mut egui::Ui, state: &mut DiffusionPanelSt
                     }
                 });
 
-                if let Some(tex) = &state.generated_overview_texture {
-                    let size = tex.size_vec2();
-                    let tex_aspect = (size.x / size.y).max(0.01);
+                if state.generated_overview_texture.is_some()
+                    || state.generated_selected_texture.is_some()
+                {
+                    let thumb_w = preview_w * 0.25;
                     ui.add_space(4.0);
-                    ui.label("Generated world overview");
-                    ui.add(egui::Image::new((
-                        tex.id(),
-                        egui::vec2(preview_w, (preview_w / tex_aspect).max(40.0)),
-                    )));
-                }
-
-                if let Some(tex) = &state.generated_selected_texture {
-                    ui.add_space(6.0);
-                    ui.label(
-                        state
-                            .generated_selected_mode
-                            .unwrap_or(GeneratedPreviewMode::Coarse)
-                            .label(),
-                    );
-                    ui.add(egui::Image::new((tex.id(), egui::vec2(preview_w, preview_w))));
+                    ui.horizontal(|ui| {
+                        if let Some(tex) = &state.generated_overview_texture {
+                            let size = tex.size_vec2();
+                            let tex_aspect = (size.x / size.y).max(0.01);
+                            let thumb_h = (thumb_w / tex_aspect).max(20.0);
+                            ui.allocate_ui(egui::vec2(thumb_w, thumb_h + 20.0), |ui| {
+                                ui.label("Overview");
+                                ui.add(egui::Image::new((
+                                    tex.id(),
+                                    egui::vec2(thumb_w, thumb_h),
+                                )));
+                            });
+                        }
+                        if let Some(tex) = &state.generated_selected_texture {
+                            ui.allocate_ui(egui::vec2(thumb_w, thumb_w + 20.0), |ui| {
+                                ui.label(
+                                    state
+                                        .generated_selected_mode
+                                        .unwrap_or(GeneratedPreviewMode::Coarse)
+                                        .label(),
+                                );
+                                ui.add(egui::Image::new((
+                                    tex.id(),
+                                    egui::vec2(thumb_w, thumb_w),
+                                )));
+                            });
+                        }
+                    });
                 }
             }
 

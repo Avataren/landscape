@@ -143,7 +143,7 @@ fn rendering_panel_system(
                     SsaoQuality::Ultra,
                 ] {
                     let selected = ssao.quality == q;
-                    if ui.radio(selected, q.label()).clicked() && selected {
+                    if ui.radio(selected, q.label()).clicked() {
                         ssao.quality = q;
                     }
                 }

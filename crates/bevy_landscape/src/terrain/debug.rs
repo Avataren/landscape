@@ -26,6 +26,8 @@ pub struct TerrainDebugConfig {
     pub fragment_debug_mode: u8,
     pub show_ruler: bool,
     pub show_pbr_debug: u8,
+    /// When true, samples the SSAO texture and renders it as greyscale.
+    pub ssao_debug: bool,
 }
 
 impl Default for TerrainDebugConfig {
@@ -38,6 +40,7 @@ impl Default for TerrainDebugConfig {
             fragment_debug_mode: 0,
             show_ruler: false,
             show_pbr_debug: 0,
+            ssao_debug: false,
         }
     }
 }
@@ -167,6 +170,11 @@ pub fn sync_wireframe_modes(
     let desired_normals = debug_cfg.fragment_debug_mode as f32;
     if material.params.debug_flags.x != desired_normals {
         material.params.debug_flags.x = desired_normals;
+    }
+
+    let desired_ssao_debug = if debug_cfg.ssao_debug { 1.0 } else { 0.0 };
+    if material.params.debug_flags.y != desired_ssao_debug {
+        material.params.debug_flags.y = desired_ssao_debug;
     }
 
     let desired_pbr = debug_cfg.show_pbr_debug as f32;

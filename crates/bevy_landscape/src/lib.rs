@@ -32,5 +32,6 @@ pub use terrain::physics_colliders::{LocalColliderState, ShowTerrainCollision};
 pub use terrain::resources::TerrainViewState;
 pub use terrain::source_heightmap::SourceHeightmapState;
 pub use terrain::{
-    ReloadTerrainRequest, TerrainDebugPlugin, TerrainPlugin, TerrainSourceDesc, TerrainSystemSet,
+    ReloadTerrainRequest, TerrainDebugConfig, TerrainDebugPlugin, TerrainPlugin, TerrainSourceDesc,
+    TerrainSystemSet,
 };

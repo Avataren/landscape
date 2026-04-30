@@ -17,7 +17,7 @@
 //   offset  24 – (8 bytes padding — next field is vec4, align 16)
 //   offset  32 – world_bounds      vec4<f32>  (min_x, min_z, max_x, max_z)
 //   offset  48 – bounds_fade       vec4<f32>  (fade_dist, use_macro_color, flip_v, show_wireframe)
-//   offset  64 – debug_flags       vec4<f32>  (x = fragment_debug_mode, y = use_baked_normals, zw reserved)
+//   offset  64 – debug_flags       vec4<f32>  (x = fragment_debug_mode, y = ssao_debug, z = pbr_debug, w reserved)
 //   offset  80 – clip_levels[0]    vec4<f32>  (origin_x, origin_z, inv_ring_span, texel_world_size)
 //     ...
 //   offset 592 – clip_levels[31]
@@ -47,7 +47,7 @@ struct TerrainParams {
     patch_resolution:   f32,
     world_bounds:       vec4<f32>, // (min_x, min_z, max_x, max_z)
     bounds_fade:        vec4<f32>, // x = fade_dist, y = use_macro_color, z = flip_v, w = show_wireframe
-    debug_flags:        vec4<f32>, // x = fragment_debug_mode, y = use_baked_normals, zw reserved
+    debug_flags:        vec4<f32>, // x = fragment_debug_mode, y = ssao_debug, z = pbr_debug, w reserved
     clip_levels:        array<vec4<f32>, 32>,
     slot_header:        vec4<f32>, // x = active slot count
     slots:              array<MaterialSlotGpu, 8>,
