@@ -171,6 +171,11 @@ fn fragment(
 
     var pbr_input = pbr_input_from_standard_material(in, is_front);
 
+    // The SSAO texture at these pixels contains terrain occlusion, not water
+    // surface occlusion. Water is a flat transmissive surface with no self-AO.
+    pbr_input.diffuse_occlusion = vec3<f32>(1.0);
+    pbr_input.specular_occlusion = 1.0;
+
     let deep_color            = water_bindings::material.deep_color;
     let shallow_color         = water_bindings::material.shallow_color;
     let edge_color            = water_bindings::material.edge_color;
