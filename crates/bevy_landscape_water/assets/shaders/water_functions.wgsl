@@ -538,12 +538,60 @@ fn get_detail_wave_result(p: vec2<f32>, footprint: f32) -> DetailWaveResult {
 }
 
 // -----------------------------------------------------------------------
-// 2-D value noise primitive shared by macro-noise and capillary-noise
-// passes.  Returns (value ∈ [0,1], dvalue/dx, dvalue/dy).
+// 2-D value noise primitive used by macro-noise.
+// Returns (value ∈ [0,1], dvalue/dx, dvalue/dy).
 // -----------------------------------------------------------------------
 fn cap_hash21(p: vec2<f32>) -> f32 {
     let h = dot(p, vec2(127.1, 311.7));
     return fract(sin(h) * 43758.5453);
+}
+
+// -----------------------------------------------------------------------
+// Gradient (Perlin) noise for capillary slopes.
+//
+// Value noise derivatives go to zero at every lattice boundary (the du term
+// is 6·f·(1-f), which is 0 at f=0 and f=1).  These zeros show as visible
+// flat strips across the water at each cell edge — one per lattice period.
+//
+// Perlin gradient noise uses random unit vectors at lattice points instead
+// of scalar hash values.  The analytic slope has two additive terms:
+//   • The interpolated gradient vectors (non-zero everywhere, including at
+//     lattice boundaries) — this is what eliminates the strip pattern.
+//   • The du term (still zero at boundaries, but now only a minor correction
+//     rather than the sole source of slope).
+// The resulting slope field is smooth and avoids the periodic zero-crossings.
+// -----------------------------------------------------------------------
+fn cap_grad2(p: vec2<f32>) -> vec2<f32> {
+    let h = fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+    let a = h * 6.28318530718;
+    return vec2<f32>(cos(a), sin(a));
+}
+
+// Returns the analytic slope (dv/dx, dv/dz) of bilinear-smoothstep Perlin noise.
+fn cap_gradient_noise_slope(p: vec2<f32>) -> vec2<f32> {
+    let i  = floor(p);
+    let f  = p - i;
+    let u  = f * f * (3.0 - 2.0 * f);
+    let du = 6.0 * f * (1.0 - f);
+
+    let ga = cap_grad2(i);
+    let gb = cap_grad2(i + vec2(1.0, 0.0));
+    let gc = cap_grad2(i + vec2(0.0, 1.0));
+    let gd = cap_grad2(i + vec2(1.0, 1.0));
+
+    // Dot products with corner offsets
+    let va = dot(ga, f);
+    let vb = dot(gb, f - vec2(1.0, 0.0));
+    let vc = dot(gc, f - vec2(0.0, 1.0));
+    let vd = dot(gd, f - vec2(1.0, 1.0));
+
+    // Analytic slope: interpolated gradient vectors (always non-zero)
+    // plus the du correction from the smoothstep weighting.
+    let slope_x = mix(mix(ga.x, gb.x, u.x), mix(gc.x, gd.x, u.x), u.y)
+                + du.x * mix(vb - va, vd - vc, u.y);
+    let slope_y = mix(mix(ga.y, gb.y, u.x), mix(gc.y, gd.y, u.x), u.y)
+                + du.y * mix(vc - va, vd - vb, u.x);
+    return vec2<f32>(slope_x, slope_y);
 }
 
 // Two-channel hash for voronoi cell offsets.
@@ -733,6 +781,8 @@ fn capillary_octave(
     drift_b:  f32,
     height:   f32,
     seed:     vec2<f32>,
+    rot_cos:  f32,
+    rot_sin:  f32,
     footprint: f32,
 ) -> vec2<f32> {
     // Fade out octaves that fall below the pixel footprint to avoid alias.
@@ -740,11 +790,24 @@ fn capillary_octave(
     if lod_w <= 0.0 {
         return vec2(0.0);
     }
-    let freq  = 1.0 / wavelen;
-    let drift = wind * drift_a + cross * drift_b;
-    let pp    = (p - drift * t) * freq + seed;
-    let n     = cap_value_noise_d(pp);
-    return vec2(n.y, n.z) * freq * height * lod_w;
+    let freq    = 1.0 / wavelen;
+    let drift   = wind * drift_a + cross * drift_b;
+    // Rotate the sampling coordinate so the value-noise integer grid is not
+    // axis-aligned with world XZ.  Without this the cells appear as visible
+    // square patches on the water surface (identical issue to macro noise).
+    let p_drift = p - drift * t;
+    let p_rot   = vec2<f32>(
+         rot_cos * p_drift.x - rot_sin * p_drift.y,
+         rot_sin * p_drift.x + rot_cos * p_drift.y,
+    );
+    let pp        = p_rot * freq + seed;
+    let grad_pp   = cap_gradient_noise_slope(pp);
+    // Rotate gradient back into world XZ (R^T · grad).
+    let grad_world = vec2<f32>(
+         rot_cos * grad_pp.x + rot_sin * grad_pp.y,
+        -rot_sin * grad_pp.x + rot_cos * grad_pp.y,
+    );
+    return grad_world * freq * height * lod_w;
 }
 
 fn capillary_slope(p: vec2<f32>, footprint: f32) -> vec2<f32> {
@@ -752,10 +815,16 @@ fn capillary_slope(p: vec2<f32>, footprint: f32) -> vec2<f32> {
     let wind  = dominant_wind_direction();
     let cross = vec2(-wind.y, wind.x);
 
+    // Irrational rotation angles — distinct from the macro-noise octave angles
+    // (0.643, 1.274, 2.011) so no two noise grids are ever parallel.
+    let r0 = vec2<f32>(cos(0.31), sin(0.31));  // ~17.8°
+    let r1 = vec2<f32>(cos(0.97), sin(0.97));  // ~55.6°
+    let r2 = vec2<f32>(cos(1.63), sin(1.63));  // ~93.4°
+
     var slope = vec2(0.0);
-    slope += capillary_octave(p, t, wind, cross, 3.0, 0.55, 0.18, 0.085, vec2( 0.0,  0.0), footprint);
-    slope += capillary_octave(p, t, wind, cross, 1.1, 0.95, 0.22, 0.024, vec2(17.3, 41.7), footprint);
-    slope += capillary_octave(p, t, wind, cross, 0.4, 1.30, 0.31, 0.0058, vec2(-9.1, 23.5), footprint);
+    slope += capillary_octave(p, t, wind, cross, 3.0, 0.55, 0.18, 0.085, vec2( 0.0,  0.0), r0.x, r0.y, footprint);
+    slope += capillary_octave(p, t, wind, cross, 1.1, 0.95, 0.22, 0.024, vec2(17.3, 41.7), r1.x, r1.y, footprint);
+    slope += capillary_octave(p, t, wind, cross, 0.4, 1.30, 0.31, 0.0058, vec2(-9.1, 23.5), r2.x, r2.y, footprint);
     return slope;
 }
 

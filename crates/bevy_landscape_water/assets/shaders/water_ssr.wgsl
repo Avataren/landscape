@@ -113,10 +113,16 @@ fn screen_space_reflect(
 
                 let hit_uv = ndc_to_uv(hi.xy);
 
+                // Distance fade: rays that travel farther hit at coarser step
+                // precision and produce block-shaped patches when the reflection
+                // direction sits near a scene discontinuity (e.g. the terrain /
+                // sky horizon).  Quadratic decay gives full confidence to close
+                // hits and zero at the maximum ray distance.
+                let dist_fade  = 1.0 - t * t;
                 // Fade within 6 % of each screen edge to prevent hard pop-in
                 // when a reflected object exits the frame.
                 let edge       = min(min(hit_uv.x, 1.0 - hit_uv.x), min(hit_uv.y, 1.0 - hit_uv.y));
-                let confidence = smoothstep(0.0, 0.06, edge);
+                let confidence = smoothstep(0.0, 0.06, edge) * dist_fade;
                 if confidence <= 0.0 { return vec4(0.0); }
 
                 let color = textureSample(
