@@ -253,13 +253,32 @@ and coastlines without per-texel material data.
 
 ---
 
-### Physics Colliders (Avian3D)
+### Physics Colliders (avian3d)
 
 The crate integrates with [avian3d](https://github.com/Jondolf/avian) for collision.
 A coarse global heightfield collider covers the entire terrain footprint at a reduced
 resolution for broad character physics.  As the camera moves, per-tile heightfield
 colliders are added and removed at fine resolution for the loaded region immediately
 around the player, allowing accurate contact with small terrain features.
+
+---
+
+### GPU Grass
+
+`GpuGrassPlugin` renders grass without any pre-baking step.  A single mesh with
+`grid_size² × 12` dummy vertices is drawn every frame; the vertex shader reads
+the heightmap directly to place each blade on the terrain surface, filtering by
+slope and altitude.  Only a small per-frame uniform write from the CPU is needed.
+
+Key types:
+
+| Type | Description |
+|------|-------------|
+| `GpuGrassPlugin` | Bevy plugin — add to `App` to enable grass |
+| `GpuGrassConfig` | Grid size, spacing, blade dimensions, slope/altitude filters, wind |
+| `GpuGrassMaterial` | `AsBindGroup` material; binds heightmap + `GrassParamsGpu` |
+
+Grass renders at `grid_size × spacing / 2` radius around the camera (default ~96 m).
 
 ---
 
@@ -315,6 +334,8 @@ before `TerrainPlugin`; the duplicate is suppressed.
 
 ### Module Map
 
+#### Terrain renderer (`terrain/`)
+
 | Module | Responsibility |
 |--------|---------------|
 | `config.rs` | `TerrainConfig` resource |
@@ -327,14 +348,49 @@ before `TerrainPlugin`; the duplicate is suppressed.
 | `resources.rs` | `TerrainResidency`, `TerrainViewState`, `TileKey`, `TileState` |
 | `patch_mesh.rs` | Builds the shared `P×P` patch mesh |
 | `material.rs` | `TerrainMaterial` and `TerrainMaterialUniforms` |
+| `material_slots.rs` | `MaterialLibrary`; altitude/slope-based slot blending |
 | `macro_color.rs` | Loads and downsamples the world-aligned diffuse map |
+| `pbr_textures.rs` | Detail texture arrays (albedo/normal/ORM per slot) |
+| `detail_synthesis.rs` | CPU-side detail texture blending helpers |
 | `collision.rs` | Per-tile heightfield colliders (avian3d) |
 | `physics_colliders.rs` | Coarse global heightfield; tile collider sync |
 | `components.rs` | `TerrainCamera` marker component |
+| `source_heightmap.rs` | Direct heightmap sampling for non-streaming queries |
+| `synthesis_cpu.rs` | CPU heightmap synthesis utilities |
 | `render/` | GPU types, draw commands, render plugin |
 | `debug.rs` | `TerrainDebugPlugin` (wireframe toggle, stats overlay) |
+
+#### Foliage (`foliage*.rs`, `grass_*.rs`)
+
+| Module | Responsibility |
+|--------|---------------|
+| `foliage_gpu_grass.rs` | `GpuGrassPlugin` — vertex-shader grass, zero pre-bake |
+| `grass_material.rs` | `GpuGrassMaterial` AsBindGroup implementation |
+| `grass_mesh.rs` | Procedural grass blade mesh variants |
+| `foliage.rs` | `FoliageInstance` type + binary tile serialization |
+| `foliage_plugin.rs` | `FoliagePlugin` — streaming foliage system |
+| `foliage_backend.rs` | Instance generation backend (bake-time pipeline) |
+| `foliage_generation.rs` | Procedural density mask + instance placement |
+| `foliage_instance_gen.rs` | Instance generation helpers |
+| `foliage_reload.rs` | Hot-reload coordination with `ReloadTerrainRequest` |
+| `foliage_stream_queue.rs` | Background foliage tile loader |
+| `foliage_gpu.rs` | GPU buffer management; indirect draw infrastructure |
+| `foliage_entities.rs` | 24 foliage entities (8 variants × 3 LODs) |
+| `foliage_render.rs` | Render-graph integration stubs |
+| `foliage_tiles.rs` | Foliage tile I/O |
+
+#### Other
+
+| Module | Responsibility |
+|--------|---------------|
+| `bake.rs` | `BakeConfig` + `bake_heightmap()` — full mip pyramid bake |
+| `level.rs` | `LevelDesc` JSON format; save/load/into_runtime |
+| `metadata.rs` | Baked dataset metadata |
+| `painted_splatmap.rs` | RGBA8 splatmap tile I/O |
+| `texture_arrays.rs` | Shared texture array allocation helpers |
 
 Shaders live in `assets/shaders/`:
 - `terrain_vertex.wgsl` — CDLOD vertex displacement and geomorphing
 - `terrain_fragment.wgsl` — per-pixel normals, PBR lighting, macro color
 - `terrain_prepass.wgsl` — depth prepass (no normal computation)
+- `grass_blade.wgsl` — GPU grass blade geometry, wind, slope/altitude filter

@@ -161,32 +161,32 @@ cargo run [--level <path.json>]
 |---|---|
 | CDLOD clipmap terrain renderer | ✅ Working |
 | Background tile streaming | ✅ Working |
-| Rapier physics heightfield | ✅ Working |
+| avian3d physics heightfield | ✅ Working |
 | Procedural slope/altitude material blending | ✅ Working |
 | World-aligned macro colour EXR | ✅ Working |
 | Import Heightmap wizard (bake + hot-reload) | ✅ Working |
 | File → Save / Load Landscape (JSON) | ✅ Working |
 | File → Preferences (default level) | ✅ Working |
 | Materials panel (per-slot tuning) | ✅ Working |
-| Detail / tiling textures (grass, rock, etc.) | ❌ Not started |
-| Splatmap painting | ❌ Not started |
-| Foliage / tree instancing | ❌ Not started |
+| GPU grass (vertex-shader instanced, no pre-bake) | ✅ Working |
+| SSAO (screen-space ambient occlusion) | ✅ Working |
+| Foliage shadow toggle | ✅ Working |
+| Detail / tiling textures (grass, rock, etc.) | ⚠️ In progress |
+| Splatmap painting | ⚠️ Infrastructure exists, painter not wired |
+| Tree / rock instancing | ❌ Not started |
 | Water bodies (lakes, rivers) | ❌ Not started |
 | Procedural heightmap generation | ❌ Not started |
-| GPU frustum culling for patches | ❌ Deferred (see loose_ends.md) |
+| GPU frustum culling for patches | ❌ Deferred |
 
 ---
 
 ## Roadmap (rough priority order)
 
-1. **Detail textures** — tiling albedo/normal/ORM per material slot, blended with macro colour by distance. Defined in `material_system.md`.
-2. **Splatmap painting** — RGBA8 tile hierarchy for material weights; in-editor brush tools.
-3. **Foliage instancing** — GPU-instanced grass/shrubs driven by splatmap density and slope.
-4. **Tree placement** — LOD-aware tree instances; collision capsules.
-5. **Water** — lake planes with shore blending; river splines with flow maps.
-6. **Procedural generation** — noise-based heightmap generation inside the editor (no external image required).
-
-See `material_system.md`, `loose_ends.md`, `performance_roadmap.md`, and `physics_roadmap.md` for detailed technical notes on each area.
+1. **Detail textures** — tiling albedo/normal/ORM per material slot, blended with macro colour by distance. Infrastructure (texture arrays, PBR binding) is partially in place.
+2. **Splatmap painting** — RGBA8 tile hierarchy for material weights; in-editor brush tools. Streaming infrastructure exists; painter UI not yet wired.
+3. **Tree / rock instancing** — LOD-aware instances; collision capsules. GPU grass system (`GpuGrassPlugin`) is the reference implementation.
+4. **Water** — lake planes with shore blending; river splines with flow maps.
+5. **Procedural generation** — noise-based heightmap generation inside the editor (no external image required).
 
 ---
 
