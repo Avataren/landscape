@@ -171,6 +171,7 @@ fn spawn_player_once(
         Collider::capsule(CAPSULE_RADIUS, CAPSULE_LENGTH),
         LockedAxes::ROTATION_LOCKED,
         LinearVelocity::default(),
+        TranslationInterpolation,
         Transform::from_xyz(spawn_xz.x, spawn_y, spawn_xz.y),
     ));
 }
@@ -330,21 +331,23 @@ fn clamp_player_to_terrain(
 }
 
 /// Drives the Camera3d Transform from the physics body (Walking mode only).
-/// Runs in Update, after FixedPostUpdate where Avian writeback completes.
+/// Runs in Update, after RunFixedMainLoop where TranslationInterpolation has
+/// already written the smoothed Transform — so the camera follows the
+/// interpolated body position rather than the raw fixed-step Position.
 fn sync_camera_to_body(
     mode: Res<CameraMode>,
-    body_q: Query<&Position, With<PlayerBody>>,
+    body_q: Query<&Transform, (With<PlayerBody>, Without<TerrainCamera>)>,
     mut cam_q: Query<&mut Transform, (With<TerrainCamera>, Without<PlayerBody>)>,
     look: Res<PlayerLook>,
 ) {
     if *mode != CameraMode::Walking {
         return;
     }
-    let (Ok(body_pos), Ok(mut cam_t)) = (body_q.single(), cam_q.single_mut()) else {
+    let (Ok(body_t), Ok(mut cam_t)) = (body_q.single(), cam_q.single_mut()) else {
         return;
     };
 
-    cam_t.translation = body_pos.0 + Vec3::Y * EYE_OFFSET;
+    cam_t.translation = body_t.translation + Vec3::Y * EYE_OFFSET;
     cam_t.rotation = Quat::from_rotation_y(look.yaw) * Quat::from_rotation_x(look.pitch);
 }
 
@@ -412,6 +415,7 @@ fn shoot_cube(
             CUBE_HALF_EXTENT * 2.0,
         ),
         LinearVelocity(velocity),
+        TransformInterpolation,
     ));
 }
 

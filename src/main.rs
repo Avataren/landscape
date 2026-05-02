@@ -165,7 +165,7 @@ fn main() {
                 .set(WindowPlugin {
                     primary_window: Some(Window {
                         title: WINDOW_TITLE.into(),
-                        present_mode: bevy::window::PresentMode::Immediate,
+                        present_mode: bevy::window::PresentMode::AutoNoVsync,
                         resolution: (1920u32, 1080u32).into(),
                         ..default()
                     }),
