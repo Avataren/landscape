@@ -1,4 +1,4 @@
-//! Foliage editor panel — controls for the two-LOD GPU grass system.
+//! Foliage editor panel — controls for the three-LOD GPU grass system.
 
 use crate::toolbar::ToolbarState;
 use bevy::prelude::*;
@@ -131,7 +131,7 @@ fn foliage_panel_system(
                     let mut s = cfg.far_spacing;
                     if ui
                         .add(
-                            egui::Slider::new(&mut s, min_far_sp..=5.0)
+                            egui::Slider::new(&mut s, min_far_sp..=8.0)
                                 .suffix(" m")
                                 .logarithmic(true),
                         )
@@ -162,15 +162,75 @@ fn foliage_panel_system(
                 );
             }
 
+            ui.add_space(6.0);
+
+            // ── Ultra-far LOD ──────────────────────────────────────────────
+            ui.strong("Ultra-far grass  (very sparse, long range)");
+            {
+                let min_ultra_sp = (cfg.far_spacing * 2.0).max(3.0);
+                if cfg.ultra_far_spacing < min_ultra_sp {
+                    cfg.ultra_far_spacing = min_ultra_sp;
+                }
+
+                let far_outer = cfg.near_range + cfg.far_range;
+                let max_ultra_ext =
+                    ((GRASS_MAX_GRID as f32 / 2.0) * cfg.ultra_far_spacing - far_outer).max(200.0);
+                ui.horizontal(|ui| {
+                    ui.label("Extension");
+                    let mut r = cfg.ultra_far_range;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut r, 100.0..=max_ultra_ext.max(3000.0))
+                                .suffix(" m past far")
+                                .integer(),
+                        )
+                        .changed()
+                    {
+                        cfg.ultra_far_range = r.min(max_ultra_ext);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Spacing  ");
+                    let mut s = cfg.ultra_far_spacing;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut s, min_ultra_sp..=20.0)
+                                .suffix(" m")
+                                .logarithmic(true),
+                        )
+                        .changed()
+                    {
+                        cfg.ultra_far_spacing = s.max(min_ultra_sp);
+                    }
+                });
+                let ug = cfg.ultra_far_grid_size();
+                let outer_r = cfg.ultra_far_outer_radius();
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{}×{} = {}k blades  |  {:.0}–{:.0} m from camera",
+                        ug,
+                        ug,
+                        ug * ug / 1000,
+                        far_outer,
+                        outer_r,
+                    ))
+                    .small()
+                    .color(egui::Color32::GRAY),
+                );
+            }
+
             // Total.
             let ng = cfg.near_grid_size();
             let fg = cfg.far_grid_size();
+            let ug = cfg.ultra_far_grid_size();
+            let total_k = (ng * ng + fg * fg + ug * ug) / 1000;
             ui.label(
                 egui::RichText::new(format!(
-                    "Total: {}k + {}k = {}k blades",
+                    "Total: {}k + {}k + {}k = {}k blades",
                     ng * ng / 1000,
                     fg * fg / 1000,
-                    (ng * ng + fg * fg) / 1000
+                    ug * ug / 1000,
+                    total_k,
                 ))
                 .small()
                 .color(egui::Color32::DARK_GRAY),
@@ -200,6 +260,15 @@ fn foliage_panel_system(
                     cfg.base_color.green = rgb[1];
                     cfg.base_color.blue = rgb[2];
                 }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Patch scale");
+                ui.add(
+                    egui::Slider::new(&mut cfg.grass_patch_scale, 10.0..=500.0)
+                        .suffix(" m")
+                        .logarithmic(true),
+                )
+                .on_hover_text("Spatial size of grass texture variant patches. Larger = fewer, bigger patches.");
             });
 
             ui.separator();

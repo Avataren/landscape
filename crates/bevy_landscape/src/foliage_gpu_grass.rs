@@ -46,6 +46,10 @@ pub struct GpuGrassConfig {
     pub far_spacing: f32,
     /// Extension in metres *past* the near edge (total far radius = near_range + far_range).
     pub far_range: f32,
+    /// Extension in metres *past* the far edge (very sparse, uses a coarser clipmap level).
+    pub ultra_far_range: f32,
+    /// Blade spacing for the ultra-far pass. Should be significantly coarser than far_spacing.
+    pub ultra_far_spacing: f32,
     pub blade_height: f32,
     pub blade_width: f32,
     /// Rise/run slope ratio above which grass fades (> 90 = disabled).
@@ -55,6 +59,10 @@ pub struct GpuGrassConfig {
     pub wind_strength: f32,
     pub wind_scale: f32,
     pub base_color: LinearRgba,
+    /// Spatial scale (metres) of the grass-variant noise patches.
+    /// Blades within a patch share the same base texture; adjacent patches
+    /// use different variants with a feathered boundary.
+    pub grass_patch_scale: f32,
     /// When true, altitude and slope limits are driven by material slot 0's
     /// procedural rules so grass only appears where the ground texture is active.
     pub link_to_slot0: bool,
@@ -73,6 +81,16 @@ impl GpuGrassConfig {
         let g = ((total * 2.0) / self.far_spacing).round() as u32;
         g.clamp(4, GRASS_MAX_GRID)
     }
+    pub fn ultra_far_grid_size(&self) -> u32 {
+        let total = self.near_range + self.far_range + self.ultra_far_range;
+        let g = ((total * 2.0) / self.ultra_far_spacing).round() as u32;
+        g.clamp(4, GRASS_MAX_GRID)
+    }
+    /// Outer radius of the ultra-far pass (metres from camera).
+    pub fn ultra_far_outer_radius(&self) -> f32 {
+        let g = self.ultra_far_grid_size();
+        (g as f32 * 0.5) * self.ultra_far_spacing
+    }
 }
 
 impl Default for GpuGrassConfig {
@@ -81,8 +99,10 @@ impl Default for GpuGrassConfig {
             enabled: true,
             near_spacing: 0.7,
             near_range: 80.0,
-            far_spacing: 1.5,
+            far_spacing: 2.0,
             far_range: 500.0,
+            ultra_far_range: 2000.0,
+            ultra_far_spacing: 8.0,
             blade_height: 0.7,
             blade_width: 0.7,
             slope_max: 0.7,
@@ -91,6 +111,7 @@ impl Default for GpuGrassConfig {
             wind_strength: 0.15,
             wind_scale: 0.035,
             base_color: LinearRgba::rgb(0.19, 0.42, 0.09),
+            grass_patch_scale: 80.0,
             link_to_slot0: false,
             cast_shadows: false,
         }
@@ -189,12 +210,13 @@ fn load_grass_textures(mut commands: Commands, asset_server: Res<AssetServer>) {
 }
 
 /// Once all 12 PNGs are loaded, combines each group into a texture_2d_array
-/// with a full mip chain and patches both grass materials.
+/// with a full mip chain and patches all three grass materials.
 fn combine_grass_textures(
     mut loader: ResMut<GrassTextureLoader>,
     mut images: ResMut<Assets<Image>>,
     near_q: Query<&MeshMaterial3d<GpuGrassMaterial>, With<GrassEntityNear>>,
     far_q: Query<&MeshMaterial3d<GpuGrassMaterial>, With<GrassEntityFar>>,
+    ultra_far_q: Query<&MeshMaterial3d<GpuGrassMaterial>, With<GrassEntityUltraFar>>,
     mut materials: ResMut<Assets<GpuGrassMaterial>>,
 ) {
     if loader.ready {
@@ -267,6 +289,14 @@ fn combine_grass_textures(
             mat.specular_arr = specular_h.clone();
         }
     }
+    if let Ok(mat_handle) = ultra_far_q.single() {
+        if let Some(mat) = materials.get_mut(&mat_handle.0) {
+            mat.diffuse_arr = diffuse_h.clone();
+            mat.normal_arr = normal_h.clone();
+            mat.opacity_arr = opacity_h.clone();
+            mat.specular_arr = specular_h.clone();
+        }
+    }
 
     loader.ready = true;
     info!("Grass textures combined into arrays and applied.");
@@ -278,6 +308,8 @@ fn combine_grass_textures(
 pub struct GrassEntityNear;
 #[derive(Component)]
 pub struct GrassEntityFar;
+#[derive(Component)]
+pub struct GrassEntityUltraFar;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -322,6 +354,7 @@ fn spawn_grass_entities(
         config.near_grid_size(),
         config.near_spacing,
         0.0,
+        config.near_range,
         Vec3::ZERO,
         0.0,
         fallback_clip,
@@ -345,12 +378,15 @@ fn spawn_grass_entities(
         GrassEntityNear,
     ));
 
-    let inner_r_sq = config.near_range * config.near_range;
+    // Far pass: inner fade-in starts at 75% of near_range (overlap band).
+    let far_inner_r_sq = (config.near_range * 0.75).powi(2);
+    let far_outer_r = config.near_range + config.far_range;
     let far_params = build_params(
         &config,
         config.far_grid_size(),
         config.far_spacing,
-        inner_r_sq,
+        far_inner_r_sq,
+        far_outer_r,
         Vec3::ZERO,
         0.0,
         fallback_clip,
@@ -358,8 +394,40 @@ fn spawn_grass_entities(
         0.0,
     );
     let far_mat = materials.add(GpuGrassMaterial {
-        height_tex: fallback_height,
+        height_tex: fallback_height.clone(),
         params: far_params,
+        diffuse_arr: fallback_diffuse.clone(),
+        normal_arr: fallback_normal.clone(),
+        opacity_arr: fallback_opacity.clone(),
+        specular_arr: fallback_specular.clone(),
+    });
+    commands.spawn((
+        Mesh3d(mesh_handle.clone()),
+        MeshMaterial3d(far_mat),
+        Transform::default(),
+        NoFrustumCulling,
+        NotShadowCaster,
+        GrassEntityFar,
+    ));
+
+    // Ultra-far pass: inner fade-in starts at 75% of far outer radius.
+    let ultra_inner_r_sq = (far_outer_r * 0.75).powi(2);
+    let ultra_outer_r = config.ultra_far_outer_radius();
+    let ultra_params = build_params(
+        &config,
+        config.ultra_far_grid_size(),
+        config.ultra_far_spacing,
+        ultra_inner_r_sq,
+        ultra_outer_r,
+        Vec3::ZERO,
+        0.0,
+        fallback_clip,
+        fallback_world,
+        0.0,
+    );
+    let ultra_mat = materials.add(GpuGrassMaterial {
+        height_tex: fallback_height,
+        params: ultra_params,
         diffuse_arr: fallback_diffuse,
         normal_arr: fallback_normal,
         opacity_arr: fallback_opacity,
@@ -367,11 +435,11 @@ fn spawn_grass_entities(
     });
     commands.spawn((
         Mesh3d(mesh_handle),
-        MeshMaterial3d(far_mat),
+        MeshMaterial3d(ultra_mat),
         Transform::default(),
         NoFrustumCulling,
         NotShadowCaster,
-        GrassEntityFar,
+        GrassEntityUltraFar,
     ));
 }
 
@@ -428,6 +496,7 @@ fn update_grass_materials(
     debug_cfg: Option<Res<crate::terrain::debug::TerrainDebugConfig>>,
     near_q: Query<&MeshMaterial3d<GpuGrassMaterial>, With<GrassEntityNear>>,
     far_q: Query<&MeshMaterial3d<GpuGrassMaterial>, With<GrassEntityFar>>,
+    ultra_far_q: Query<&MeshMaterial3d<GpuGrassMaterial>, With<GrassEntityUltraFar>>,
     mut materials: ResMut<Assets<GpuGrassMaterial>>,
     config: Res<GpuGrassConfig>,
     time: Res<Time>,
@@ -463,15 +532,14 @@ fn update_grass_materials(
     let config = effective.as_ref();
 
     let fallback_clip = Vec4::new(0.0, 0.0, 1.0 / 1_000_000.0, 1.0);
-    let (clip_level_near, clip_level_far) =
+    let (clip_level_near, clip_level_far, clip_level_ultra) =
         if let (Some(cs), Some(tc)) = (clipmap_state.as_deref(), terrain_config.as_deref()) {
             let scales: Vec<f32> = (0..tc.active_clipmap_levels())
                 .map(|l| level_scale(tc.lod0_mesh_spacing, l))
                 .collect();
             let levels = compute_clip_levels(tc, &cs.last_clip_centers, &scales);
 
-            // Near always uses LOD 0. Store the layer index in clip_level.x
-            // (ring_center.x) since sample_height never reads it.
+            // Near always uses LOD 0.
             let near = Vec4::new(0.0, levels[0].y, levels[0].z, levels[0].w);
 
             // Far: smallest LOD whose half-span covers near_range + far_range.
@@ -484,9 +552,19 @@ fn update_grass_materials(
                 .unwrap_or((levels.len() - 1, *levels.last().unwrap_or(&levels[0])));
             let far = Vec4::new(far_idx as f32, far_lv.y, far_lv.z, far_lv.w);
 
-            (near, far)
+            // Ultra-far: smallest LOD whose half-span covers the full ultra radius.
+            let ultra_total = config.near_range + config.far_range + config.ultra_far_range;
+            let (ultra_idx, ultra_lv) = levels
+                .iter()
+                .copied()
+                .enumerate()
+                .find(|(_, lv)| (0.5 / lv.z) >= ultra_total)
+                .unwrap_or((levels.len() - 1, *levels.last().unwrap_or(&levels[0])));
+            let ultra = Vec4::new(ultra_idx as f32, ultra_lv.y, ultra_lv.z, ultra_lv.w);
+
+            (near, far, ultra)
         } else {
-            (fallback_clip, fallback_clip)
+            (fallback_clip, fallback_clip, fallback_clip)
         };
 
     let world_bounds = source_state
@@ -505,10 +583,11 @@ fn update_grass_materials(
     if let Ok(h) = near_q.single() {
         if let Some(mat) = materials.get_mut(&h.0) {
             mat.params = build_params(
-                &config,
+                config,
                 config.near_grid_size(),
                 config.near_spacing,
                 0.0,
+                config.near_range,
                 cam.translation,
                 wt,
                 clip_level_near,
@@ -522,15 +601,39 @@ fn update_grass_materials(
     }
     if let Ok(h) = far_q.single() {
         if let Some(mat) = materials.get_mut(&h.0) {
-            let inner_r_sq = config.near_range * config.near_range;
+            let far_inner_r_sq = (config.near_range * 0.75).powi(2);
+            let far_outer_r = config.near_range + config.far_range;
             mat.params = build_params(
-                &config,
+                config,
                 config.far_grid_size(),
                 config.far_spacing,
-                inner_r_sq,
+                far_inner_r_sq,
+                far_outer_r,
                 cam.translation,
                 wt,
                 clip_level_far,
+                world_bounds,
+                debug_mode,
+            );
+            if let Some(ref hh) = height_handle {
+                mat.height_tex = hh.clone();
+            }
+        }
+    }
+    if let Ok(h) = ultra_far_q.single() {
+        if let Some(mat) = materials.get_mut(&h.0) {
+            let far_outer_r = config.near_range + config.far_range;
+            let ultra_inner_r_sq = (far_outer_r * 0.75).powi(2);
+            let ultra_outer_r = config.ultra_far_outer_radius();
+            mat.params = build_params(
+                config,
+                config.ultra_far_grid_size(),
+                config.ultra_far_spacing,
+                ultra_inner_r_sq,
+                ultra_outer_r,
+                cam.translation,
+                wt,
+                clip_level_ultra,
                 world_bounds,
                 debug_mode,
             );
@@ -546,6 +649,7 @@ fn build_params(
     grid_size: u32,
     spacing: f32,
     inner_radius_sq: f32,
+    outer_radius: f32,
     camera_pos: Vec3,
     wind_time: f32,
     clip_level_0: Vec4,
@@ -567,11 +671,12 @@ fn build_params(
             wind_time,
             config.wind_strength,
         ),
+        // y = outer_radius (fade-out edge), z = patch_scale (variant noise), w = debug_mode
         wind_color: Vec4::new(
             config.wind_scale,
-            config.base_color.red,
-            config.base_color.green,
-            debug_mode, // w = debug_mode (0 = normal, 1 = normals as colour)
+            outer_radius,
+            config.grass_patch_scale,
+            debug_mode,
         ),
         world_bounds,
     }
@@ -583,12 +688,13 @@ fn sync_grass_shadow_casting(
     config: Res<GpuGrassConfig>,
     near_q: Query<Entity, With<GrassEntityNear>>,
     far_q: Query<Entity, With<GrassEntityFar>>,
+    ultra_far_q: Query<Entity, With<GrassEntityUltraFar>>,
     mut commands: Commands,
 ) {
     if !config.is_changed() {
         return;
     }
-    for entity in near_q.iter().chain(far_q.iter()) {
+    for entity in near_q.iter().chain(far_q.iter()).chain(ultra_far_q.iter()) {
         if config.cast_shadows {
             commands.entity(entity).remove::<NotShadowCaster>();
         } else {

@@ -16,7 +16,7 @@ struct GrassParams {
     clip_level:   vec4<f32>,  // xy=ring_center XZ, z=inv_span, w=texel_ws
     blade:        vec4<f32>,  // x=inner_radius_sq, y=height, z=width, w=slope_max
     alt_wind:     vec4<f32>,  // x=alt_min, y=alt_max, z=wind_time, w=wind_strength
-    wind_color:   vec4<f32>,  // x=wind_scale, yzw=fallback RGB
+    wind_color:   vec4<f32>,  // x=wind_scale, y=outer_radius, z=patch_scale, w=debug_mode
     world_bounds: vec4<f32>,  // xy=world_min XZ, zw=world_max XZ
 }
 
@@ -43,6 +43,22 @@ fn uhash(n: u32) -> u32 {
 }
 fn fhash1(n: u32) -> f32       { return f32(uhash(n)) * (1.0 / 4294967296.0); }
 fn fhash2(n: u32) -> vec2<f32> { return vec2<f32>(fhash1(n), fhash1(n + 1u)); }
+
+// ── Patch noise (must match grass_blade.wgsl) ─────────────────────────────────
+fn patch_noise(p: vec2<f32>) -> f32 {
+    let i = vec2<i32>(floor(p));
+    let f = fract(p);
+    let s = f * f * (3.0 - 2.0 * f);
+    let ix  = bitcast<u32>(i.x);
+    let iy  = bitcast<u32>(i.y);
+    let ix1 = bitcast<u32>(i.x + 1);
+    let iy1 = bitcast<u32>(i.y + 1);
+    let a = fhash1(ix  * 2654435761u ^ iy  * 2246822519u);
+    let b = fhash1(ix1 * 2654435761u ^ iy  * 2246822519u);
+    let c = fhash1(ix  * 2654435761u ^ iy1 * 2246822519u);
+    let d = fhash1(ix1 * 2654435761u ^ iy1 * 2246822519u);
+    return mix(mix(a, b, s.x), mix(c, d, s.x), s.y);
+}
 
 // ── Toroidal clipmap LOD-0 sample ─────────────────────────────────────────────
 fn sample_height(xz: vec2<f32>) -> f32 {
@@ -122,18 +138,30 @@ fn vertex(@builtin(vertex_index) vid: u32) -> VertexOutput {
     wx += jitter.x;
     wz += jitter.y;
 
+    // Distance from camera — used by both inner and outer fade checks.
+    let dx = wx - camera_x;
+    let dz = wz - camera_z;
+    let dist = length(vec2<f32>(dx, dz));
+
+    // Inner fade-in (far and ultra-far passes only).
     if inner_radius_sq > 0.0 {
-        let dx = wx - camera_x; let dz = wz - camera_z;
-        let dist_sq = dx * dx + dz * dz;
-        if dist_sq < inner_radius_sq {
-            out.clip_pos = OFFSCREEN; return out;
+        let inner_r = sqrt(inner_radius_sq);
+        if dist < inner_r { out.clip_pos = OFFSCREEN; return out; }
+        let inner_fade_end = inner_r * 1.333333;
+        if dist < inner_fade_end {
+            let t = smoothstep(inner_r, inner_fade_end, dist);
+            if fhash1(stable_seed ^ 0xf4d301u) > t { out.clip_pos = OFFSCREEN; return out; }
         }
-        let dist      = sqrt(dist_sq);
-        let inner_r   = sqrt(inner_radius_sq);
-        let outer_r   = f32(grid_size) * 0.5 * spacing;
-        let keep_prob = 1.0 - smoothstep(inner_r, outer_r, dist);
-        if fhash1(stable_seed ^ 0xf4d301u) > keep_prob {
-            out.clip_pos = OFFSCREEN; return out;
+    }
+
+    // Outer fade-out (all passes).
+    let outer_r = params.wind_color.y;
+    if outer_r > 0.0 {
+        if dist >= outer_r { out.clip_pos = OFFSCREEN; return out; }
+        let outer_fade_start = outer_r * 0.85;
+        if dist > outer_fade_start {
+            let t = 1.0 - smoothstep(outer_fade_start, outer_r, dist);
+            if fhash1(stable_seed ^ 0x8f9a1b2cu) > t { out.clip_pos = OFFSCREEN; return out; }
         }
     }
 
@@ -161,7 +189,23 @@ fn vertex(@builtin(vertex_index) vid: u32) -> VertexOutput {
     let cos_r = cos(rot_y);
     let sin_r = sin(rot_y);
 
-    let variant = uhash(stable_seed ^ 0x12345678u) % 3u;
+    // Patch noise variant selection — must match grass_blade.wgsl exactly.
+    let patch_scale = max(params.wind_color.z, 1.0);
+    let pn = patch_noise(vec2<f32>(wx, wz) / patch_scale);
+    let zone_f    = pn * 3.0;
+    let zone      = u32(zone_f) % 3u;
+    let zone_frac = fract(zone_f);
+    let border    = 0.1;
+    var variant: u32;
+    if zone_frac < border {
+        let t = smoothstep(0.0, border, zone_frac);
+        variant = select((zone + 2u) % 3u, zone, fhash1(stable_seed ^ 0x12345678u) < t);
+    } else if zone_frac > (1.0 - border) {
+        let t = smoothstep(1.0 - border, 1.0, zone_frac);
+        variant = select(zone, (zone + 1u) % 3u, fhash1(stable_seed ^ 0x12345678u) < t);
+    } else {
+        variant = zone;
+    }
 
     let quad_idx = local_vert / 6u;
     let tri_vert = local_vert % 6u;

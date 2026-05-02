@@ -38,7 +38,7 @@ struct GrassParams {
     clip_level:   vec4<f32>,  // xy=ring_center XZ, z=inv_span, w=texel_ws
     blade:        vec4<f32>,  // x=inner_radius_sq, y=height, z=width, w=slope_max
     alt_wind:     vec4<f32>,  // x=alt_min, y=alt_max, z=wind_time, w=wind_strength
-    wind_color:   vec4<f32>,  // x=wind_scale, yz=unused, w=debug_mode
+    wind_color:   vec4<f32>,  // x=wind_scale, y=outer_radius, z=patch_scale, w=debug_mode
     world_bounds: vec4<f32>,  // xy=world_min XZ, zw=world_max XZ
 }
 
@@ -107,6 +107,24 @@ fn sample_height(xz: vec2<f32>) -> f32 {
     return mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
 }
 
+// ── Patch noise for spatially-coherent grass variant patches ──────────────────
+// Returns a smooth 0..1 value over a grid of random cells.
+// Uses bitcast<u32> on signed cell indices to handle negative world coordinates.
+fn patch_noise(p: vec2<f32>) -> f32 {
+    let i = vec2<i32>(floor(p));
+    let f = fract(p);
+    let s = f * f * (3.0 - 2.0 * f); // smoothstep blend
+    let ix  = bitcast<u32>(i.x);
+    let iy  = bitcast<u32>(i.y);
+    let ix1 = bitcast<u32>(i.x + 1);
+    let iy1 = bitcast<u32>(i.y + 1);
+    let a = fhash1(ix  * 2654435761u ^ iy  * 2246822519u);
+    let b = fhash1(ix1 * 2654435761u ^ iy  * 2246822519u);
+    let c = fhash1(ix  * 2654435761u ^ iy1 * 2246822519u);
+    let d = fhash1(ix1 * 2654435761u ^ iy1 * 2246822519u);
+    return mix(mix(a, b, s.x), mix(c, d, s.x), s.y);
+}
+
 // ── Vertex shader ─────────────────────────────────────────────────────────────
 @vertex
 fn vertex(@builtin(vertex_index) vid: u32) -> VertexOutput {
@@ -155,20 +173,33 @@ fn vertex(@builtin(vertex_index) vid: u32) -> VertexOutput {
     wx += jitter.x;
     wz += jitter.y;
 
-    // Inner radius cull + outer density fade (far LOD only).
+    // Distance from camera — used by both inner and outer fade checks.
+    let dx = wx - camera_x;
+    let dz = wz - camera_z;
+    let dist = length(vec2<f32>(dx, dz));
+
+    // Inner fade-in: far and ultra-far passes only (inner_radius_sq > 0).
+    // Hard cull below inner_r; smoothstep fade-in from inner_r to inner_r*1.333
+    // (= the near/far boundary), creating a crossfade overlap with the previous pass.
     if inner_radius_sq > 0.0 {
-        let dx = wx - camera_x; let dz = wz - camera_z;
-        let dist_sq = dx * dx + dz * dz;
-        if dist_sq < inner_radius_sq {
-            out.clip_pos = OFFSCREEN; return out;
+        let inner_r = sqrt(inner_radius_sq);
+        if dist < inner_r { out.clip_pos = OFFSCREEN; return out; }
+        let inner_fade_end = inner_r * 1.333333;
+        if dist < inner_fade_end {
+            let t = smoothstep(inner_r, inner_fade_end, dist);
+            if fhash1(stable_seed ^ 0xf4d301u) > t { out.clip_pos = OFFSCREEN; return out; }
         }
-        // Fade density linearly from 1 at inner edge to 0 at outer edge.
-        let dist      = sqrt(dist_sq);
-        let inner_r   = sqrt(inner_radius_sq);
-        let outer_r   = f32(grid_size) * 0.5 * spacing;
-        let keep_prob = 1.0 - smoothstep(inner_r, outer_r, dist);
-        if fhash1(stable_seed ^ 0xf4d301u) > keep_prob {
-            out.clip_pos = OFFSCREEN; return out;
+    }
+
+    // Outer fade-out: all passes. outer_r = params.wind_color.y (0 = disabled).
+    // Fade from 85% of outer_r to outer_r; hard cull at and beyond outer_r.
+    let outer_r = params.wind_color.y;
+    if outer_r > 0.0 {
+        if dist >= outer_r { out.clip_pos = OFFSCREEN; return out; }
+        let outer_fade_start = outer_r * 0.85;
+        if dist > outer_fade_start {
+            let t = 1.0 - smoothstep(outer_fade_start, outer_r, dist);
+            if fhash1(stable_seed ^ 0x8f9a1b2cu) > t { out.clip_pos = OFFSCREEN; return out; }
         }
     }
 
@@ -200,8 +231,24 @@ fn vertex(@builtin(vertex_index) vid: u32) -> VertexOutput {
     let cos_r = cos(rot_y);
     let sin_r = sin(rot_y);
 
-    // Texture variant (0, 1 or 2).
-    let variant = uhash(stable_seed ^ 0x12345678u) % 3u;
+    // Texture variant from spatial patch noise — coherent patches of each grass
+    // type, with a feathered 10% transition band at patch boundaries.
+    let patch_scale = max(params.wind_color.z, 1.0);
+    let pn = patch_noise(vec2<f32>(wx, wz) / patch_scale);
+    let zone_f   = pn * 3.0;
+    let zone     = u32(zone_f) % 3u;
+    let zone_frac = fract(zone_f);
+    let border   = 0.1;
+    var variant: u32;
+    if zone_frac < border {
+        let t = smoothstep(0.0, border, zone_frac);
+        variant = select((zone + 2u) % 3u, zone, fhash1(stable_seed ^ 0x12345678u) < t);
+    } else if zone_frac > (1.0 - border) {
+        let t = smoothstep(1.0 - border, 1.0, zone_frac);
+        variant = select(zone, (zone + 1u) % 3u, fhash1(stable_seed ^ 0x12345678u) < t);
+    } else {
+        variant = zone;
+    }
 
     // Blade geometry — 2 crossed quads, 6 verts each.
     let quad_idx = local_vert / 6u;
@@ -294,9 +341,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let nm_ts = textureSample(normal_arr, normal_samp, uv, vi).xyz * 2.0 - 1.0;
     let T     = normalize(in.tangent);
     let B     = normalize(in.bitangent);
-    // N_geo: geometry normal from vertex — used for shadow acne bias.
+    // N_geo: geometry normal from vertex — used for shadow acne bias only.
     let N_geo = normalize(in.world_n);
-    // world_n: normal-mapped normal — used for all lighting calculations.
+    // world_n: normal-mapped normal used for specular and fine shading detail.
+    // NOTE: do NOT use world_n for diffuse NdotL — its XZ tilt varies with
+    // random blade rotation, which makes ~half the blades dark. Grass is thin
+    // and light scatters through it, so diffuse uses the geometry (world-up) normal.
     let world_n = normalize(T * nm_ts.x + B * nm_ts.y + N_geo * nm_ts.z);
 
     // Debug mode: 1 = normals as colour (mirrors terrain F8 debug).
@@ -322,7 +372,10 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // --- Directional lights (sun etc.) ---
     for (var i: u32 = 0u; i < lights.n_directional_lights; i++) {
         let light = lights.directional_lights[i];
-        let ndotl = max(dot(world_n, light.direction_to_light), 0.0);
+        // Use abs() for two-sided diffuse: grass blades are thin and light
+        // scatters through them. Random blade rotation means half face away
+        // from the sun — abs prevents those blades going dark.
+        let ndotl = abs(dot(N_geo, light.direction_to_light));
 
         var shadow = 1.0;
         if (light.flags & DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
@@ -330,6 +383,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             shadow = fetch_directional_shadow(i, vec4<f32>(in.world_pos, 1.0), N_geo, view_z);
         }
 
+        // Specular uses world_n (normal-mapped) and max() — no backface spec.
         let half_vec = normalize(light.direction_to_light + view_dir);
         let spec = pow(max(0.0, dot(world_n, half_vec)), 32.0) * spec_val * 0.3;
         direct += (diffuse * ndotl + vec3<f32>(spec)) * shadow * light.color.rgb;
@@ -346,7 +400,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let to_frag  = (*light).position_radius.xyz - in.world_pos;
         let dist_sq  = dot(to_frag, to_frag);
         let L        = normalize(to_frag);
-        let ndotl    = max(dot(world_n, L), 0.0);
+        let ndotl    = abs(dot(N_geo, L));
         let atten    = distance_attenuation(dist_sq, (*light).color_inverse_square_range.w);
 
         var shadow = 1.0;
@@ -365,7 +419,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let to_frag  = (*light).position_radius.xyz - in.world_pos;
         let dist_sq  = dot(to_frag, to_frag);
         let L        = normalize(to_frag);
-        let ndotl    = max(dot(world_n, L), 0.0);
+        let ndotl    = abs(dot(N_geo, L));
         let atten    = distance_attenuation(dist_sq, (*light).color_inverse_square_range.w);
 
         var spot_dir = vec3<f32>((*light).light_custom_data.x, 0.0, (*light).light_custom_data.y);
@@ -389,7 +443,12 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // --- Ambient (hemisphere + scene ambient) ---
-    let sky_t      = saturate(world_n.y * 0.5 + 0.5);
+    // Use the geometry normal (world-up) for the hemisphere term so that all
+    // blades receive the same ambient regardless of their random yaw rotation.
+    // The normal-mapped world_n varies with yaw because T/B are rotation-
+    // dependent, which would otherwise make same-type blades appear darker or
+    // lighter based on orientation rather than scene lighting.
+    let sky_t      = saturate(N_geo.y * 0.5 + 0.5);
     let sky_col    = vec3<f32>(0.15, 0.25, 0.40);
     let gnd_col    = vec3<f32>(0.04, 0.03, 0.02);
     let hemisphere = mix(gnd_col, sky_col, sky_t);
