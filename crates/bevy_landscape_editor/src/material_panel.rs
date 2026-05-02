@@ -16,7 +16,7 @@ use bevy::{
     prelude::*,
 };
 use bevy_egui::{egui, EguiContexts, EguiPrimaryContextPass};
-use bevy_landscape::{MaterialLibrary, MaterialSlot};
+use bevy_landscape::{MaterialLibrary, MaterialSlot, ProceduralRules};
 
 use bevy_landscape::{PbrRebuildProgress, PbrTexturesDirty};
 
@@ -30,6 +30,8 @@ use crate::texture_browser::TextureBrowser;
 pub struct MaterialPanelState {
     pub open: bool,
     pub selected_slot: Option<usize>,
+    /// `true` while waiting for the user to confirm a "Reset to Defaults" action.
+    pub confirm_reset: bool,
 }
 
 pub struct MaterialPanelPlugin;
@@ -144,7 +146,47 @@ fn draw_material_library(
             panel.selected_slot = Some(library.slots.len() - 1);
             pbr_dirty.0 = true;
         }
+        if ui
+            .button("⟳ Reset to Defaults")
+            .on_hover_text(
+                "Replaces all slots with a 4-layer sand / forest / rock / snow preset.",
+            )
+            .clicked()
+        {
+            panel.confirm_reset = true;
+        }
     });
+
+    if panel.confirm_reset {
+        egui::Frame::new()
+            .fill(egui::Color32::from_rgb(80, 30, 30))
+            .inner_margin(egui::Margin::same(6))
+            .corner_radius(4)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("⚠ Replace all slots with defaults?");
+                    let mut do_confirm = false;
+                    let mut do_cancel = false;
+                    if ui.button("Yes, reset").clicked() {
+                        do_confirm = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        do_cancel = true;
+                    }
+                    if do_confirm {
+                        let max = library.max_slots;
+                        let macro_loaded = library.macro_color_loaded;
+                        *library = default_material_library(max);
+                        library.macro_color_loaded = macro_loaded;
+                        panel.selected_slot = Some(0);
+                        pbr_dirty.0 = true;
+                        panel.confirm_reset = false;
+                    } else if do_cancel {
+                        panel.confirm_reset = false;
+                    }
+                });
+            });
+    }
 
     ui.horizontal(|ui| {
         let loaded = library.macro_color_loaded;
@@ -692,4 +734,131 @@ fn tint_color(rgb: [f32; 3]) -> egui::Color32 {
         ((rgb[1].clamp(0.0, 1.0) * 255.0) + 0.5) as u8,
         ((rgb[2].clamp(0.0, 1.0) * 255.0) + 0.5) as u8,
     )
+}
+
+// ---------------------------------------------------------------------------
+// Default material preset
+// ---------------------------------------------------------------------------
+
+/// Builds a sensible 4-slot `MaterialLibrary` using the bundled texture sets
+/// found in `assets/textures/`.  Slot paths are stored relative to `assets/`
+/// (the PBR build functions prepend that prefix).
+///
+/// The four layers cover a typical mid-latitude landscape:
+///   0 – Sand/beach   (low altitude, all slopes)
+///   1 – Forest floor (mid altitude, gentle slopes ≤ 40°)
+///   2 – Rock         (steep slopes, all altitudes)
+///   3 – Snow         (high altitude, slopes ≤ 60°)
+pub fn default_material_library(max_slots: usize) -> MaterialLibrary {
+    use bevy::math::Vec2;
+    use std::path::PathBuf;
+
+    let make_path = |p: &str| Some(PathBuf::from(p));
+
+    let sand = MaterialSlot {
+        name: "Sand".into(),
+        visible: true,
+        tint: [0.85, 0.76, 0.56],
+        albedo_path: make_path(
+            "textures/coast_sand_03_4k.blend/textures/coast_sand_03_diff_4k.jpg",
+        ),
+        normal_path: make_path(
+            "textures/coast_sand_03_4k.blend/textures/coast_sand_03_nor_gl_4k.png",
+        ),
+        orm_path: None,
+        height_path: make_path(
+            "textures/coast_sand_03_4k.blend/textures/coast_sand_03_disp_4k.png",
+        ),
+        fine_scale_m: 4.0,
+        coarse_scale_mul: 5.0,
+        triplanar_threshold_deg: 45.0,
+        height_blend_sharpness: 0.12,
+        procedural: ProceduralRules {
+            altitude_range_m: Vec2::new(-200.0, 400.0),
+            slope_range_deg: Vec2::new(0.0, 90.0),
+            ..ProceduralRules::default()
+        },
+    };
+
+    let forest = MaterialSlot {
+        name: "Forest Floor".into(),
+        visible: true,
+        tint: [0.54, 0.65, 0.42],
+        albedo_path: make_path(
+            "textures/forrest_ground_01_4k.blend/textures/forrest_ground_01_diff_4k.jpg",
+        ),
+        normal_path: make_path(
+            "textures/forrest_ground_01_4k.blend/textures/forrest_ground_01_nor_gl_4k.png",
+        ),
+        orm_path: None,
+        height_path: make_path(
+            "textures/forrest_ground_01_4k.blend/textures/forrest_ground_01_disp_4k.png",
+        ),
+        fine_scale_m: 3.0,
+        coarse_scale_mul: 5.0,
+        triplanar_threshold_deg: 45.0,
+        height_blend_sharpness: 0.10,
+        procedural: ProceduralRules {
+            altitude_range_m: Vec2::new(200.0, 1000.0),
+            slope_range_deg: Vec2::new(0.0, 40.0),
+            ..ProceduralRules::default()
+        },
+    };
+
+    let rock = MaterialSlot {
+        name: "Rock".into(),
+        visible: true,
+        tint: [0.60, 0.56, 0.50],
+        albedo_path: make_path(
+            "textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_diff_4k.jpg",
+        ),
+        normal_path: make_path(
+            "textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_nor_gl_4k.png",
+        ),
+        orm_path: None,
+        height_path: make_path(
+            "textures/rocky_terrain_02_4k.blend/textures/rocky_terrain_02_disp_4k.png",
+        ),
+        fine_scale_m: 2.5,
+        coarse_scale_mul: 5.0,
+        triplanar_threshold_deg: 30.0,
+        height_blend_sharpness: 0.15,
+        procedural: ProceduralRules {
+            altitude_range_m: Vec2::new(-200.0, 3000.0),
+            slope_range_deg: Vec2::new(30.0, 90.0),
+            ..ProceduralRules::default()
+        },
+    };
+
+    let snow = MaterialSlot {
+        name: "Snow".into(),
+        visible: true,
+        tint: [0.90, 0.92, 0.96],
+        albedo_path: make_path(
+            "textures/snow_02_4k.blend/textures/snow_02_diff_4k.jpg",
+        ),
+        normal_path: make_path(
+            "textures/snow_02_4k.blend/textures/snow_02_nor_gl_4k.png",
+        ),
+        orm_path: None,
+        height_path: make_path(
+            "textures/snow_02_4k.blend/textures/snow_02_disp_4k.png",
+        ),
+        fine_scale_m: 5.0,
+        coarse_scale_mul: 4.0,
+        triplanar_threshold_deg: 60.0,
+        height_blend_sharpness: 0.08,
+        procedural: ProceduralRules {
+            altitude_range_m: Vec2::new(1200.0, 10_000.0),
+            slope_range_deg: Vec2::new(0.0, 60.0),
+            ..ProceduralRules::default()
+        },
+    };
+
+    MaterialLibrary {
+        slots: vec![sand, forest, rock, snow],
+        max_slots,
+        use_macro_color_override: false,
+        ..MaterialLibrary::default()
+    }
 }

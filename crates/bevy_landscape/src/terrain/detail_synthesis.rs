@@ -390,6 +390,15 @@ fn prepare_detail_synthesis_bind_groups(
         || persist.last_height_scale != state.height_scale
         || persist.last_source_spacing != state.source_spacing;
 
+    // Only advance the dirty-state cache when the pipeline is actually ready to
+    // execute.  If we cache lod_params before the pipeline compiles, the node
+    // skips the dispatch but the prepare system sees "nothing changed" on the
+    // next frame, so synthesis never runs even after the pipeline becomes ready.
+    let pipeline_ready = matches!(
+        pipeline_cache.get_compute_pipeline_state(pipeline.pipeline_id),
+        CachedPipelineState::Ok(_)
+    );
+
     let layout = pipeline_cache.get_bind_group_layout(&pipeline.layout_desc);
     let mut dispatches: Vec<BindGroup> = Vec::new();
     let mut active = [false; MAX_SUPPORTED_CLIPMAP_LEVELS];
@@ -412,7 +421,12 @@ fn prepare_detail_synthesis_bind_groups(
                 0,
                 bytemuck::bytes_of(&gpu_params),
             );
-            persist.last_lod_params[idx] = Some(lp.clone());
+            // Only cache params once the pipeline can actually execute them.
+            // Caching before the pipeline is ready would suppress the re-dispatch
+            // on the first frame the pipeline becomes available.
+            if pipeline_ready {
+                persist.last_lod_params[idx] = Some(lp.clone());
+            }
         }
 
         // Build (or rebuild) the bind group if invalidated.
@@ -470,15 +484,19 @@ fn prepare_detail_synthesis_bind_groups(
         }
     }
 
-    // Update global snapshot.
-    persist.last_clipmap_id = Some(clipmap_id);
-    persist.last_source_id = Some(source_id);
-    persist.last_source_origin = state.source_origin;
-    persist.last_source_extent = state.source_extent;
-    persist.last_height_scale = state.height_scale;
-    persist.last_source_spacing = state.source_spacing;
-    persist.last_config = Some(state.config.clone());
-    persist.last_resolution = state.resolution;
+    // Only advance the global snapshot once the pipeline is ready; otherwise the
+    // same "first-run" dirty flags re-trigger on the next frame until synthesis
+    // actually executes.
+    if pipeline_ready {
+        persist.last_clipmap_id = Some(clipmap_id);
+        persist.last_source_id = Some(source_id);
+        persist.last_source_origin = state.source_origin;
+        persist.last_source_extent = state.source_extent;
+        persist.last_height_scale = state.height_scale;
+        persist.last_source_spacing = state.source_spacing;
+        persist.last_config = Some(state.config.clone());
+        persist.last_resolution = state.resolution;
+    }
 
     commands.insert_resource(DetailSynthesisBindGroups { dispatches });
 }
